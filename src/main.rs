@@ -1,33 +1,28 @@
 #![doc = include_str!("../README.md")]
 
-use futures::{future::Either, prelude::*, select};
+use futures::{
+    prelude::*, select,
+    // stream::{Stream},
+};
 use async_std::stream;
 use libp2p::{
-    core::{muxing::StreamMuxerBox, transport::OrTransport, upgrade},
-    gossipsub, identity, mdns, noise, request_response,
-    swarm::NetworkBehaviour,
-    swarm::{StreamProtocol, SwarmBuilder, SwarmEvent},
-    tcp, yamux, PeerId, Transport,
+    gossipsub, mdns, request_response,
+    swarm::{SwarmEvent},
+    PeerId,
 };
-use libp2p_quic as quic;
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
-use std::hash::{Hash, Hasher};
 use std::time::Duration;
 use std::fs;
 use toml;
 use clap::Parser;
-use uuid::Uuid;
-use comms::{notice, compute};
+use comms::{
+    p2p::{MyBehaviourEvent},
+    notice,
+    compute, verify
+};
 
-// combine Gossipsub, mDNS, and RequestResponse
-#[derive(NetworkBehaviour)]
-struct MyBehaviour {
-    req_resp: request_response::cbor::Behaviour<notice::Request, notice::Response>,
-    gossipsub: gossipsub::Behaviour,
-    mdns: mdns::async_io::Behaviour,
-}
+mod job;
 
 // CLI
 #[derive(Parser, Debug)]
@@ -45,89 +40,41 @@ async fn main() -> Result<(), Box<dyn Error>> {
     
     let cli = Cli::parse();
     println!("Started client agent for Wholesum.");
-    // any jobs for the client?
-    let mut raw_jobs = Vec::<compute::JobDetails>::new();
+    
+    // jobs that are already sent for computation and need lifecycle maintenance 
+    let mut jobs = HashMap::<String, job::Job>::new();
+    // let any_compute_jobs = || -> bool {
+    //     jobs.values().find(|j| j.overall_status == job::Status::JustCreated).is_none()
+    // };
+    // let any_verification_jobs = || -> bool {
+    //     for (_, job) in jobs.iter() {
+    //         if let Some(_) = job.updates.values()
+    //             .find(|u| u.status == job::Status::ReadyForVerification) {
+    //                 return true;
+    //             }
+    //     }
+    //     false
+    // };
 
     if let Some(job_filename) = cli.job {
         println!("Loading job from: `{job_filename}`...");
         match fs::read_to_string(job_filename) {
             Ok(ss) => {
                 match toml::from_str(ss.as_str()) {
-                    Ok(j) => raw_jobs.push(j),
+                    Ok(j) => {
+                        let new_job = job::Job::new(None, j);
+                        jobs.insert(new_job.id.clone(), new_job);
+                    },
                     Err(e) => println!("Job parse error: {:#?}", e),
                 }                
             },
-            Err(e) => println!("Job load error: {:?}", e),
+            Err(e) => println!("Job load error: {e:?}"),
         };
     }    
 
-    let mut pending_jobs = HashMap::<u128, compute::Job>::new();
 
-    // get a random peer_id
-    let id_keys = identity::Keypair::generate_ed25519();
-    let local_peer_id = PeerId::from(id_keys.public());
-    println!("PeerId: {local_peer_id}");
-    // setup an encrypted dns-enabled transport over yamux
-    let tcp_transport = tcp::async_io::Transport::new(tcp::Config::default().nodelay(true))
-        .upgrade(upgrade::Version::V1Lazy)
-        .authenticate(noise::Config::new(&id_keys).expect("signing libp2p static keypair"))
-        .multiplex(yamux::Config::default())
-        .timeout(std::time::Duration::from_secs(30))
-        .boxed();
-    let quic_transport = quic::async_std::Transport::new(quic::Config::new(&id_keys));
-    let transport = OrTransport::new(quic_transport, tcp_transport)
-        .map(|either_output, _| match either_output {
-            Either::Left((peer_id, muxer)) => (peer_id, StreamMuxerBox::new(muxer)),
-            Either::Right((peer_id, muxer)) => (peer_id, StreamMuxerBox::new(muxer)),
-        })
-        .boxed();
-
-    // to content-address message, take the hash of message and use it as an id
-    let message_id_fn = |message: &gossipsub::Message| {
-        let mut s = DefaultHasher::new();
-        message.data.hash(&mut s);
-        gossipsub::MessageId::from(s.finish().to_string())
-    };
-
-    // set a custom Gossipsub configuration
-    let gossipsub_config = gossipsub::ConfigBuilder::default()
-        .heartbeat_interval(Duration::from_secs(10)) // aid debugging by not cluttering log space
-        .validation_mode(gossipsub::ValidationMode::Strict) // enforce message signing
-        .message_id_fn(message_id_fn) // content-address messages
-        .build()
-        .expect("Invalid gossipsub config.");
-
-    // build a Gossipsub network behaviour
-    let mut gossipsub = gossipsub::Behaviour::new(
-        gossipsub::MessageAuthenticity::Signed(id_keys),
-        gossipsub_config,
-    )
-    .expect("Invalid behaviour configuration.");
-
-    // subscribe to our topic
-    const TOPIC_OF_INTEREST: &str = "<-- Compute Bazaar -->";
-    println!("topic of interest: `{TOPIC_OF_INTEREST}`");
-    // @ use topic_hash config for auto hash(topic)
-    let topic = gossipsub::IdentTopic::new(TOPIC_OF_INTEREST);
-    let _ = gossipsub.subscribe(&topic);
-
-    // create a swarm to manage events and peers
-    let mut swarm = {
-        let mdns = mdns::async_io::Behaviour::new(mdns::Config::default(), local_peer_id)?;
-        let req_resp = request_response::cbor::Behaviour::<notice::Request, notice::Response>::new(
-            [(
-                StreamProtocol::new("/p2pcompute"),
-                request_response::ProtocolSupport::Full,
-            )],
-            request_response::Config::default(),
-        );
-        let behaviour = MyBehaviour {
-            req_resp: req_resp,
-            gossipsub: gossipsub,
-            mdns: mdns,
-        };
-        SwarmBuilder::with_async_std_executor(transport, behaviour, local_peer_id).build()
-    };
+    // Libp2p swarm 
+    let mut swarm = comms::p2p::setup_local_swarm();    
 
     // read full lines from stdin
     // let mut input = io::BufReader::new(io::stdin()).lines().fuse();
@@ -137,8 +84,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
     // setup a timer to post jobs
-    let mut need_compute_timer = stream::interval(Duration::from_secs(5)).fuse();
-    let mut idle_timer = stream::interval(Duration::from_secs(5 * 60)).fuse();
+    let mut timer_post_jobs = stream::interval(Duration::from_secs(5)).fuse();
+    // let mut idle_timer = stream::interval(Duration::from_secs(5 * 60)).fuse();
     // kick it off
     loop {
         select! {
@@ -149,29 +96,52 @@ async fn main() -> Result<(), Box<dyn Error>> {
             //       println!("Publish error: {e:?}")
             //     }
             // },
+
             // suggest posting jobs using stdin when idle
-            () = idle_timer.select_next_some() => {
-                if raw_jobs.len() == 0 {
-                    println!(
-                        "Since you got no more jobs, how about creating one by typing in right here?"
-                    );
-                }                
+            // () = idle_timer.select_next_some() => {
+            //     if new_jobs.len() == 0 {
+            //         println!(
+            //             "Since you got no more jobs, how about composing one right here?"
+            //         );
+            //     }
+            // },
+
+            // post need compute/verify if we have new jobs  
+            () = timer_post_jobs.select_next_some() => {
+                // need compute
+                if false == any_compute_jobs(&jobs) {
+                    println!("No compute jobs to post.");
+                } else {
+                    let need_compute_msg = vec![notice::Notice::Compute.into()];
+                    let gossip = &mut swarm.behaviour_mut().gossipsub;
+                    let topic = gossip.topics().nth(0).unwrap();
+                    if let Err(e) = gossip
+                        .publish(topic.clone(), need_compute_msg) {
+                
+                        println!("need compute publish error: {e:?}");
+                    }
+                }
+                // need verification
+                if false == any_verification_jobs(&jobs) {
+                    println!("No verification jobs to post.");
+                } else {
+                    let need_verify_msg = vec![notice::Notice::Verify.into()];
+                    let gossip = &mut swarm.behaviour_mut().gossipsub;
+                    let topic = gossip.topics().nth(0).unwrap();
+                    if let Err(e) = gossip
+                        .publish(topic.clone(), need_verify_msg) {
+                
+                        println!("need verify publish error: {e:?}");
+                    }
+                }
             },
-            // post jobs 
-            () = need_compute_timer.select_next_some() => {
-                if raw_jobs.len() == 0 {
-                    println!("No jobs to post.");
-                    continue;
-                }
-                let need_compute_msg = vec![notice::NeedRequest::Computation.into()];
-                if let Err(e) = swarm
-                    .behaviour_mut().gossipsub
-                    .publish(topic.clone(), need_compute_msg) {
-            
-                    println!("Publish error: {e:?}")
-                }
-            }
+
             event = swarm.select_next_some() => match event {
+                
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    println!("Local node is listening on {address}");
+                },
+
                 SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                     for (peer_id, _multiaddr) in list {
                         println!("mDNS discovered a new peer: {peer_id}");
@@ -200,62 +170,59 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                 // incoming compute/verify request(interest actually)
                 SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message{
-                    peer: sender_peer_id,
+                    peer: server_peer_id,
                     message: request_response::Message::Request {
                         request,
                         channel,
                         ..//request_id,
                     }
                 })) => {                
-                    // println!("request from: `{sender_peer_id}`, req_id: {:#?}, chan: {:#?}",
-                    //     request_id, channel);
                     match request {
-                        notice::Request::Compute(compute_offer) => {                            
-                            println!("received `compute offer` from server: {}, offer: {:#?}", 
-                                sender_peer_id, compute_offer);
-                            //@ examine offer
-                            if raw_jobs.len() == 0 {
-                                println!("No more jobs left to be sent.");
-                                continue;
+                        notice::Request::ComputeOffer(compute_offer) => {
+                            println!("received `compute offer` from server: `{}`, offer: {:?}", 
+                                server_peer_id, compute_offer);
+                            if let Some(job_contract) = examine_compute_offer(&mut jobs, compute_offer) {
+                                let _ = swarm.behaviour_mut().req_resp
+                                    .send_response(
+                                        channel,
+                                        notice::Response::ComputeJob(job_contract)
+                                    );
+                            } else {
+                                println!("Got no compute jobs to respond to the offer.");
                             }
-                            let job_details = raw_jobs.pop().unwrap();
-                            // match and send job
-                            let job_id = Uuid::new_v4();
-                            let compute_job = compute::Job {
-                                id: job_id.to_string(),
-                                details: job_details,
-                            };
-                            pending_jobs.insert(job_id.to_u128_le(), compute_job.clone());
+                        },      
 
-                            let _ = swarm
-                                .behaviour_mut().req_resp
-                                .send_response(
-                                    channel,
-                                    notice::Response::Compute(compute_job),
-                                );
+                        // verify offer
+                        notice::Request::VerifyOffer => {
+                            println!("received `verify offer` from server: `{}`", 
+                                server_peer_id);
+                            // if false == any_verification_jobs(jobs) {
+                            //     println!("No verification jobs to post.");
+                            //     continue;
+                            // }
+                            //@ examine verify offer
+                            if let Some(verify_details) = examine_verify_offer(&mut jobs, server_peer_id) {
+                                let _ = swarm
+                                    .behaviour_mut().req_resp
+                                    .send_response(
+                                        channel,
+                                        notice::Response::VerifyJob(verify_details.clone()),
+                                    );
+                                println!("Verification job has been sent to the verifier!");
+                            } else {
+                                println!("Got no verification jobs to respond to the offer.");
+                            }
                         },
 
-                        notice::Request::Verify => {
-                            println!("received `verification offer` from server: {}", 
-                                sender_peer_id);
+                        // job status update 
+                        notice::Request::UpdateForJob(new_update) => {
+                            update_job(
+                                &mut jobs,
+                                new_update,
+                                server_peer_id,
+                            );                            
                         },
                     }
-                },
-
-                // incoming response to an earlier compute/verify offer
-                SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message{
-                    peer: sender_peer_id,
-                    message: request_response::Message::Response {
-                        request_id,
-                        ..//response,
-                    }
-                })) => {                                
-                    println!("response came from {}, req_id: {:#?}",
-                        sender_peer_id, request_id);
-                },
-
-                SwarmEvent::NewListenAddr { address, .. } => {
-                    println!("Local node is listening on {address}");
                 },
 
                 _ => {}
@@ -263,4 +230,165 @@ async fn main() -> Result<(), Box<dyn Error>> {
             },
         }
     }
+}
+
+fn any_compute_jobs(jobs: &HashMap::<String, job::Job>) -> bool {
+    jobs.values().find(|j| j.overall_status == job::Status::JustCreated).is_none()
+}
+
+fn any_verification_jobs(jobs: &HashMap::<String, job::Job>) -> bool {
+    for (_, job) in jobs.iter() {
+        if let Some(_) = job.updates.values()
+            .find(|u| u.status == job::Status::ReadyForVerification) {
+                return true;
+            }
+    }
+    false
+}
+
+fn examine_compute_offer(
+    jobs: &mut HashMap::<String, job::Job>,
+    new_compute_offer: compute::Offer
+) -> Option<compute::JobContract> {
+    // probe the offer throughly and respond needful
+    //@ find the first and send it, needs to be changed when strategies are live
+    if let Some(new_job) = jobs.values()
+        .find(|j| j.overall_status == job::Status::JustCreated) {
+        return Some(compute::JobContract {
+            id: new_job.id.clone(),
+            details: new_job.details.clone(),
+        });
+    } 
+    None
+}
+
+fn examine_verify_offer(
+    jobs: & HashMap::<String, job::Job>,
+    server_peer_id: PeerId
+) -> Option<verify::VerifyDetails> {
+    // probe verify offer and respond needful
+    for (_, job) in jobs.iter() {
+        for(prover_id, update) in job.updates.iter() {
+            // ignore when prover === verifier  
+            if server_peer_id == *prover_id {
+                continue;
+            }
+            //@ find the first, needs to be changed when strategies go live
+            if update.status == job::Status::ReadyForVerification {
+                return Some(verify::VerifyDetails {
+                    job_id: job.id.clone(),
+                    image_id: job.image_id.clone(),
+                    receipt_cid: update.residue.receipt_cid.clone().unwrap(),
+                })
+            }
+        }
+    }
+    None
+}
+
+fn update_job(
+    jobs: &mut HashMap::<String, job::Job>,
+    new_update: compute::JobUpdate,
+    server_peer_id: PeerId,
+) {
+    // process a new update for job
+    if false == jobs.contains_key(&new_update.id) {
+        println!("update for an unknown job: `{}`",
+            new_update.id);
+        return;
+    }
+    println!("job update for `{}`, from `{}`",
+        new_update.id, server_peer_id);
+    let job = jobs.get_mut(&new_update.id).unwrap();
+    if job.overall_status == job::Status::ReadyToHarvest {
+        println!("job is ready to harvest, and needs no more updates.");
+        return;
+    }
+    // ideal development cycle of a job:
+    // negotiated -> running -> ready for verification -> harvest ready
+    match new_update.status {
+        compute::JobStatus::Running => {
+            println!("Still running...");
+            job.updates.entry(server_peer_id)
+                .and_modify(|e| {
+                    if e.status < job::Status::Running {
+                        println!("job is already running, ignored.");
+                    } else {
+                        e.status = job::Status::Running;
+                    }
+                })
+                .or_insert(job::Update {
+                    status: job::Status::Running,
+                    residue: job::Residue {
+                        stderr_cid: None,
+                        stdout_cid: None,
+                        receipt_cid: None,
+                    },
+                });
+            job.overall_status = job::Status::Running;
+        },
+
+        compute::JobStatus::ExecutionFailed(stderr_cid, stdout_cid) => {                                    
+            println!("finished with error, stderr_cid: `{:?}`, stdout_cid: `{:?}`",
+                stderr_cid, stdout_cid);
+            job.updates.entry(server_peer_id)
+                .and_modify(|e| {
+                    if e.status < job::Status::ExecutionFailed {
+                        println!("job is already failed, ignored.");
+                    } else {
+                        e.status = job::Status::ExecutionFailed;
+                    }
+                })
+                .or_insert(job::Update {
+                    status: job::Status::ExecutionFailed,
+                    residue: job::Residue {
+                        stderr_cid: stderr_cid,
+                        stdout_cid: stdout_cid,
+                        receipt_cid: None,
+                    },
+                });
+            //@ wtd with overall_status?
+        },
+
+        compute::JobStatus::ReadyForVerification(receipt_cid) => {
+            println!("Ready to be verified!");
+            job.updates.entry(server_peer_id)
+                .and_modify(|e| {
+                    if e.status > job::Status::ReadyForVerification {
+                        println!("job is already finished, ignored.");
+                    } else {
+                        e.status = job::Status::ReadyForVerification;
+                    }
+                })
+                .or_insert(job::Update {
+                    status: job::Status::ReadyForVerification,
+                    residue: job::Residue {
+                        stderr_cid: None,
+                        stdout_cid: None,
+                        receipt_cid: Some(receipt_cid),
+                    },
+                });            
+        },
+
+        compute::JobStatus::VerificationFailed(e) => {
+            println!("Verification failed, error: `{e:?}`");
+            job.updates.entry(server_peer_id)
+                .and_modify(|e| {
+                    if e.status > job::Status::VerificationFailed {
+                        println!("job is already finished, ignored.");
+                    } else {
+                        e.status = job::Status::VerificationFailed;
+                    }
+                })
+                .or_insert(job::Update {
+                    status: job::Status::VerificationFailed,
+                    residue: job::Residue {
+                        stderr_cid: None,
+                        stdout_cid: None,
+                        receipt_cid: None,
+                    },
+                });
+        },
+        _ => (),
+    };
 }
