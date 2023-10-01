@@ -1,17 +1,26 @@
 use libp2p::PeerId;
 use uuid::Uuid;
 use std::collections::HashMap;
-
+use serde::Deserialize;
 use comms::compute;
+
+// job template as read in(e.g. from disk)
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+pub struct Schema {
+    pub docker_image: String,
+    pub command: String,
+    pub image_id: String,
+}
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Status {
     JustCreated = 0,
-    BeingNegotiated,         // collecting offers
+    Negotiating,             // collecting offers
     Running,
     ReadyForVerification,    // finished exectution, awaits verification 
+    VerificationSucceeded,
+    ReadyToHarvest,          //@ payment has to be made
     VerificationFailed,      // verification failed
-    ReadyToHarvest,          // verification succeeded, this is where job's lifecyle comes to an end 
     ExecutionFailed,         // job exec failed during proving
 }
 
@@ -32,37 +41,23 @@ pub struct Update {
 #[derive(Debug)]
 pub struct Job {
     pub id: String,
-    pub details: compute::JobDetails,        // details of the job contract
-    pub image_id: Vec<u8>,                   // image_id as in risc0, it's a hash digest
+    pub schema: Schema,
+    pub image_id: String,                    // image_id as in risc0, it's a hash digest
     pub overall_status: Status,
-    pub updates: HashMap<PeerId, Update>,    // keep track of updates of all servers dealing with the job
+    pub updates: HashMap<PeerId, Update>,    // keep track of updates of all servers working on the job
 }
 
 impl Job {
-    pub fn new (custom_id: Option<String>, job_details: compute::JobDetails) -> Job {
+    pub fn new (custom_id: Option<String>, schema: Schema) -> Job {
         Job {                  
             id: custom_id.unwrap_or_else(|| {
                 //@ use safer id generation methods              
                 Uuid::new_v4().to_string()
             }),
-            details: job_details,
-            image_id: Vec::<u8>::new(), //@ fill this
+            schema: schema,
+            image_id: String::new(), 
             overall_status: Status::JustCreated,
             updates: HashMap::<PeerId, Update>::new(),
         }
     }
 }
-
-// impl Hash for Job {
-//     fn hash<H: Hasher>(&self, state: &mut H) {
-//         self.id.hash(state);
-//     }
-// }
-
-// impl PartialEq for Job {
-//     fn eq(&self, other: &Self) -> bool {
-//         self.id == other.id
-//     }
-// }
-
-// impl Eq for Job {}

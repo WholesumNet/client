@@ -19,7 +19,7 @@ use clap::Parser;
 use comms::{
     p2p::{MyBehaviourEvent},
     notice,
-    compute, verify
+    compute
 };
 
 mod job;
@@ -41,20 +41,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
     println!("Started client agent for Wholesum.");
     
+    // Libp2p swarm 
+    let mut swarm = comms::p2p::setup_local_swarm();    
+    
     // jobs that are already sent for computation and need lifecycle maintenance 
-    let mut jobs = HashMap::<String, job::Job>::new();
-    // let any_compute_jobs = || -> bool {
-    //     jobs.values().find(|j| j.overall_status == job::Status::JustCreated).is_none()
-    // };
-    // let any_verification_jobs = || -> bool {
-    //     for (_, job) in jobs.iter() {
-    //         if let Some(_) = job.updates.values()
-    //             .find(|u| u.status == job::Status::ReadyForVerification) {
-    //                 return true;
-    //             }
-    //     }
-    //     false
-    // };
+    let mut jobs = HashMap::<String, job::Job>::new();    
 
     if let Some(job_filename) = cli.job {
         println!("Loading job from: `{job_filename}`...");
@@ -72,10 +63,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         };
     }    
 
-
-    // Libp2p swarm 
-    let mut swarm = comms::p2p::setup_local_swarm();    
-
     // read full lines from stdin
     // let mut input = io::BufReader::new(io::stdin()).lines().fuse();
 
@@ -83,9 +70,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.listen_on("/ip4/0.0.0.0/udp/0/quic-v1".parse()?)?;
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
-    // setup a timer to post jobs
     let mut timer_post_jobs = stream::interval(Duration::from_secs(5)).fuse();
     // let mut idle_timer = stream::interval(Duration::from_secs(5 * 60)).fuse();
+    let mut timer_job_status = stream::interval(Duration::from_secs(30)).fuse();
     // kick it off
     loop {
         select! {
@@ -106,7 +93,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             //     }
             // },
 
-            // post need compute/verify if we have new jobs  
+            // post "need compute/verify" if compute/verification pool is not empty
             () = timer_post_jobs.select_next_some() => {
                 // need compute
                 if false == any_compute_jobs(&jobs) {
@@ -134,6 +121,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         println!("need verify publish error: {e:?}");
                     }
                 }
+            },
+
+            // poll jobs' status 
+            () = timer_job_status.select_next_some() => {
+                if false == any_pending_jobs(&jobs) {
+                    continue;
+                }
+                let job_status_msg = vec![notice::Notice::JobStatus.into()];
+                let gossip = &mut swarm.behaviour_mut().gossipsub;
+                let topic = gossip.topics().nth(0).unwrap();
+                if let Err(e) = gossip
+                    .publish(topic.clone(), job_status_msg) {
+            
+                    println!("job status publish error: {e:?}");
+                }                    
             },
 
             event = swarm.select_next_some() => match event {
@@ -168,7 +170,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     println!("received gossip message: {:#?}", message);                    
                 },
 
-                // incoming compute/verify request(interest actually)
                 SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message{
                     peer: server_peer_id,
                     message: request_response::Message::Request {
@@ -181,19 +182,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         notice::Request::ComputeOffer(compute_offer) => {
                             println!("received `compute offer` from server: `{}`, offer: {:?}", 
                                 server_peer_id, compute_offer);
-                            if let Some(job_contract) = examine_compute_offer(&mut jobs, compute_offer) {
+                            if let Some(compute_job) = examine_compute_offer(&mut jobs, compute_offer) {
                                 let _ = swarm.behaviour_mut().req_resp
                                     .send_response(
                                         channel,
-                                        notice::Response::ComputeJob(job_contract)
+                                        notice::Response::ComputeJob(compute_job)
                                     );
                             } else {
                                 println!("Got no compute jobs to respond to the offer.");
                             }
                         },      
 
-                        // verify offer
-                        notice::Request::VerifyOffer => {
+                        notice::Request::VerificationOffer => {
                             println!("received `verify offer` from server: `{}`", 
                                 server_peer_id);
                             // if false == any_verification_jobs(jobs) {
@@ -201,12 +201,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             //     continue;
                             // }
                             //@ examine verify offer
-                            if let Some(verify_details) = examine_verify_offer(&mut jobs, server_peer_id) {
+                            if let Some(verification_details) = examine_verify_offer(&mut jobs, server_peer_id) {
                                 let _ = swarm
                                     .behaviour_mut().req_resp
                                     .send_response(
                                         channel,
-                                        notice::Response::VerifyJob(verify_details.clone()),
+                                        notice::Response::VerificationJob(verification_details.clone()),
                                     );
                                 println!("Verification job has been sent to the verifier!");
                             } else {
@@ -233,7 +233,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn any_compute_jobs(jobs: &HashMap::<String, job::Job>) -> bool {
-    jobs.values().find(|j| j.overall_status == job::Status::JustCreated).is_none()
+    jobs.values().find(|j| j.overall_status == job::Status::JustCreated).is_some()
 }
 
 fn any_verification_jobs(jobs: &HashMap::<String, job::Job>) -> bool {
@@ -246,17 +246,23 @@ fn any_verification_jobs(jobs: &HashMap::<String, job::Job>) -> bool {
     false
 }
 
+fn any_pending_jobs(jobs: &HashMap::<String, job::Job>) -> bool {
+    jobs.values().find(|j| (j.overall_status <= job::Status::ReadyToHarvest))
+        .is_some()
+}
+
 fn examine_compute_offer(
     jobs: &mut HashMap::<String, job::Job>,
     new_compute_offer: compute::Offer
-) -> Option<compute::JobContract> {
+) -> Option<compute::ComputeDetails> {
     // probe the offer throughly and respond needful
     //@ find the first and send it, needs to be changed when strategies are live
     if let Some(new_job) = jobs.values()
         .find(|j| j.overall_status == job::Status::JustCreated) {
-        return Some(compute::JobContract {
-            id: new_job.id.clone(),
-            details: new_job.details.clone(),
+        return Some(compute::ComputeDetails {
+            job_id: new_job.id.clone(),
+            docker_image: new_job.schema.docker_image.clone(),
+            command: new_job.schema.command.clone(),
         });
     } 
     None
@@ -265,7 +271,7 @@ fn examine_compute_offer(
 fn examine_verify_offer(
     jobs: & HashMap::<String, job::Job>,
     server_peer_id: PeerId
-) -> Option<verify::VerifyDetails> {
+) -> Option<compute::VerificationDetails> {
     // probe verify offer and respond needful
     for (_, job) in jobs.iter() {
         for(prover_id, update) in job.updates.iter() {
@@ -275,7 +281,7 @@ fn examine_verify_offer(
             }
             //@ find the first, needs to be changed when strategies go live
             if update.status == job::Status::ReadyForVerification {
-                return Some(verify::VerifyDetails {
+                return Some(compute::VerificationDetails {
                     job_id: job.id.clone(),
                     image_id: job.image_id.clone(),
                     receipt_cid: update.residue.receipt_cid.clone().unwrap(),
@@ -365,9 +371,30 @@ fn update_job(
                     residue: job::Residue {
                         stderr_cid: None,
                         stdout_cid: None,
-                        receipt_cid: Some(receipt_cid),
+                        receipt_cid: receipt_cid,
                     },
                 });            
+        },
+
+        compute::JobStatus::VerificationSucceeded => {                                    
+            println!("verification succeeded");
+            job.updates.entry(server_peer_id)
+                .and_modify(|e| {
+                    if e.status > job::Status::VerificationSucceeded {
+                        println!("job is already succeeded in verification, ignored.");
+                    } else {
+                        e.status = job::Status::VerificationSucceeded;
+                    }
+                })
+                .or_insert(job::Update {
+                    status: job::Status::VerificationSucceeded,
+                    residue: job::Residue {
+                        stderr_cid: None,
+                        stdout_cid: None,
+                        receipt_cid: None,
+                    },
+                });
+            //@ wtd with overall_status?
         },
 
         compute::JobStatus::VerificationFailed(e) => {
