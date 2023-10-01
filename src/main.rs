@@ -215,10 +215,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         },
 
                         // job status update 
-                        notice::Request::UpdateForJob(new_update) => {
+                        notice::Request::UpdateForJobs(updates) => {
                             update_job(
                                 &mut jobs,
-                                new_update,
+                                updates,
                                 server_peer_id,
                             );                            
                         },
@@ -294,128 +294,130 @@ fn examine_verify_offer(
 
 fn update_job(
     jobs: &mut HashMap::<String, job::Job>,
-    new_update: compute::JobUpdate,
+    updates: Vec<compute::JobUpdate>,
     server_peer_id: PeerId,
 ) {
-    // process a new update for job
-    if false == jobs.contains_key(&new_update.id) {
-        println!("update for an unknown job: `{}`",
-            new_update.id);
-        return;
+    for new_update in updates {
+        // process a new update for job
+        if false == jobs.contains_key(&new_update.id) {
+            println!("update for an unknown job: `{}`",
+                new_update.id);
+            continue;
+        }
+        println!("job update for `{}`, from `{}`",
+            new_update.id, server_peer_id);
+        let job = jobs.get_mut(&new_update.id).unwrap();
+        if job.overall_status == job::Status::ReadyToHarvest {
+            println!("job is ready to harvest, and needs no more updates.");
+            continue;
+        }
+        // ideal development cycle of a job:
+        // negotiated -> running -> ready for verification -> harvest ready
+        match new_update.status {        
+            compute::JobStatus::Running => {
+                println!("Still running...");
+                job.updates.entry(server_peer_id)
+                    .and_modify(|e| {
+                        if e.status < job::Status::Running {
+                            println!("job is already running, ignored.");
+                        } else {
+                            e.status = job::Status::Running;
+                        }
+                    })
+                    .or_insert(job::Update {
+                        status: job::Status::Running,
+                        residue: job::Residue {
+                            stderr_cid: None,
+                            stdout_cid: None,
+                            receipt_cid: None,
+                        },
+                    });
+                job.overall_status = job::Status::Running;
+            },
+
+            compute::JobStatus::ExecutionFailed(stderr_cid, stdout_cid) => {                                    
+                println!("finished with error, stderr_cid: `{:?}`, stdout_cid: `{:?}`",
+                    stderr_cid, stdout_cid);
+                job.updates.entry(server_peer_id)
+                    .and_modify(|e| {
+                        if e.status < job::Status::ExecutionFailed {
+                            println!("job is already failed, ignored.");
+                        } else {
+                            e.status = job::Status::ExecutionFailed;
+                        }
+                    })
+                    .or_insert(job::Update {
+                        status: job::Status::ExecutionFailed,
+                        residue: job::Residue {
+                            stderr_cid: stderr_cid,
+                            stdout_cid: stdout_cid,
+                            receipt_cid: None,
+                        },
+                    });
+                //@ wtd with overall_status?
+            },
+
+            compute::JobStatus::ReadyForVerification(receipt_cid) => {
+                println!("Ready to be verified!");
+                job.updates.entry(server_peer_id)
+                    .and_modify(|e| {
+                        if e.status > job::Status::ReadyForVerification {
+                            println!("job is already finished, ignored.");
+                        } else {
+                            e.status = job::Status::ReadyForVerification;
+                        }
+                    })
+                    .or_insert(job::Update {
+                        status: job::Status::ReadyForVerification,
+                        residue: job::Residue {
+                            stderr_cid: None,
+                            stdout_cid: None,
+                            receipt_cid: receipt_cid,
+                        },
+                    });            
+            },
+
+            compute::JobStatus::VerificationSucceeded => {                                    
+                println!("verification succeeded");
+                job.updates.entry(server_peer_id)
+                    .and_modify(|e| {
+                        if e.status > job::Status::VerificationSucceeded {
+                            println!("job is already succeeded in verification, ignored.");
+                        } else {
+                            e.status = job::Status::VerificationSucceeded;
+                        }
+                    })
+                    .or_insert(job::Update {
+                        status: job::Status::VerificationSucceeded,
+                        residue: job::Residue {
+                            stderr_cid: None,
+                            stdout_cid: None,
+                            receipt_cid: None,
+                        },
+                    });
+                //@ wtd with overall_status?
+            },
+
+            compute::JobStatus::VerificationFailed(e) => {
+                println!("Verification failed, error: `{e:?}`");
+                job.updates.entry(server_peer_id)
+                    .and_modify(|e| {
+                        if e.status > job::Status::VerificationFailed {
+                            println!("job is already finished, ignored.");
+                        } else {
+                            e.status = job::Status::VerificationFailed;
+                        }
+                    })
+                    .or_insert(job::Update {
+                        status: job::Status::VerificationFailed,
+                        residue: job::Residue {
+                            stderr_cid: None,
+                            stdout_cid: None,
+                            receipt_cid: None,
+                        },
+                    });
+            },
+            _ => (),
+        };
     }
-    println!("job update for `{}`, from `{}`",
-        new_update.id, server_peer_id);
-    let job = jobs.get_mut(&new_update.id).unwrap();
-    if job.overall_status == job::Status::ReadyToHarvest {
-        println!("job is ready to harvest, and needs no more updates.");
-        return;
-    }
-    // ideal development cycle of a job:
-    // negotiated -> running -> ready for verification -> harvest ready
-    match new_update.status {
-        compute::JobStatus::Running => {
-            println!("Still running...");
-            job.updates.entry(server_peer_id)
-                .and_modify(|e| {
-                    if e.status < job::Status::Running {
-                        println!("job is already running, ignored.");
-                    } else {
-                        e.status = job::Status::Running;
-                    }
-                })
-                .or_insert(job::Update {
-                    status: job::Status::Running,
-                    residue: job::Residue {
-                        stderr_cid: None,
-                        stdout_cid: None,
-                        receipt_cid: None,
-                    },
-                });
-            job.overall_status = job::Status::Running;
-        },
-
-        compute::JobStatus::ExecutionFailed(stderr_cid, stdout_cid) => {                                    
-            println!("finished with error, stderr_cid: `{:?}`, stdout_cid: `{:?}`",
-                stderr_cid, stdout_cid);
-            job.updates.entry(server_peer_id)
-                .and_modify(|e| {
-                    if e.status < job::Status::ExecutionFailed {
-                        println!("job is already failed, ignored.");
-                    } else {
-                        e.status = job::Status::ExecutionFailed;
-                    }
-                })
-                .or_insert(job::Update {
-                    status: job::Status::ExecutionFailed,
-                    residue: job::Residue {
-                        stderr_cid: stderr_cid,
-                        stdout_cid: stdout_cid,
-                        receipt_cid: None,
-                    },
-                });
-            //@ wtd with overall_status?
-        },
-
-        compute::JobStatus::ReadyForVerification(receipt_cid) => {
-            println!("Ready to be verified!");
-            job.updates.entry(server_peer_id)
-                .and_modify(|e| {
-                    if e.status > job::Status::ReadyForVerification {
-                        println!("job is already finished, ignored.");
-                    } else {
-                        e.status = job::Status::ReadyForVerification;
-                    }
-                })
-                .or_insert(job::Update {
-                    status: job::Status::ReadyForVerification,
-                    residue: job::Residue {
-                        stderr_cid: None,
-                        stdout_cid: None,
-                        receipt_cid: receipt_cid,
-                    },
-                });            
-        },
-
-        compute::JobStatus::VerificationSucceeded => {                                    
-            println!("verification succeeded");
-            job.updates.entry(server_peer_id)
-                .and_modify(|e| {
-                    if e.status > job::Status::VerificationSucceeded {
-                        println!("job is already succeeded in verification, ignored.");
-                    } else {
-                        e.status = job::Status::VerificationSucceeded;
-                    }
-                })
-                .or_insert(job::Update {
-                    status: job::Status::VerificationSucceeded,
-                    residue: job::Residue {
-                        stderr_cid: None,
-                        stdout_cid: None,
-                        receipt_cid: None,
-                    },
-                });
-            //@ wtd with overall_status?
-        },
-
-        compute::JobStatus::VerificationFailed(e) => {
-            println!("Verification failed, error: `{e:?}`");
-            job.updates.entry(server_peer_id)
-                .and_modify(|e| {
-                    if e.status > job::Status::VerificationFailed {
-                        println!("job is already finished, ignored.");
-                    } else {
-                        e.status = job::Status::VerificationFailed;
-                    }
-                })
-                .or_insert(job::Update {
-                    status: job::Status::VerificationFailed,
-                    residue: job::Residue {
-                        stderr_cid: None,
-                        stdout_cid: None,
-                        receipt_cid: None,
-                    },
-                });
-        },
-        _ => (),
-    };
 }
