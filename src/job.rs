@@ -9,7 +9,7 @@ use comms::compute;
 pub struct Schema {
     pub docker_image: String,
     pub command: String,
-    pub image_id: String,
+    pub image_id: String,        // image_id as in risc0, it's a hash digest
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -42,7 +42,6 @@ pub struct Update {
 pub struct Job {
     pub id: String,
     pub schema: Schema,
-    pub image_id: String,                    // image_id as in risc0, it's a hash digest
     pub overall_status: Status,
     pub updates: HashMap<PeerId, Update>,    // keep track of updates of all servers working on the job
 }
@@ -52,10 +51,9 @@ impl Job {
         Job {                  
             id: custom_id.unwrap_or_else(|| {
                 //@ use safer id generation methods              
-                Uuid::new_v4().to_string()
+                Uuid::new_v4().simple().to_string()[..4].to_string()
             }),
             schema: schema,
-            image_id: String::new(), 
             overall_status: Status::JustCreated,
             updates: HashMap::<PeerId, Update>::new(),
         }

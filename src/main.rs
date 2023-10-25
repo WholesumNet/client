@@ -2,7 +2,6 @@
 
 use futures::{
     prelude::*, select,
-    // stream::{Stream},
 };
 use async_std::stream;
 use libp2p::{
@@ -14,6 +13,8 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::time::Duration;
 use std::fs;
+use rand::Rng;
+
 use toml;
 use clap::Parser;
 use comms::{
@@ -26,10 +27,10 @@ mod job;
 
 // CLI
 #[derive(Parser, Debug)]
-#[command(name = "Client CLI for Wholesum: p2p verifiable computing marketplace.")]
+#[command(name = "Client CLI for Wholesum: p2p verifiable computing network.")]
 #[command(author = "Wholesum team")]
 #[command(version = "1.0")]
-#[command(about = "Yet another verifiable compute marketplace.", long_about = None)]
+#[command(about = "Yet another p2p verifiable computing network.", long_about = None)]
 struct Cli {
     #[arg(short, long)]
     job: Option<String>,
@@ -48,19 +49,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut jobs = HashMap::<String, job::Job>::new();    
 
     if let Some(job_filename) = cli.job {
-        println!("Loading job from: `{job_filename}`...");
-        match fs::read_to_string(job_filename) {
-            Ok(ss) => {
-                match toml::from_str(ss.as_str()) {
-                    Ok(j) => {
-                        let new_job = job::Job::new(None, j);
-                        jobs.insert(new_job.id.clone(), new_job);
-                    },
-                    Err(e) => println!("Job parse error: {:#?}", e),
-                }                
-            },
-            Err(e) => println!("Job load error: {e:?}"),
-        };
+        let new_job = job::Job::new(None, 
+            toml::from_str(&std::fs::read_to_string(job_filename)?)?
+        );
+        jobs.insert(new_job.id.clone(), new_job);
     }    
 
     // read full lines from stdin
@@ -73,6 +65,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut timer_post_jobs = stream::interval(Duration::from_secs(5)).fuse();
     // let mut idle_timer = stream::interval(Duration::from_secs(5 * 60)).fuse();
     let mut timer_job_status = stream::interval(Duration::from_secs(30)).fuse();
+    // gossip messages are content-addressed, so we add a random nounce to each message
+    let mut rng = rand::thread_rng();
+
     // kick it off
     loop {
         select! {
@@ -96,9 +91,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // post "need compute/verify" if compute/verification pool is not empty
             () = timer_post_jobs.select_next_some() => {
                 // need compute
+                // let nounce: u8 = rng.gen();             
                 if false == any_compute_jobs(&jobs) {
                     println!("No compute jobs to post.");
-                } else {
+                } else {        
                     let need_compute_msg = vec![notice::Notice::Compute.into()];
                     let gossip = &mut swarm.behaviour_mut().gossipsub;
                     let topic = gossip.topics().nth(0).unwrap();
@@ -112,13 +108,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 if false == any_verification_jobs(&jobs) {
                     println!("No verification jobs to post.");
                 } else {
-                    let need_verify_msg = vec![notice::Notice::Verify.into()];
+                    let need_verify_msg = vec![notice::Notice::Verification.into()];
                     let gossip = &mut swarm.behaviour_mut().gossipsub;
                     let topic = gossip.topics().nth(0).unwrap();
                     if let Err(e) = gossip
                         .publish(topic.clone(), need_verify_msg) {
                 
-                        println!("need verify publish error: {e:?}");
+                        println!("`need verify` publish error: {e:?}");
                     }
                 }
             },
@@ -128,13 +124,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 if false == any_pending_jobs(&jobs) {
                     continue;
                 }
-                let job_status_msg = vec![notice::Notice::JobStatus.into()];
+                let nounce: u8 = rng.gen();
+                let job_status_msg = vec![notice::Notice::JobStatus.into(), nounce];
                 let gossip = &mut swarm.behaviour_mut().gossipsub;
                 let topic = gossip.topics().nth(0).unwrap();
                 if let Err(e) = gossip
                     .publish(topic.clone(), job_status_msg) {
             
-                    println!("job status publish error: {e:?}");
+                    println!("`job status poll` publish error: {e:?}");
                 }                    
             },
 
@@ -180,7 +177,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 })) => {                
                     match request {
                         notice::Request::ComputeOffer(compute_offer) => {
-                            println!("received `compute offer` from server: `{}`, offer: {:?}", 
+                            println!("received `compute offer` from server: `{}`, offer: {:#?}", 
                                 server_peer_id, compute_offer);
                             if let Some(compute_job) = examine_compute_offer(&mut jobs, compute_offer) {
                                 let _ = swarm.behaviour_mut().req_resp
@@ -247,7 +244,8 @@ fn any_verification_jobs(jobs: &HashMap::<String, job::Job>) -> bool {
 }
 
 fn any_pending_jobs(jobs: &HashMap::<String, job::Job>) -> bool {
-    jobs.values().find(|j| (j.overall_status <= job::Status::ReadyToHarvest))
+    jobs.values()
+        .find(|j| (j.overall_status <= job::Status::ReadyToHarvest))
         .is_some()
 }
 
@@ -281,10 +279,12 @@ fn examine_verify_offer(
             }
             //@ find the first, needs to be changed when strategies go live
             if update.status == job::Status::ReadyForVerification {
+                println!("verify update: {:#?}", update);
                 return Some(compute::VerificationDetails {
                     job_id: job.id.clone(),
-                    image_id: job.image_id.clone(),
+                    image_id: job.schema.image_id.clone(),
                     receipt_cid: update.residue.receipt_cid.clone().unwrap(),
+                    pod_name: format!("receipt_{}", job.id),
                 })
             }
         }
@@ -304,8 +304,8 @@ fn update_job(
                 new_update.id);
             continue;
         }
-        println!("job update for `{}`, from `{}`",
-            new_update.id, server_peer_id);
+        println!("job update for `{}`, from `{}`: `{:#?}`",
+            new_update.id, server_peer_id, new_update);
         let job = jobs.get_mut(&new_update.id).unwrap();
         if job.overall_status == job::Status::ReadyToHarvest {
             println!("job is ready to harvest, and needs no more updates.");
@@ -349,8 +349,8 @@ fn update_job(
                     .or_insert(job::Update {
                         status: job::Status::ExecutionFailed,
                         residue: job::Residue {
-                            stderr_cid: stderr_cid,
-                            stdout_cid: stdout_cid,
+                            stderr_cid: None,
+                            stdout_cid: None,
                             receipt_cid: None,
                         },
                     });
@@ -358,13 +358,14 @@ fn update_job(
             },
 
             compute::JobStatus::ReadyForVerification(receipt_cid) => {
-                println!("Ready to be verified!");
+                println!("Ready to be verified!, receipt_cid: {:?}", receipt_cid);
                 job.updates.entry(server_peer_id)
                     .and_modify(|e| {
                         if e.status > job::Status::ReadyForVerification {
                             println!("job is already finished, ignored.");
                         } else {
                             e.status = job::Status::ReadyForVerification;
+                            e.residue.receipt_cid = receipt_cid.clone();
                         }
                     })
                     .or_insert(job::Update {
