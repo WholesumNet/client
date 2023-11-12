@@ -53,6 +53,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let new_job = job::Job::new(None, 
             toml::from_str(&std::fs::read_to_string(job_filename)?)?
         );
+        println!("A new job is here: {:#?}", new_job.schema);
         jobs.insert(new_job.id.clone(), new_job);
     }    
 
@@ -186,7 +187,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         notice::Request::ComputeOffer(compute_offer) => {
                             println!("received `compute offer` from server: `{}`, offer: {:#?}", 
                                 server_peer_id, compute_offer);
-                            if let Some(compute_job) = examine_compute_offer(&mut jobs, compute_offer, server_peer_id) {
+                            if let Some(compute_job) = evaluate_compute_offer(&mut jobs, compute_offer, server_peer_id) {
                                 let _ = swarm.behaviour_mut().req_resp
                                     .send_response(
                                         channel,
@@ -201,8 +202,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         notice::Request::VerificationOffer => {
                             println!("received `verify offer` from server: `{}`", 
                                 server_peer_id);
-                            //@ examine verify offer
-                            if let Some(verification_details) = examine_verify_offer(&mut jobs, server_peer_id) {
+                            //@ evaluate verify offer
+                            if let Some(verification_details) = evaluate_verify_offer(&mut jobs, server_peer_id) {
                                 let _ = swarm
                                     .behaviour_mut().req_resp
                                     .send_response(
@@ -261,27 +262,30 @@ fn any_pending_jobs(
 fn any_verification_jobs(
     jobs: &HashMap::<String, job::Job>
 ) -> bool {
-    jobs.values().find(|job|
+    jobs.values().find(|job| {
+        let min_required_verifications = 
+            job.schema.verification.min_required.unwrap_or_else(|| u8::MAX);
+        // job requires to be verified
+        true == job.schema.verification.min_required.is_some() &&
         // should have at least one execution succeeded
         false == job.execution_trace.is_empty() &&
         // should have at least one unverified execution trace
         true == job.execution_trace.values()
         .find(|exec_trace| 
-            false == exec_trace.is_verified(job.schema.required_verifications)
+            false == exec_trace.is_verified(min_required_verifications)
         ).is_some()
-    ).is_some()    
+    }).is_some()    
 }
 
 fn any_harvest_jobs(
     jobs: &HashMap::<String, job::Job>
 ) -> bool {
-    jobs.values().find(|job| 
-        true == job.harvests.is_empty() &&
+    jobs.values().find(|job|
         true == job.has_verified_execution_traces()
     ).is_some()
 }
 
-fn examine_compute_offer(
+fn evaluate_compute_offer(
     jobs: &mut HashMap::<String, job::Job>,
     new_compute_offer: compute::Offer,
     server_peer_id: PeerId,
@@ -289,51 +293,57 @@ fn examine_compute_offer(
     // probe offer throughly
     //@ find the first and send it, needs to be changed when strategies go live
     let server_id58 = server_peer_id.to_base58();
-    if let Some(new_job) = jobs.values().find(|job| 
-        // should not have been computed by this server
+    if let Some(new_job) = jobs.values().find(|job| {
+        let min_required_memory_capacity = job.schema.compute.min_memory_capacity
+            .unwrap_or_else(|| 0u32);
+        // should not have already been computed by this server
         // @wtd with finnished ones by this server?
         (true == job.execution_trace.values()
-                .find(|exec_trace| exec_trace.server == server_id58)
-                .is_none()) &&
+            .find(|exec_trace| exec_trace.server == server_id58).is_none()) &&
         // be brand new(short circuit)
-        (true == job.execution_trace.is_empty() ||
-        
-        // should not have any verified execution traces 
-        false == job.has_verified_execution_traces())
+        (true == job.execution_trace.is_empty() ||        
+        //@temporary should not have any verified execution traces 
+        false == job.has_verified_execution_traces()) &&
+        // has enough memory?
+        (new_compute_offer.hw_specs.memory_capacity >= min_required_memory_capacity)
         //@ harvests?
-    ) {
+    }) {
         return Some(compute::ComputeDetails {
             job_id: new_job.id.clone(),
-            docker_image: new_job.schema.docker_image.clone(),
-            command: new_job.schema.command.clone(),
+            docker_image: new_job.schema.compute.docker_image.clone(),
+            command: new_job.schema.compute.command.clone(),
         })       
     }
     None
 }
 
 // probe verify offer and respond needful
-fn examine_verify_offer(
+fn evaluate_verify_offer(
     jobs: &HashMap::<String, job::Job>,
     server_peer_id: PeerId
 ) -> Option<compute::VerificationDetails> {
     //@ fifo atm, should change once strategies go live
     let verifier_id58 = server_peer_id.to_base58();
     for job in jobs.values() {
-        // should have at least one execution succeeded
-        if true == job.execution_trace.is_empty() {
+        // should have at least one execution succeeded or
+        // if verification is needed at all
+        if true == job.execution_trace.is_empty() ||
+           false == job.schema.verification.min_required.is_some() {
             continue;
         }
+        let min_required_verifications = 
+            job.schema.verification.min_required.unwrap();
         for (receipt_cid, exec_trace) in job.execution_trace.iter() {
             // server != verifier and the execution trace should be unverified
             if exec_trace.server == verifier_id58 ||
-               exec_trace.is_verified(job.schema.required_verifications) ||
+               exec_trace.is_verified(min_required_verifications) ||
                receipt_cid == "<unverified>" {
                 continue;
             }
 
             return Some(compute::VerificationDetails {
                 job_id: job.id.clone(),
-                image_id: job.schema.image_id.clone(),
+                image_id: job.schema.verification.image_id.clone(),
                 receipt_cid: receipt_cid.clone(),
                 pod_name: format!("receipt_{}", job.id),
             })
@@ -379,8 +389,9 @@ fn update_jobs(
                     println!("Warning: execution succeeded but `receipt_cid` is missing.");
                 }
 
+                //@ unverified-per-server
                 let proper_receipt_cid = receipt_cid.clone()
-                .unwrap_or_else(|| String::from("<unverified>"));
+                    .unwrap_or_else(|| String::from("<unverified>"));
                 job.execution_trace.entry(proper_receipt_cid.clone())
                 .and_modify(|_v| {
                     println!("Execution trace `{}` is already being tracked.", proper_receipt_cid);
@@ -393,7 +404,10 @@ fn update_jobs(
                 });
             },
 
-            compute::JobStatus::VerificationSucceeded(receipt_cid) => {   
+            compute::JobStatus::VerificationSucceeded(receipt_cid) => {
+                if false == job.schema.verification.min_required.is_some() {
+                    println!("Warning: job is not required to be verified.");
+                }
                 if false == job.execution_trace.contains_key(receipt_cid) {
                     //@wtd, its probably a successful execution that we have missed
                     println!("No prior execution trace for this receipt `{}`", receipt_cid);
@@ -409,11 +423,13 @@ fn update_jobs(
                 }                
                 let num_approved = exec_trace.num_verifications(true);
                 let num_rejected = exec_trace.num_verifications(false);
+                let min_required_verifications = 
+                    job.schema.verification.min_required.unwrap_or_else(|| u8::MAX);
                 println!(
                     "Verifications so far, succeded: `{}`, failed: `{}`, required: `{}`",
-                    num_approved, num_rejected, job.schema.required_verifications
+                    num_approved, num_rejected, min_required_verifications
                 );
-                if num_approved >= job.schema.required_verifications.into() &&
+                if num_approved >= min_required_verifications.into() &&
                    num_approved >= 2 * num_rejected {
                     println!("Congrats!, the job has received the minimum number of required \
                         verifications and is now considered to be verified.");
@@ -422,7 +438,10 @@ fn update_jobs(
                 }               
             },
 
-            compute::JobStatus::VerificationFailed(receipt_cid) => {
+            compute::JobStatus::VerificationFailed(receipt_cid) => {                
+                if false == job.schema.verification.min_required.is_some() {
+                    println!("Warning: job is not required to be verified.");
+                }
                 if false == job.execution_trace.contains_key(receipt_cid) {
                     //@wtd
                     println!("No prior execution trace for this receipt `{}`", receipt_cid);
@@ -436,13 +455,15 @@ fn update_jobs(
                         println!("Verification status `failed` is already noted.");
                     }
                 }
+                let min_required_verifications = 
+                    job.schema.verification.min_required.unwrap_or_else(|| u8::MAX);
                 let num_approved = exec_trace.num_verifications(true);
                 let num_rejected = exec_trace.num_verifications(false);
                 println!(
                     "Verifications so far, succeded: `{}`, failed: `{}`, required: `{}`",
-                    num_approved, num_rejected, job.schema.required_verifications
+                    num_approved, num_rejected, min_required_verifications
                 );
-                if num_approved >= job.schema.required_verifications.into() &&
+                if num_approved >= min_required_verifications.into() &&
                    num_approved >= 2 * num_rejected {
                     println!("Congrats!, the job has received the minimum number of required /
                         verifications and is now considered to be `verified`.");

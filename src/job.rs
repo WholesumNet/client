@@ -8,13 +8,41 @@ use comms::{
     compute,
 };
 
-// job template as read in(e.g. from disk)
-#[derive(Debug, PartialEq, Eq, Deserialize)]
-pub struct Schema {
+#[derive(Debug, Deserialize)]
+pub struct ComputeConfig {
+    // minimum ram capacity(in GB) for an offer to be accepted
+    pub min_memory_capacity: Option<u32>,
+    // docker image to run
     pub docker_image: String,
+    // invoke this command when container is up
     pub command: String,
-    pub image_id: String,              // image_id as in risc0, it's a hash digest
-    pub required_verifications: u8,    // minimum number of independent verification to regard job as verified
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VerificationConfig {
+    // image_id as in risc0, it's a hash digest
+    pub image_id: String,            
+    // min number of independent successful verifications to regard an executoin trace as verified
+    pub min_required: Option<u8>,    
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HarvestConfig {
+    // min number of verified traces to consider the whole job as verified and done
+    pub min_verified_traces: Option<u8>,    
+}
+
+// job template as read in(e.g. from disk)
+#[derive(Debug, Deserialize)]
+pub struct Schema {
+    pub title: Option<String>,
+    pub timeout: Option<u32>, // in seconds
+    
+    pub compute: ComputeConfig,
+    
+    pub verification: VerificationConfig,
+    
+    pub harvest: HarvestConfig,
 }
 
 /*
@@ -33,7 +61,7 @@ development stages of a job:
 */
 
 // // an execution trace
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct ExecutionTrace {
     // aka prover
     pub server: String,
@@ -44,21 +72,21 @@ pub struct ExecutionTrace {
 impl ExecutionTrace {
     pub fn num_verifications(
         &self,
-        approved: bool
+        is_approved: bool
     ) -> usize {
         self.verifications.values()
-        .filter(|v| approved == **v)
+        .filter(|v| is_approved == **v)
         .count()
     }
 
     pub fn is_verified(
         &self,
-        num_required_verifications: u8
+        min_required_approved_verifications: u8
     ) -> bool {
         let num_approved = self.num_verifications(true);
         let num_rejected = self.num_verifications(false);
         (num_approved > 2 * num_rejected) &&
-        (num_approved >= num_required_verifications.into())
+        (num_approved >= min_required_approved_verifications.into())
     }
 }
 
@@ -78,11 +106,11 @@ pub struct Job {
     // update history from servers
     pub status_history: HashMap::<String, Vec<compute::JobStatus>>, 
 
-    // a server(prover) is assumed to leave several execution receipts where each
-    // receipe may receive up to N successful independent verifications  
+    // if a job is successful, it leaves a receipt to be verified
+    // a server is allowed to leave several distinct execution traces 
     pub execution_trace: HashMap::<String, ExecutionTrace>,
 
-    // an execution trace(identified by the receipt) can become a successful harvest
+    // an execution trace then becomes a successful harvest
     pub harvests: HashMap<String, Harvest>,
 }
 
@@ -105,9 +133,13 @@ impl Job {
 
     // check to see if we have any verified execution traces
     pub fn has_verified_execution_traces(&self) -> bool {
-        self.execution_trace.values()
-        .find(|exec_trace| 
-            exec_trace.is_verified(self.schema.required_verifications)
-        ).is_some()
+        if self.schema.verification.min_required.is_some() {
+            let min_required_verifications = self.schema.verification.min_required.unwrap();
+            return self.execution_trace.values()
+            .find(|exec_trace| 
+                exec_trace.is_verified(min_required_verifications)
+            ).is_some()
+        }
+        false
     }
 }
