@@ -1,6 +1,6 @@
 use uuid::Uuid;
 use std::collections::{
-    HashMap, 
+    HashMap, HashSet
 };
 use serde::Deserialize;
 
@@ -60,16 +60,32 @@ development stages of a job:
  the ideal development sequence: 0, 1, 2.a, 3.a, 4
 */
 
-// // an execution trace
+#[derive(Debug, Eq, PartialEq, Hash)]
+pub struct Harvest {
+    pub fd12_cid: String,
+    //@ more fields TBD
+}
+
+// an execution trace
 #[derive(Debug)]
 pub struct ExecutionTrace {
     // aka prover
     pub server: String,
     // true means that verifier approved the receipt, and false otherwise 
     pub verifications: HashMap<String, bool>,
+    pub harvests: HashSet<Harvest>,
 }
 
 impl ExecutionTrace {
+
+    pub fn new(server_id: String) -> ExecutionTrace {
+        ExecutionTrace {
+            server: server_id,
+            verifications: HashMap::<String, bool>::new(),
+            harvests: HashSet::<Harvest>::new(),
+        }
+    } 
+
     pub fn num_verifications(
         &self,
         is_approved: bool
@@ -90,12 +106,6 @@ impl ExecutionTrace {
     }
 }
 
-#[derive(Debug)]
-pub struct Harvest {
-    pub fd12_cid: Option<String>,
-    //@ more fields TBD
-}
-
 // maintains lifecycle for a job
 #[derive(Debug)]
 pub struct Job {
@@ -106,12 +116,9 @@ pub struct Job {
     // update history from servers
     pub status_history: HashMap::<String, Vec<compute::JobStatus>>, 
 
-    // if a job is successful, it leaves a receipt to be verified
-    // a server is allowed to leave several distinct execution traces 
+    // if a job is finished execution, it leaves a receipt to be verified
+    // a server is allowed to have several distinct execution traces 
     pub execution_trace: HashMap::<String, ExecutionTrace>,
-
-    // an execution trace then becomes a successful harvest
-    pub harvests: HashMap<String, Harvest>,
 }
 
 impl Job {
@@ -126,8 +133,6 @@ impl Job {
             status_history: HashMap::<String, Vec<compute::JobStatus>>::new(),
 
             execution_trace: HashMap::<String, ExecutionTrace>::new(),
-
-            harvests: HashMap::<String, Harvest>::new(),
         }
     }
 
@@ -141,5 +146,19 @@ impl Job {
             ).is_some()
         }
         false
+    }
+
+    // check to see if we have any harvest-ready execution traces
+    pub fn has_harvest_ready_execution_traces(&self) -> bool {
+        if let Some(min_required_verifications) = self.schema.verification.min_required {
+            // verified traces are required
+            return self.execution_trace.values()
+            .find(|exec_trace| 
+                true == exec_trace.is_verified(min_required_verifications)
+            ).is_some()
+        } else {
+            // un-verified traces are ok
+            return false == self.execution_trace.is_empty()
+        }
     }
 }

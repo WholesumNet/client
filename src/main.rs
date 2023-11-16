@@ -130,8 +130,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
 
-                // harvest finished jobs
-                if true == any_harvest_jobs(&jobs) {
+                // need to harvest
+                if true == any_harvest_ready_jobs(&jobs) {
                     let need_harvest = vec![notice::Notice::Harvest.into()];
                     let gossip = &mut swarm.behaviour_mut().gossipsub;
                     let topic = gossip.topics().nth(0).unwrap(); 
@@ -252,11 +252,7 @@ fn any_compute_jobs(
 fn any_pending_jobs(
     jobs: &HashMap::<String, job::Job>
 ) -> bool {
-    jobs.values()
-    .find(|job| {
-        // dismiss unmatched jobs
-        true == job.harvests.is_empty()
-    }).is_some()
+    false == jobs.is_empty()
 }
 
 fn any_verification_jobs(
@@ -277,43 +273,93 @@ fn any_verification_jobs(
     }).is_some()    
 }
 
-fn any_harvest_jobs(
+fn any_harvest_ready_jobs(
     jobs: &HashMap::<String, job::Job>
 ) -> bool {
     jobs.values().find(|job|
-        true == job.has_verified_execution_traces()
+        true == job.has_harvest_ready_execution_traces()
     ).is_some()
 }
 
+// probe compute offer throughly and select the best job
 fn evaluate_compute_offer(
     jobs: &mut HashMap::<String, job::Job>,
     new_compute_offer: compute::Offer,
     server_peer_id: PeerId,
 ) -> Option<compute::ComputeDetails> {
-    // probe offer throughly
-    //@ find the first and send it, needs to be changed when strategies go live
     let server_id58 = server_peer_id.to_base58();
-    if let Some(new_job) = jobs.values().find(|job| {
-        let min_required_memory_capacity = job.schema.compute.min_memory_capacity
-            .unwrap_or_else(|| 0u32);
-        // should not have already been computed by this server
-        // @wtd with finnished ones by this server?
-        (true == job.execution_trace.values()
-            .find(|exec_trace| exec_trace.server == server_id58).is_none()) &&
-        // be brand new(short circuit)
-        (true == job.execution_trace.is_empty() ||        
-        //@temporary should not have any verified execution traces 
-        false == job.has_verified_execution_traces()) &&
-        // has enough memory?
-        (new_compute_offer.hw_specs.memory_capacity >= min_required_memory_capacity)
-        //@ harvests?
-    }) {
+    // basic filtering
+    let filtered_jobs = jobs.values()
+        .filter(|job| {
+            let min_required_memory_capacity = job.schema.compute.min_memory_capacity
+                .unwrap_or_else(|| 0u32);
+
+            // should not have an execution trace from this server
+            (false == job.execution_trace.values()
+            .find(|exec_trace| exec_trace.server == server_id58).is_some()) &&
+            // ensure memory requirement is met
+            (new_compute_offer.hw_specs.memory_capacity >= min_required_memory_capacity)
+        });
+    // priority 1: choose from jobs with empty execution trace
+    let virgin_job_ids: Vec<String> = filtered_jobs.clone()
+        .filter(|job| true == job.execution_trace.is_empty())
+        .map(|job| job.id.clone())
+        .collect();
+    if false == virgin_job_ids.is_empty() {        
+        let index = rand::thread_rng()
+            .gen_range(0..virgin_job_ids.len());
+        let selected_job = jobs.get(&virgin_job_ids[index]).unwrap();
         return Some(compute::ComputeDetails {
-            job_id: new_job.id.clone(),
-            docker_image: new_job.schema.compute.docker_image.clone(),
-            command: new_job.schema.compute.command.clone(),
-        })       
+            job_id: selected_job.id.clone(),
+            docker_image: selected_job.schema.compute.docker_image.clone(),
+            command: selected_job.schema.compute.command.clone(),
+        })
     }
+    // priority 2: choose from jobs with 0 verified execution traces
+    let unverified_job_ids: Vec<String> = filtered_jobs
+        .filter(|job| {
+            let min_required_verifications = job.schema.verification.min_required
+                .unwrap_or_else(|| u8::MAX);
+            // unverified is ok
+            true == job.schema.verification.min_required.is_none() ||
+            true == job.execution_trace.values()
+                .all(|exec_trace| 
+                    false == exec_trace.is_verified(min_required_verifications)
+                )
+        }).map(|job| job.id.clone())
+        .collect();
+    if false == unverified_job_ids.is_empty() {
+        let index = rand::thread_rng()
+            .gen_range(0..unverified_job_ids.len());
+        let selected_job = jobs.get(&unverified_job_ids[index]).unwrap();
+        return Some(compute::ComputeDetails {
+            job_id: selected_job.id.clone(),
+            docker_image: selected_job.schema.compute.docker_image.clone(),
+            command: selected_job.schema.compute.command.clone(),
+        })
+    }
+
+    // priority 3: choose from unharvested jobs?
+
+    // if let Some(new_job) = jobs.values().find(|job| {
+    //     let min_required_memory_capacity = job.schema.compute.min_memory_capacity
+    //         .unwrap_or_else(|| 0u32);
+
+    //     // be brand new(short circuit)
+    //     true == job.execution_trace.is_empty() ||
+    //     // should not have already been computed by this server
+    //     true == job.execution_trace.values()
+    //         .find(|exec_trace| exec_trace.server == server_id58).is_none() &&
+    //     // has enough memory?
+    //     (new_compute_offer.hw_specs.memory_capacity >= min_required_memory_capacity)
+    //     //@ harvests?
+    // }) {
+    //     return Some(compute::ComputeDetails {
+    //         job_id: new_job.id.clone(),
+    //         docker_image: new_job.schema.compute.docker_image.clone(),
+    //         command: new_job.schema.compute.command.clone(),
+    //     })       
+    // }
     None
 }
 
@@ -396,12 +442,7 @@ fn update_jobs(
                 .and_modify(|_v| {
                     println!("Execution trace `{}` is already being tracked.", proper_receipt_cid);
                 })
-                .or_insert_with(|| {
-                    job::ExecutionTrace {
-                        server: server_id58.clone(),
-                        verifications: HashMap::<String, bool>::new(),
-                    }
-                });
+                .or_insert_with(|| job::ExecutionTrace::new(server_id58.clone()));
             },
 
             compute::JobStatus::VerificationSucceeded(receipt_cid) => {
@@ -473,16 +514,27 @@ fn update_jobs(
             },
 
             compute::JobStatus::Harvested(harvest_details) => {
-                let proper_receipt_cid = harvest_details.receipt_cid.clone()
-                    .unwrap_or_else(|| String::from("<unverified>"));
-                if false == job.harvests.contains_key(&proper_receipt_cid) {
-                    println!("Already harvested.");
+                if false == harvest_details.fd12_cid.is_some() {
+                    println!("Missing fd12_cid from harvest, ignored.");
                     continue;
                 }
 
-                let harvest = job.harvests.get_mut(&proper_receipt_cid).unwrap();
-                harvest.fd12_cid = harvest_details.fd12_cid.clone();
+                let proper_receipt_cid = harvest_details.receipt_cid.clone()
+                    .unwrap_or_else(|| String::from("<unverified>"));
+                if false == job.execution_trace.contains_key(&proper_receipt_cid) {
+                    println!("No prior execution trace for this receipt `{}`", proper_receipt_cid);
+                    continue;
+                }
 
+                let exec_trace = job.execution_trace.get_mut(&proper_receipt_cid).unwrap();
+                let harvest = job::Harvest {
+                    fd12_cid: harvest_details.fd12_cid.clone().unwrap(),
+                };
+
+                if false == exec_trace.harvests.insert(harvest) {
+                    println!("Execution trace is already harvested.");
+                }
+                
                 println!("Harvested the execution residues left by `{proper_receipt_cid}`");
             },
         };
