@@ -66,6 +66,9 @@ pub struct Harvest {
     //@ more fields TBD
 }
 
+// unverified execution trace ids start with this prefix
+pub const UNVERIFIED_PREFIX: &str = "<!>";
+
 // an execution trace
 #[derive(Debug)]
 pub struct ExecutionTrace {

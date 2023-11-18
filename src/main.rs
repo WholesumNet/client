@@ -300,7 +300,7 @@ fn evaluate_compute_offer(
             // ensure memory requirement is met
             (new_compute_offer.hw_specs.memory_capacity >= min_required_memory_capacity)
         });
-    // priority 1: choose from jobs with empty execution trace
+    // priority 1: choose from jobs with empty execution traces
     let virgin_job_ids: Vec<String> = filtered_jobs.clone()
         .filter(|job| true == job.execution_trace.is_empty())
         .map(|job| job.id.clone())
@@ -315,7 +315,7 @@ fn evaluate_compute_offer(
             command: selected_job.schema.compute.command.clone(),
         })
     }
-    // priority 2: choose from jobs with 0 verified execution traces
+    // priority 2: choose from jobs with empty verified execution traces
     let unverified_job_ids: Vec<String> = filtered_jobs
         .filter(|job| {
             let min_required_verifications = job.schema.verification.min_required
@@ -341,25 +341,7 @@ fn evaluate_compute_offer(
 
     // priority 3: choose from unharvested jobs?
 
-    // if let Some(new_job) = jobs.values().find(|job| {
-    //     let min_required_memory_capacity = job.schema.compute.min_memory_capacity
-    //         .unwrap_or_else(|| 0u32);
-
-    //     // be brand new(short circuit)
-    //     true == job.execution_trace.is_empty() ||
-    //     // should not have already been computed by this server
-    //     true == job.execution_trace.values()
-    //         .find(|exec_trace| exec_trace.server == server_id58).is_none() &&
-    //     // has enough memory?
-    //     (new_compute_offer.hw_specs.memory_capacity >= min_required_memory_capacity)
-    //     //@ harvests?
-    // }) {
-    //     return Some(compute::ComputeDetails {
-    //         job_id: new_job.id.clone(),
-    //         docker_image: new_job.schema.compute.docker_image.clone(),
-    //         command: new_job.schema.compute.command.clone(),
-    //     })       
-    // }
+    
     None
 }
 
@@ -377,13 +359,14 @@ fn evaluate_verify_offer(
            false == job.schema.verification.min_required.is_some() {
             continue;
         }
-        let min_required_verifications = 
-            job.schema.verification.min_required.unwrap();
+        let min_required_verifications = job.schema.verification.min_required.unwrap();
         for (receipt_cid, exec_trace) in job.execution_trace.iter() {
-            // server != verifier and the execution trace should be unverified
+            // server != verifier,
+            // the execution trace should be unverified, 
+            // and receipt_cid must be present
             if exec_trace.server == verifier_id58 ||
                exec_trace.is_verified(min_required_verifications) ||
-               receipt_cid == "<unverified>" {
+               true == receipt_cid.starts_with(job::UNVERIFIED_PREFIX) {
                 continue;
             }
 
@@ -432,12 +415,12 @@ fn update_jobs(
 
             compute::JobStatus::ExecutionSucceeded(receipt_cid) => {
                 if true == receipt_cid.is_none() {
-                    println!("Warning: execution succeeded but `receipt_cid` is missing.");
+                    println!("Warning: execution succeeded but `receipt_cid` is missing, so the trace is unverified.");
                 }
 
                 //@ unverified-per-server
                 let proper_receipt_cid = receipt_cid.clone()
-                    .unwrap_or_else(|| String::from("<unverified>"));
+                    .unwrap_or_else(|| format!("{}-{}", job::UNVERIFIED_PREFIX, server_id58));
                 job.execution_trace.entry(proper_receipt_cid.clone())
                 .and_modify(|_v| {
                     println!("Execution trace `{}` is already being tracked.", proper_receipt_cid);
@@ -520,13 +503,21 @@ fn update_jobs(
                 }
 
                 let proper_receipt_cid = harvest_details.receipt_cid.clone()
-                    .unwrap_or_else(|| String::from("<unverified>"));
+                    .unwrap_or_else(|| format!("{}-{}", job::UNVERIFIED_PREFIX, server_id58));
                 if false == job.execution_trace.contains_key(&proper_receipt_cid) {
                     println!("No prior execution trace for this receipt `{}`", proper_receipt_cid);
                     continue;
                 }
 
                 let exec_trace = job.execution_trace.get_mut(&proper_receipt_cid).unwrap();
+                // ignore unverified harvests that need to be verified first, @ how about being opportunistic? 
+                let min_required_verifications = 
+                    job.schema.verification.min_required.unwrap_or_else(|| u8::MAX); 
+                if job.schema.verification.min_required.is_some() && 
+                   false == exec_trace.is_verified(min_required_verifications) {
+                    println!("Execution trace must first be verified.");
+                    continue;
+                }
                 let harvest = job::Harvest {
                     fd12_cid: harvest_details.fd12_cid.clone().unwrap(),
                 };
@@ -535,7 +526,7 @@ fn update_jobs(
                     println!("Execution trace is already harvested.");
                 }
                 
-                println!("Harvested the execution residues left by `{proper_receipt_cid}`");
+                println!("Harvested the execution residues for `{proper_receipt_cid}`");
             },
         };
     }
