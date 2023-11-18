@@ -598,6 +598,7 @@ dependencies = [
  "libp2p",
  "libp2p-quic 0.8.0-alpha",
  "num_enum",
+ "rand",
  "serde",
  "toml",
  "uuid",

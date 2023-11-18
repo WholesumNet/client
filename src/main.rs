@@ -2,7 +2,6 @@
 
 use futures::{
     prelude::*, select,
-    // stream::{Stream},
 };
 use async_std::stream;
 use libp2p::{
@@ -10,10 +9,13 @@ use libp2p::{
     swarm::{SwarmEvent},
     PeerId,
 };
-use std::collections::HashMap;
+use std::collections::{
+    HashMap,
+};
 use std::error::Error;
 use std::time::Duration;
-use std::fs;
+use rand::Rng;
+
 use toml;
 use clap::Parser;
 use comms::{
@@ -26,10 +28,10 @@ mod job;
 
 // CLI
 #[derive(Parser, Debug)]
-#[command(name = "Client CLI for Wholesum: p2p verifiable computing marketplace.")]
+#[command(name = "Client CLI for Wholesum: p2p verifiable computing network.")]
 #[command(author = "Wholesum team")]
 #[command(version = "1.0")]
-#[command(about = "Yet another verifiable compute marketplace.", long_about = None)]
+#[command(about = "Yet another p2p verifiable computing network.", long_about = None)]
 struct Cli {
     #[arg(short, long)]
     job: Option<String>,
@@ -39,28 +41,20 @@ struct Cli {
 async fn main() -> Result<(), Box<dyn Error>> {
     
     let cli = Cli::parse();
-    println!("Started client agent for Wholesum.");
+    println!("<-> client agent for Wholesum network <->");
     
     // Libp2p swarm 
-    let mut swarm = comms::p2p::setup_local_swarm();    
-    
-    // jobs that are already sent for computation and need lifecycle maintenance 
-    let mut jobs = HashMap::<String, job::Job>::new();    
+    let mut swarm = comms::p2p::setup_local_swarm();
+
+    // active jobs
+    let mut jobs = HashMap::<String, job::Job>::new();  
 
     if let Some(job_filename) = cli.job {
-        println!("Loading job from: `{job_filename}`...");
-        match fs::read_to_string(job_filename) {
-            Ok(ss) => {
-                match toml::from_str(ss.as_str()) {
-                    Ok(j) => {
-                        let new_job = job::Job::new(None, j);
-                        jobs.insert(new_job.id.clone(), new_job);
-                    },
-                    Err(e) => println!("Job parse error: {:#?}", e),
-                }                
-            },
-            Err(e) => println!("Job load error: {e:?}"),
-        };
+        let new_job = job::Job::new(None, 
+            toml::from_str(&std::fs::read_to_string(job_filename)?)?
+        );
+        println!("A new job is here: {:#?}", new_job.schema);
+        jobs.insert(new_job.id.clone(), new_job);
     }    
 
     // read full lines from stdin
@@ -70,9 +64,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.listen_on("/ip4/0.0.0.0/udp/0/quic-v1".parse()?)?;
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
-    let mut timer_post_jobs = stream::interval(Duration::from_secs(5)).fuse();
+    let mut timer_post_jobs = stream::interval(Duration::from_secs(10)).fuse();
     // let mut idle_timer = stream::interval(Duration::from_secs(5 * 60)).fuse();
-    let mut timer_job_status = stream::interval(Duration::from_secs(30)).fuse();
+    // let mut timer_job_status = stream::interval(Duration::from_secs(30)).fuse();
+    // gossip messages are content-addressed, so we add a random nounce to each message
+    let mut rng = rand::thread_rng();
+
     // kick it off
     loop {
         select! {
@@ -93,49 +90,57 @@ async fn main() -> Result<(), Box<dyn Error>> {
             //     }
             // },
 
-            // post "need compute/verify" if compute/verification pool is not empty
-            () = timer_post_jobs.select_next_some() => {
-                // need compute
-                if false == any_compute_jobs(&jobs) {
-                    println!("No compute jobs to post.");
-                } else {
+            // post need `compute/verify/harvest`, and status updates
+            () = timer_post_jobs.select_next_some() => { 
+                // got any compute jobs?
+                if true == any_compute_jobs(&jobs) {        
+                    // need compute                    
                     let need_compute_msg = vec![notice::Notice::Compute.into()];
                     let gossip = &mut swarm.behaviour_mut().gossipsub;
-                    let topic = gossip.topics().nth(0).unwrap();
+                    let topic = gossip.topics().nth(0).unwrap(); 
                     if let Err(e) = gossip
                         .publish(topic.clone(), need_compute_msg) {
                 
                         println!("need compute publish error: {e:?}");
                     }
                 }
-                // need verification
-                if false == any_verification_jobs(&jobs) {
-                    println!("No verification jobs to post.");
-                } else {
-                    let need_verify_msg = vec![notice::Notice::Verify.into()];
+                // need status updates?
+                if true == any_pending_jobs(&jobs) {        
+                    // status poll
+                    let nounce: u8 = rng.gen();
+                    let job_status_msg = vec![notice::Notice::JobStatus.into(), nounce];
+
                     let gossip = &mut swarm.behaviour_mut().gossipsub;
-                    let topic = gossip.topics().nth(0).unwrap();
+                    let topic = gossip.topics().nth(0).unwrap(); 
+                    if let Err(e) = gossip
+                        .publish(topic.clone(), job_status_msg) {
+                
+                        println!("`job status poll` publish error: {e:?}");
+                    }
+                }
+                // need verification
+                if true == any_verification_jobs(&jobs) {
+                    let need_verify_msg = vec![notice::Notice::Verification.into()];
+                    let gossip = &mut swarm.behaviour_mut().gossipsub;
+                    let topic = gossip.topics().nth(0).unwrap(); 
                     if let Err(e) = gossip
                         .publish(topic.clone(), need_verify_msg) {
                 
-                        println!("need verify publish error: {e:?}");
+                        println!("`need verify` publish error: {e:?}");
                     }
                 }
-            },
 
-            // poll jobs' status 
-            () = timer_job_status.select_next_some() => {
-                if false == any_pending_jobs(&jobs) {
-                    continue;
+                // need to harvest
+                if true == any_harvest_ready_jobs(&jobs) {
+                    let need_harvest = vec![notice::Notice::Harvest.into()];
+                    let gossip = &mut swarm.behaviour_mut().gossipsub;
+                    let topic = gossip.topics().nth(0).unwrap(); 
+                    if let Err(e) = gossip
+                        .publish(topic.clone(), need_harvest) {
+                
+                        println!("`need harvest` publish error: {e:?}");
+                    }
                 }
-                let job_status_msg = vec![notice::Notice::JobStatus.into()];
-                let gossip = &mut swarm.behaviour_mut().gossipsub;
-                let topic = gossip.topics().nth(0).unwrap();
-                if let Err(e) = gossip
-                    .publish(topic.clone(), job_status_msg) {
-            
-                    println!("job status publish error: {e:?}");
-                }                    
             },
 
             event = swarm.select_next_some() => match event {
@@ -180,28 +185,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 })) => {                
                     match request {
                         notice::Request::ComputeOffer(compute_offer) => {
-                            println!("received `compute offer` from server: `{}`, offer: {:?}", 
+                            println!("received `compute offer` from server: `{}`, offer: {:#?}", 
                                 server_peer_id, compute_offer);
-                            if let Some(compute_job) = examine_compute_offer(&mut jobs, compute_offer) {
+                            if let Some(compute_job) = evaluate_compute_offer(&mut jobs, compute_offer, server_peer_id) {
                                 let _ = swarm.behaviour_mut().req_resp
                                     .send_response(
                                         channel,
                                         notice::Response::ComputeJob(compute_job)
                                     );
+                                println!("Compute job was sent to the server.");
                             } else {
-                                println!("Got no compute jobs to respond to the offer.");
+                                println!("Ignored the offer.");
                             }
                         },      
 
                         notice::Request::VerificationOffer => {
                             println!("received `verify offer` from server: `{}`", 
                                 server_peer_id);
-                            // if false == any_verification_jobs(jobs) {
-                            //     println!("No verification jobs to post.");
-                            //     continue;
-                            // }
-                            //@ examine verify offer
-                            if let Some(verification_details) = examine_verify_offer(&mut jobs, server_peer_id) {
+                            //@ evaluate verify offer
+                            if let Some(verification_details) = evaluate_verify_offer(&mut jobs, server_peer_id) {
                                 let _ = swarm
                                     .behaviour_mut().req_resp
                                     .send_response(
@@ -215,12 +217,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         },
 
                         // job status update 
-                        notice::Request::UpdateForJob(new_update) => {
-                            update_job(
+                        notice::Request::UpdateForJobs(updates) => {
+                            update_jobs(
                                 &mut jobs,
-                                new_update,
+                                &updates,
                                 server_peer_id,
-                            );                            
+                            );
+                            
                         },
                     }
                 },
@@ -232,190 +235,299 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn any_compute_jobs(jobs: &HashMap::<String, job::Job>) -> bool {
-    jobs.values().find(|j| j.overall_status == job::Status::JustCreated).is_some()
+// check if any compute jobs are there to gossip about
+fn any_compute_jobs(
+    jobs: &HashMap::<String, job::Job>
+) -> bool {
+    jobs.values()
+    .find(|job| {
+        // brand new (short circuit), or failed, or running?
+        true == job.execution_trace.is_empty() ||
+        // should not have any verified execution traces 
+        false == job.has_verified_execution_traces()
+    }).is_some()
 }
 
-fn any_verification_jobs(jobs: &HashMap::<String, job::Job>) -> bool {
-    for (_, job) in jobs.iter() {
-        if let Some(_) = job.updates.values()
-            .find(|u| u.status == job::Status::ReadyForVerification) {
-                return true;
-            }
-    }
-    false
+// check if any jobs need status updates
+fn any_pending_jobs(
+    jobs: &HashMap::<String, job::Job>
+) -> bool {
+    false == jobs.is_empty()
 }
 
-fn any_pending_jobs(jobs: &HashMap::<String, job::Job>) -> bool {
-    jobs.values().find(|j| (j.overall_status <= job::Status::ReadyToHarvest))
-        .is_some()
+fn any_verification_jobs(
+    jobs: &HashMap::<String, job::Job>
+) -> bool {
+    jobs.values().find(|job| {
+        let min_required_verifications = 
+            job.schema.verification.min_required.unwrap_or_else(|| u8::MAX);
+        // job requires to be verified
+        true == job.schema.verification.min_required.is_some() &&
+        // should have at least one execution succeeded
+        false == job.execution_trace.is_empty() &&
+        // should have at least one unverified execution trace
+        true == job.execution_trace.values()
+        .find(|exec_trace| 
+            false == exec_trace.is_verified(min_required_verifications)
+        ).is_some()
+    }).is_some()    
 }
 
-fn examine_compute_offer(
+fn any_harvest_ready_jobs(
+    jobs: &HashMap::<String, job::Job>
+) -> bool {
+    jobs.values().find(|job|
+        true == job.has_harvest_ready_execution_traces()
+    ).is_some()
+}
+
+// probe compute offer throughly and select the best job
+fn evaluate_compute_offer(
     jobs: &mut HashMap::<String, job::Job>,
-    new_compute_offer: compute::Offer
+    new_compute_offer: compute::Offer,
+    server_peer_id: PeerId,
 ) -> Option<compute::ComputeDetails> {
-    // probe the offer throughly and respond needful
-    //@ find the first and send it, needs to be changed when strategies are live
-    if let Some(new_job) = jobs.values()
-        .find(|j| j.overall_status == job::Status::JustCreated) {
-        return Some(compute::ComputeDetails {
-            job_id: new_job.id.clone(),
-            docker_image: new_job.schema.docker_image.clone(),
-            command: new_job.schema.command.clone(),
+    let server_id58 = server_peer_id.to_base58();
+    // basic filtering
+    let filtered_jobs = jobs.values()
+        .filter(|job| {
+            let min_required_memory_capacity = job.schema.compute.min_memory_capacity
+                .unwrap_or_else(|| 0u32);
+
+            // should not have an execution trace from this server
+            (false == job.execution_trace.values()
+            .find(|exec_trace| exec_trace.server == server_id58).is_some()) &&
+            // ensure memory requirement is met
+            (new_compute_offer.hw_specs.memory_capacity >= min_required_memory_capacity)
         });
-    } 
+    // priority 1: choose from jobs with empty execution traces
+    let virgin_job_ids: Vec<String> = filtered_jobs.clone()
+        .filter(|job| true == job.execution_trace.is_empty())
+        .map(|job| job.id.clone())
+        .collect();
+    if false == virgin_job_ids.is_empty() {        
+        let index = rand::thread_rng()
+            .gen_range(0..virgin_job_ids.len());
+        let selected_job = jobs.get(&virgin_job_ids[index]).unwrap();
+        return Some(compute::ComputeDetails {
+            job_id: selected_job.id.clone(),
+            docker_image: selected_job.schema.compute.docker_image.clone(),
+            command: selected_job.schema.compute.command.clone(),
+        })
+    }
+    // priority 2: choose from jobs with empty verified execution traces
+    let unverified_job_ids: Vec<String> = filtered_jobs
+        .filter(|job| {
+            let min_required_verifications = job.schema.verification.min_required
+                .unwrap_or_else(|| u8::MAX);
+            // unverified is ok
+            true == job.schema.verification.min_required.is_none() ||
+            true == job.execution_trace.values()
+                .all(|exec_trace| 
+                    false == exec_trace.is_verified(min_required_verifications)
+                )
+        }).map(|job| job.id.clone())
+        .collect();
+    if false == unverified_job_ids.is_empty() {
+        let index = rand::thread_rng()
+            .gen_range(0..unverified_job_ids.len());
+        let selected_job = jobs.get(&unverified_job_ids[index]).unwrap();
+        return Some(compute::ComputeDetails {
+            job_id: selected_job.id.clone(),
+            docker_image: selected_job.schema.compute.docker_image.clone(),
+            command: selected_job.schema.compute.command.clone(),
+        })
+    }
+
+    // priority 3: choose from unharvested jobs?
+
+    
     None
 }
 
-fn examine_verify_offer(
-    jobs: & HashMap::<String, job::Job>,
+// probe verify offer and respond needful
+fn evaluate_verify_offer(
+    jobs: &HashMap::<String, job::Job>,
     server_peer_id: PeerId
 ) -> Option<compute::VerificationDetails> {
-    // probe verify offer and respond needful
-    for (_, job) in jobs.iter() {
-        for(prover_id, update) in job.updates.iter() {
-            // ignore when prover === verifier  
-            if server_peer_id == *prover_id {
+    //@ fifo atm, should change once strategies go live
+    let verifier_id58 = server_peer_id.to_base58();
+    for job in jobs.values() {
+        // should have at least one execution succeeded or
+        // if verification is needed at all
+        if true == job.execution_trace.is_empty() ||
+           false == job.schema.verification.min_required.is_some() {
+            continue;
+        }
+        let min_required_verifications = job.schema.verification.min_required.unwrap();
+        for (receipt_cid, exec_trace) in job.execution_trace.iter() {
+            // server != verifier,
+            // the execution trace should be unverified, 
+            // and receipt_cid must be present
+            if exec_trace.server == verifier_id58 ||
+               exec_trace.is_verified(min_required_verifications) ||
+               true == receipt_cid.starts_with(job::UNVERIFIED_PREFIX) {
                 continue;
             }
-            //@ find the first, needs to be changed when strategies go live
-            if update.status == job::Status::ReadyForVerification {
-                return Some(compute::VerificationDetails {
-                    job_id: job.id.clone(),
-                    image_id: job.image_id.clone(),
-                    receipt_cid: update.residue.receipt_cid.clone().unwrap(),
-                })
-            }
+
+            return Some(compute::VerificationDetails {
+                job_id: job.id.clone(),
+                image_id: job.schema.verification.image_id.clone(),
+                receipt_cid: receipt_cid.clone(),
+                pod_name: format!("receipt_{}", job.id),
+            })
         }
     }
-    None
+    None    
 }
 
-fn update_job(
+fn update_jobs(
     jobs: &mut HashMap::<String, job::Job>,
-    new_update: compute::JobUpdate,
+    updates: &Vec<compute::JobUpdate>,
     server_peer_id: PeerId,
 ) {
-    // process a new update for job
-    if false == jobs.contains_key(&new_update.id) {
-        println!("update for an unknown job: `{}`",
-            new_update.id);
-        return;
+    // process updates for jobs
+    for new_update in updates {
+        // process a new update for job
+        if false == jobs.contains_key(&new_update.id) {
+            println!("Status update for an unknown job: `{}`",
+                new_update.id);
+            continue;
+        }
+
+        let server_id58 = server_peer_id.to_base58();
+        println!("Status update for job `{}`, from `{}`: `{:#?}`",
+            new_update.id, server_id58, new_update);
+        let job = jobs.get_mut(&new_update.id).unwrap();
+        // ensure job has bare minimum update history
+        job.status_history.entry(server_id58.clone())
+        .and_modify(|h| h.push(new_update.status.clone()))
+        .or_insert(vec![new_update.status.clone()]);
+
+        match &new_update.status {                
+            compute::JobStatus::Running => {
+                // TBD
+            },
+
+            compute::JobStatus::ExecutionFailed(_fd12_cid) => {
+                // TBD
+            },
+
+            compute::JobStatus::ExecutionSucceeded(receipt_cid) => {
+                if true == receipt_cid.is_none() {
+                    println!("Warning: execution succeeded but `receipt_cid` is missing, so the trace is unverified.");
+                }
+
+                //@ unverified-per-server
+                let proper_receipt_cid = receipt_cid.clone()
+                    .unwrap_or_else(|| format!("{}-{}", job::UNVERIFIED_PREFIX, server_id58));
+                job.execution_trace.entry(proper_receipt_cid.clone())
+                .and_modify(|_v| {
+                    println!("Execution trace `{}` is already being tracked.", proper_receipt_cid);
+                })
+                .or_insert_with(|| job::ExecutionTrace::new(server_id58.clone()));
+            },
+
+            compute::JobStatus::VerificationSucceeded(receipt_cid) => {
+                if false == job.schema.verification.min_required.is_some() {
+                    println!("Warning: job is not required to be verified.");
+                }
+                if false == job.execution_trace.contains_key(receipt_cid) {
+                    //@wtd, its probably a successful execution that we have missed
+                    println!("No prior execution trace for this receipt `{}`", receipt_cid);
+                    continue;
+                }
+                let exec_trace = job.execution_trace.get_mut(receipt_cid).unwrap();
+                if let Some(old_decision) = exec_trace.verifications.insert(receipt_cid.clone(), true) {
+                    if false == old_decision {
+                        println!("Warning: verification status flip, `failed` -> `succeeded`");
+                    } else {
+                        println!("Verification status `succeeded` is already noted.");
+                    }
+                }                
+                let num_approved = exec_trace.num_verifications(true);
+                let num_rejected = exec_trace.num_verifications(false);
+                let min_required_verifications = 
+                    job.schema.verification.min_required.unwrap_or_else(|| u8::MAX);
+                println!(
+                    "Verifications so far, succeded: `{}`, failed: `{}`, required: `{}`",
+                    num_approved, num_rejected, min_required_verifications
+                );
+                if num_approved >= min_required_verifications.into() &&
+                   num_approved >= 2 * num_rejected {
+                    println!("Congrats!, the job has received the minimum number of required \
+                        verifications and is now considered to be verified.");
+                } else {
+                    println!("Still unverified.");
+                }               
+            },
+
+            compute::JobStatus::VerificationFailed(receipt_cid) => {                
+                if false == job.schema.verification.min_required.is_some() {
+                    println!("Warning: job is not required to be verified.");
+                }
+                if false == job.execution_trace.contains_key(receipt_cid) {
+                    //@wtd
+                    println!("No prior execution trace for this receipt `{}`", receipt_cid);
+                    continue;
+                }
+                let exec_trace = job.execution_trace.get_mut(receipt_cid).unwrap();
+                if let Some(old_decision) = exec_trace.verifications.insert(receipt_cid.clone(), false) {
+                    if true == old_decision {
+                        println!("Warning: verification status flip, `succeeded` -> `failed`");
+                    } else {
+                        println!("Verification status `failed` is already noted.");
+                    }
+                }
+                let min_required_verifications = 
+                    job.schema.verification.min_required.unwrap_or_else(|| u8::MAX);
+                let num_approved = exec_trace.num_verifications(true);
+                let num_rejected = exec_trace.num_verifications(false);
+                println!(
+                    "Verifications so far, succeded: `{}`, failed: `{}`, required: `{}`",
+                    num_approved, num_rejected, min_required_verifications
+                );
+                if num_approved >= min_required_verifications.into() &&
+                   num_approved >= 2 * num_rejected {
+                    println!("Congrats!, the job has received the minimum number of required /
+                        verifications and is now considered to be `verified`.");
+                } else {
+                    println!("Still unverified.");
+                }    
+            },
+
+            compute::JobStatus::Harvested(harvest_details) => {
+                if false == harvest_details.fd12_cid.is_some() {
+                    println!("Missing fd12_cid from harvest, ignored.");
+                    continue;
+                }
+
+                let proper_receipt_cid = harvest_details.receipt_cid.clone()
+                    .unwrap_or_else(|| format!("{}-{}", job::UNVERIFIED_PREFIX, server_id58));
+                if false == job.execution_trace.contains_key(&proper_receipt_cid) {
+                    println!("No prior execution trace for this receipt `{}`", proper_receipt_cid);
+                    continue;
+                }
+
+                let exec_trace = job.execution_trace.get_mut(&proper_receipt_cid).unwrap();
+                // ignore unverified harvests that need to be verified first, @ how about being opportunistic? 
+                let min_required_verifications = 
+                    job.schema.verification.min_required.unwrap_or_else(|| u8::MAX); 
+                if job.schema.verification.min_required.is_some() && 
+                   false == exec_trace.is_verified(min_required_verifications) {
+                    println!("Execution trace must first be verified.");
+                    continue;
+                }
+                let harvest = job::Harvest {
+                    fd12_cid: harvest_details.fd12_cid.clone().unwrap(),
+                };
+
+                if false == exec_trace.harvests.insert(harvest) {
+                    println!("Execution trace is already harvested.");
+                }
+                
+                println!("Harvested the execution residues for `{proper_receipt_cid}`");
+            },
+        };
     }
-    println!("job update for `{}`, from `{}`",
-        new_update.id, server_peer_id);
-    let job = jobs.get_mut(&new_update.id).unwrap();
-    if job.overall_status == job::Status::ReadyToHarvest {
-        println!("job is ready to harvest, and needs no more updates.");
-        return;
-    }
-    // ideal development cycle of a job:
-    // negotiated -> running -> ready for verification -> harvest ready
-    match new_update.status {
-        compute::JobStatus::Running => {
-            println!("Still running...");
-            job.updates.entry(server_peer_id)
-                .and_modify(|e| {
-                    if e.status < job::Status::Running {
-                        println!("job is already running, ignored.");
-                    } else {
-                        e.status = job::Status::Running;
-                    }
-                })
-                .or_insert(job::Update {
-                    status: job::Status::Running,
-                    residue: job::Residue {
-                        stderr_cid: None,
-                        stdout_cid: None,
-                        receipt_cid: None,
-                    },
-                });
-            job.overall_status = job::Status::Running;
-        },
-
-        compute::JobStatus::ExecutionFailed(stderr_cid, stdout_cid) => {                                    
-            println!("finished with error, stderr_cid: `{:?}`, stdout_cid: `{:?}`",
-                stderr_cid, stdout_cid);
-            job.updates.entry(server_peer_id)
-                .and_modify(|e| {
-                    if e.status < job::Status::ExecutionFailed {
-                        println!("job is already failed, ignored.");
-                    } else {
-                        e.status = job::Status::ExecutionFailed;
-                    }
-                })
-                .or_insert(job::Update {
-                    status: job::Status::ExecutionFailed,
-                    residue: job::Residue {
-                        stderr_cid: stderr_cid,
-                        stdout_cid: stdout_cid,
-                        receipt_cid: None,
-                    },
-                });
-            //@ wtd with overall_status?
-        },
-
-        compute::JobStatus::ReadyForVerification(receipt_cid) => {
-            println!("Ready to be verified!");
-            job.updates.entry(server_peer_id)
-                .and_modify(|e| {
-                    if e.status > job::Status::ReadyForVerification {
-                        println!("job is already finished, ignored.");
-                    } else {
-                        e.status = job::Status::ReadyForVerification;
-                    }
-                })
-                .or_insert(job::Update {
-                    status: job::Status::ReadyForVerification,
-                    residue: job::Residue {
-                        stderr_cid: None,
-                        stdout_cid: None,
-                        receipt_cid: receipt_cid,
-                    },
-                });            
-        },
-
-        compute::JobStatus::VerificationSucceeded => {                                    
-            println!("verification succeeded");
-            job.updates.entry(server_peer_id)
-                .and_modify(|e| {
-                    if e.status > job::Status::VerificationSucceeded {
-                        println!("job is already succeeded in verification, ignored.");
-                    } else {
-                        e.status = job::Status::VerificationSucceeded;
-                    }
-                })
-                .or_insert(job::Update {
-                    status: job::Status::VerificationSucceeded,
-                    residue: job::Residue {
-                        stderr_cid: None,
-                        stdout_cid: None,
-                        receipt_cid: None,
-                    },
-                });
-            //@ wtd with overall_status?
-        },
-
-        compute::JobStatus::VerificationFailed(e) => {
-            println!("Verification failed, error: `{e:?}`");
-            job.updates.entry(server_peer_id)
-                .and_modify(|e| {
-                    if e.status > job::Status::VerificationFailed {
-                        println!("job is already finished, ignored.");
-                    } else {
-                        e.status = job::Status::VerificationFailed;
-                    }
-                })
-                .or_insert(job::Update {
-                    status: job::Status::VerificationFailed,
-                    residue: job::Residue {
-                        stderr_cid: None,
-                        stdout_cid: None,
-                        receipt_cid: None,
-                    },
-                });
-        },
-        _ => (),
-    };
 }
