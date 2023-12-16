@@ -22,15 +22,15 @@ timeout = 30
 min_memory_capacity = 4
 
 # docker image run by the server
-docker_image = "test-risc0"
+docker_image = "rezahsnz/risc0-sha"
 
 # command to run, will run as: "sh -c command"
-command = "/root/risc0-0.17.0/examples/target/release/factors 1>/root/residue/stdout 2>/root/residue/stderr"
+command = "/home/prince/sha 1>/home/prince/residue/stdout 2>/home/prince/residue/stderr"
 
 [verification]
 
-# Risc0 image_id for the factors examples
-image_id = "af1b4fd024acd5f8756263d3c73e66d816a86ca285bb4addc2a3ee8a14bb87c2"
+# Risc0 image_id of the "sha example"
+image_id = "c0e787dad721d314cc4823f2e0cd5e7caa405575cc55947217bd5663c076ad6a"
 
 # minimum number of independent successful verifications
 min_required = 1
@@ -40,6 +40,8 @@ min_required = 1
 # minimum number of verified traces to make the whole job verified and done
 min_verified_traces = 1
 
+
+
 </pre>
 
 Save the job description to a file named `simple_job.toml`, then run it to connect with other nodes to get your job done:<br>
@@ -47,5 +49,16 @@ Save the job description to a file named `simple_job.toml`, then run it to conne
 
 Please note that the sample job file requires the presence of [Server](https://github.com/WholesumNet/server) and [Verifier](https://github.com/WholesumNet/verifier) nodes. 
 
-## Caveat
-Please be mindful that as of now the docker image `test-risczero` is not available to the public.
+## USAGE
+
+<pre>
+
+Usage: client [OPTIONS]
+
+Options:
+  -j, --job <JOB>  
+  -h, --help       Print help
+  -V, --version    Print version
+
+</pre>
+

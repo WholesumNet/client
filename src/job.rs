@@ -104,6 +104,7 @@ impl ExecutionTrace {
     ) -> bool {
         let num_approved = self.num_verifications(true);
         let num_rejected = self.num_verifications(false);
+        //@ temporary until strategies go live
         (num_approved > 2 * num_rejected) &&
         (num_approved >= min_required_approved_verifications.into())
     }
