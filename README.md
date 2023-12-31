@@ -7,7 +7,7 @@ Wholesum network is a p2p verifiable computing network. It builds on top of [Ris
 
 ## How to run
 
-To run a client agent, you would first need to fork the [comms](https://github.com/WholesumNet/comms) library and put it in the parent(aka ..) directory of the client directory. Next, you would need a job file, in case you were interested to run a tiny job, with the following look in TOML:
+To run a client agent, you would first need to fork the [comms](https://github.com/WholesumNet/comms) library and put it in the parent("..") directory of the client directory. Next, you would need a job file, in case you were interested to run a tiny job, with the following look in TOML:
 
 <pre>
 
@@ -50,12 +50,10 @@ Please note that the sample job file requires the presence of [Server](https://g
 ## USAGE
 
 <pre>
-
 Usage: client [OPTIONS]
 
 Options:
   -j, --job <JOB>  
   -h, --help       Print help
   -V, --version    Print version
-
 </pre>
