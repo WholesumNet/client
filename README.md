@@ -40,10 +40,10 @@ min_required = 1
 min_verified_traces = 1
 </pre>
 
-Save the above content to a file named `simple_job.toml`, and then run the client  get your job done:<br>
+Save the above content to a file named `simple_job.toml`, and then run the client cli to get your job done:<br>
 `cargo run -- --job simple_job.toml`
 
-Please note that the sample job file requires the presence of [Server](https://github.com/WholesumNet/server) and [Verifier](https://github.com/WholesumNet/verifier) nodes over the network which at moment is local only. 
+Please note that the sample job file shown here requires the presence of [Server](https://github.com/WholesumNet/server) and [Verifier](https://github.com/WholesumNet/verifier) nodes in order to demonstrate a complete `request-run-verify` cycle.
 
 ## USAGE
 
