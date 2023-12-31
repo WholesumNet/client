@@ -372,7 +372,7 @@ fn evaluate_verify_offer(
 
             return Some(compute::VerificationDetails {
                 job_id: job.id.clone(),
-                image_id: job.schema.verification.image_id.clone(),
+                risc0_image_id: job.schema.verification.image_id.clone(),
                 receipt_cid: receipt_cid.clone(),
                 pod_name: format!("receipt_{}", job.id),
             })

@@ -40,25 +40,20 @@ min_required = 1
 # minimum number of verified traces to make the whole job verified and done
 min_verified_traces = 1
 
-
-
 </pre>
 
-Save the job description to a file named `simple_job.toml`, then run it to connect with other nodes to get your job done:<br>
-`cargo run -- --job simple_job.toml`
+Save the above content in a file named `simple_job.toml`, and then run the client  get your job done:<br>
+`cargo run -- --job my_awesome_job.toml`
 
-Please note that the sample job file requires the presence of [Server](https://github.com/WholesumNet/server) and [Verifier](https://github.com/WholesumNet/verifier) nodes. 
+Please note that the sample job file requires the presence of [Server](https://github.com/WholesumNet/server) and [Verifier](https://github.com/WholesumNet/verifier) nodes over the network which at moment is local only. 
 
 ## USAGE
 
 <pre>
-
 Usage: client [OPTIONS]
 
 Options:
   -j, --job <JOB>  
   -h, --help       Print help
   -V, --version    Print version
-
 </pre>
-
