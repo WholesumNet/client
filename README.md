@@ -12,7 +12,7 @@ To run a client agent, you would first need to fork the [comms](https://github.c
 <pre>
 # schema of a tyipcal job
 
-title = "yet another job"
+title = "yet another simple job"
 timeout = 30
 
 [compute]
