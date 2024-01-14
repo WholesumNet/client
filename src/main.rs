@@ -19,12 +19,13 @@ use rand::Rng;
 use toml;
 use clap::Parser;
 use comms::{
-    p2p::{MyBehaviourEvent},
+    p2p::{LocalBehaviourEvent},
     notice,
     compute
 };
 
 mod job;
+use job::Job;
 
 // CLI
 #[derive(Parser, Debug)]
@@ -47,10 +48,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut swarm = comms::p2p::setup_local_swarm();
 
     // active jobs
-    let mut jobs = HashMap::<String, job::Job>::new();  
+    let mut jobs = HashMap::<String, Job>::new();  
 
     if let Some(job_filename) = cli.job {
-        let new_job = job::Job::new(None, 
+        let new_job = Job::new(None, 
             toml::from_str(&std::fs::read_to_string(job_filename)?)?
         );
         println!("A new job is here: {:#?}", new_job.schema);
@@ -96,12 +97,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 if true == any_compute_jobs(&jobs) {        
                     // need compute                    
                     let need_compute_msg = vec![notice::Notice::Compute.into()];
+                    // need_compute_msg.extend_from_slice(String::from("debian:bookworm-slim").as_bytes());
+
                     let gossip = &mut swarm.behaviour_mut().gossipsub;
                     let topic = gossip.topics().nth(0).unwrap(); 
                     if let Err(e) = gossip
                         .publish(topic.clone(), need_compute_msg) {
                 
-                        println!("need compute publish error: {e:?}");
+                        eprintln!("need compute publish error: {e:?}");
                     }
                 }
                 // need status updates?
@@ -115,7 +118,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     if let Err(e) = gossip
                         .publish(topic.clone(), job_status_msg) {
                 
-                        println!("`job status poll` publish error: {e:?}");
+                        eprintln!("`job status poll` publish error: {e:?}");
                     }
                 }
                 // need verification
@@ -126,7 +129,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     if let Err(e) = gossip
                         .publish(topic.clone(), need_verify_msg) {
                 
-                        println!("`need verify` publish error: {e:?}");
+                        eprintln!("`need verify` publish error: {e:?}");
                     }
                 }
 
@@ -138,7 +141,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     if let Err(e) = gossip
                         .publish(topic.clone(), need_harvest) {
                 
-                        println!("`need harvest` publish error: {e:?}");
+                        eprintln!("`need harvest` publish error: {e:?}");
                     }
                 }
             },
@@ -149,21 +152,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     println!("Local node is listening on {address}");
                 },
 
-                SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
+                SwarmEvent::Behaviour(LocalBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                     for (peer_id, _multiaddr) in list {
                         println!("mDNS discovered a new peer: {peer_id}");
                         swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                     }                     
                 },
 
-                SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
+                SwarmEvent::Behaviour(LocalBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
                     for (peer_id, _multiaddr) in list {
                         println!("mDNS discovered peer has expired: {peer_id}");
                         swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
                     }
                 },
 
-                SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                SwarmEvent::Behaviour(LocalBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     // propagation_source: peer_id,
                     // message_id,
                     message,
@@ -175,7 +178,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     println!("received gossip message: {:#?}", message);                    
                 },
 
-                SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message{
+                SwarmEvent::Behaviour(LocalBehaviourEvent::ReqResp(request_response::Event::Message{
                     peer: server_peer_id,
                     message: request_response::Message::Request {
                         request,
@@ -222,8 +225,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 &mut jobs,
                                 &updates,
                                 server_peer_id,
-                            );
-                            
+                            );                            
                         },
                     }
                 },
@@ -237,7 +239,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 // check if any compute jobs are there to gossip about
 fn any_compute_jobs(
-    jobs: &HashMap::<String, job::Job>
+    jobs: &HashMap::<String, Job>
 ) -> bool {
     jobs.values()
     .find(|job| {
@@ -250,13 +252,13 @@ fn any_compute_jobs(
 
 // check if any jobs need status updates
 fn any_pending_jobs(
-    jobs: &HashMap::<String, job::Job>
+    jobs: &HashMap::<String, Job>
 ) -> bool {
     false == jobs.is_empty()
 }
 
 fn any_verification_jobs(
-    jobs: &HashMap::<String, job::Job>
+    jobs: &HashMap::<String, Job>
 ) -> bool {
     jobs.values().find(|job| {
         let min_required_verifications = 
@@ -274,7 +276,7 @@ fn any_verification_jobs(
 }
 
 fn any_harvest_ready_jobs(
-    jobs: &HashMap::<String, job::Job>
+    jobs: &HashMap::<String, Job>
 ) -> bool {
     jobs.values().find(|job|
         true == job.has_harvest_ready_execution_traces()
@@ -283,7 +285,7 @@ fn any_harvest_ready_jobs(
 
 // probe compute offer throughly and select the best job
 fn evaluate_compute_offer(
-    jobs: &mut HashMap::<String, job::Job>,
+    jobs: &HashMap::<String, Job>,
     new_compute_offer: compute::Offer,
     server_peer_id: PeerId,
 ) -> Option<compute::ComputeDetails> {
@@ -300,15 +302,16 @@ fn evaluate_compute_offer(
             // ensure memory requirement is met
             (new_compute_offer.hw_specs.memory_capacity >= min_required_memory_capacity)
         });
+    //@ too many copies of an iterator, heavy revamps are needed
     // priority 1: choose from jobs with empty execution traces
-    let virgin_job_ids: Vec<String> = filtered_jobs.clone()
+    let virgin_job_ids: Vec<&str> = filtered_jobs.clone()
         .filter(|job| true == job.execution_trace.is_empty())
-        .map(|job| job.id.clone())
+        .map(|job| job.id.as_str())
         .collect();
     if false == virgin_job_ids.is_empty() {        
         let index = rand::thread_rng()
             .gen_range(0..virgin_job_ids.len());
-        let selected_job = jobs.get(&virgin_job_ids[index]).unwrap();
+        let selected_job = jobs.get(virgin_job_ids[index]).unwrap();
         return Some(compute::ComputeDetails {
             job_id: selected_job.id.clone(),
             docker_image: selected_job.schema.compute.docker_image.clone(),
@@ -316,7 +319,7 @@ fn evaluate_compute_offer(
         })
     }
     // priority 2: choose from jobs with empty verified execution traces
-    let unverified_job_ids: Vec<String> = filtered_jobs
+    let unverified_job_ids: Vec<&str> = filtered_jobs
         .filter(|job| {
             let min_required_verifications = job.schema.verification.min_required
                 .unwrap_or_else(|| u8::MAX);
@@ -326,12 +329,12 @@ fn evaluate_compute_offer(
                 .all(|exec_trace| 
                     false == exec_trace.is_verified(min_required_verifications)
                 )
-        }).map(|job| job.id.clone())
+        }).map(|job| job.id.as_str())
         .collect();
     if false == unverified_job_ids.is_empty() {
         let index = rand::thread_rng()
             .gen_range(0..unverified_job_ids.len());
-        let selected_job = jobs.get(&unverified_job_ids[index]).unwrap();
+        let selected_job = jobs.get(unverified_job_ids[index]).unwrap();
         return Some(compute::ComputeDetails {
             job_id: selected_job.id.clone(),
             docker_image: selected_job.schema.compute.docker_image.clone(),
@@ -347,7 +350,7 @@ fn evaluate_compute_offer(
 
 // probe verify offer and respond needful
 fn evaluate_verify_offer(
-    jobs: &HashMap::<String, job::Job>,
+    jobs: &HashMap::<String, Job>,
     server_peer_id: PeerId
 ) -> Option<compute::VerificationDetails> {
     //@ fifo atm, should change once strategies go live
@@ -381,8 +384,9 @@ fn evaluate_verify_offer(
     None    
 }
 
+// process bulk status updates
 fn update_jobs(
-    jobs: &mut HashMap::<String, job::Job>,
+    jobs: &mut HashMap::<String, Job>,
     updates: &Vec<compute::JobUpdate>,
     server_peer_id: PeerId,
 ) {
