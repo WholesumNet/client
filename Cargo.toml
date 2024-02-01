@@ -10,13 +10,13 @@ serde = {version = "1.0", features = ["derive"]}
 toml = "0.7"
 async-std = { version = "1.12", features = ["attributes", "unstable"] }
 async-trait = "0.1"
-env_logger = "0.10.0"
 futures = "0.3.28"
-libp2p = { version = "0.52.1", features = ["async-std", "request-response", "cbor", "gossipsub", "mdns", "noise", "macros", "tcp", "yamux"] }
-libp2p-quic = { version = "0.8.0-alpha", features = ["async-std"] }
+libp2p = { version = "0.53.2", features = ["async-std", "request-response", "cbor", "gossipsub", "mdns", "noise", "macros", "tcp", "yamux"] }
 num_enum = "0.6.1"
 clap = { version = "4.3.21", features = ["derive"] }
 uuid = { version = "1.4.1", features = ["v4", "fast-rng", "macro-diagnostics"] }
 
 comms = {path = "../comms"}
 rand = "0.8.5"
+tracing = "0.1.37"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
