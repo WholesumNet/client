@@ -45,6 +45,9 @@ struct Cli {
 
     #[arg(short, long, action)]
     dev: bool,
+
+    #[arg(short, long)]
+    key_file: Option<String>,
 }
 
 #[async_std::main]
@@ -70,10 +73,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
         jobs.insert(new_job.id.clone(), new_job);
     }    
     
+    // key 
+    let local_key = {
+        if let Some(key_file) = cli.key_file {
+            let bytes = std::fs::read(key_file).unwrap();
+            identity::Keypair::from_protobuf_encoding(&bytes)?
+        } else {
+            // Create a random key for ourselves
+            let new_key = identity::Keypair::generate_ed25519();
+            let bytes = new_key.to_protobuf_encoding().unwrap();
+            let _bw = std::fs::write("./key.secret", bytes);
+            println!("No keys were supplied, so one has been generated for you and saved to `{}` file.", "./ket.secret");
+            new_key
+        }
+    };    
+    println!("my peer id: `{:?}`", PeerId::from_public_key(&local_key.public()));    
+
     // swarm 
-    let keypair = identity::Keypair::generate_ed25519();
-    println!("{:?}", PeerId::from_public_key(&keypair.public()));
-    let mut swarm = comms::p2p::setup_swarm(&keypair).await?;
+    let mut swarm = comms::p2p::setup_swarm(&local_key).await?;
     let topic = gossipsub::IdentTopic::new("<-- p2p compute bazaar -->");
     let _ = 
         swarm
@@ -81,8 +98,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .gossipsub
             .subscribe(&topic); 
 
-    // bootstrap through bootnodes
+    // bootstrap 
     if false == cli.dev {
+        // get to know bootnodes
         const BOOTNODES: [&str; 1] = [
             "12D3KooWLVDsEUT8YKMbZf3zTihL3iBGoSyZnewWgpdv9B7if7Sn",
         ];
@@ -90,6 +108,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             swarm.behaviour_mut()
                 .kademlia
                 .add_address(&peer.parse()?, "/ip4/80.209.226.9/tcp/20201".parse()?);
+        }
+        // find myself
+        if let Err(e) = 
+            swarm
+                .behaviour_mut()
+                .kademlia
+                .bootstrap() {
+            eprintln!("bootstrap failed to initiate: `{:?}`", e);
+
+        } else {
+            println!("self-bootstrap is initiated.");
         }
     }
 
@@ -103,6 +132,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.listen_on("/ip4/0.0.0.0/tcp/20201".parse()?)?;
     swarm.listen_on("/ip6/::/tcp/20201".parse()?)?;
     swarm.listen_on("/ip6/::/udp/20201/quic-v1".parse()?)?;
+
 
     // read full lines from stdin
     // let mut input = io::BufReader::new(io::stdin()).lines().fuse();
@@ -392,7 +422,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }
                 },
 
-                _ => println!("{:#?}", event),
+                _ => {
+                    // println!("{:#?}", event)
+                },
 
             },
         }
