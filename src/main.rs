@@ -598,9 +598,10 @@ fn update_jobs(
             new_update.id, server_id58, new_update);
         let job = jobs.get_mut(&new_update.id).unwrap();
         // ensure job has bare minimum update history
-        job.status_history.entry(server_id58.clone())
-        .and_modify(|h| h.push(new_update.status.clone()))
-        .or_insert(vec![new_update.status.clone()]);
+        job.status_history
+            .entry(server_id58.clone())
+                .and_modify(|h| h.push(new_update.status.clone()))
+                .or_insert(vec![new_update.status.clone()]);
 
         match &new_update.status {                
             compute::JobStatus::Running => {
@@ -619,11 +620,14 @@ fn update_jobs(
                 //@ unverified-per-server
                 let proper_receipt_cid = receipt_cid.clone()
                     .unwrap_or_else(|| format!("{}-{}", job::UNVERIFIED_PREFIX, server_id58));
-                job.execution_trace.entry(proper_receipt_cid.clone())
-                .and_modify(|_v| {
-                    println!("Execution trace `{}` is already being tracked.", proper_receipt_cid);
-                })
-                .or_insert_with(|| job::ExecutionTrace::new(server_id58.clone()));
+                job.execution_trace
+                    .entry(proper_receipt_cid.clone())
+                        .and_modify(|_v| {
+                            println!("Execution trace `{}` is already being tracked.", proper_receipt_cid);
+                        })
+                        .or_insert_with(|| 
+                            job::ExecutionTrace::new(server_id58)
+                        );
             },
 
             compute::JobStatus::VerificationSucceeded(receipt_cid) => {
@@ -636,7 +640,7 @@ fn update_jobs(
                     continue;
                 }
                 let exec_trace = job.execution_trace.get_mut(receipt_cid).unwrap();
-                if let Some(old_decision) = exec_trace.verifications.insert(receipt_cid.clone(), true) {
+                if let Some(old_decision) = exec_trace.verifications.insert(server_id58.clone(), true) {
                     if false == old_decision {
                         println!("Warning: verification status flip, `failed` -> `succeeded`");
                     } else {
@@ -670,7 +674,7 @@ fn update_jobs(
                     continue;
                 }
                 let exec_trace = job.execution_trace.get_mut(receipt_cid).unwrap();
-                if let Some(old_decision) = exec_trace.verifications.insert(receipt_cid.clone(), false) {
+                if let Some(old_decision) = exec_trace.verifications.insert(server_id58.clone(), false) {
                     if true == old_decision {
                         println!("Warning: verification status flip, `succeeded` -> `failed`");
                     } else {
