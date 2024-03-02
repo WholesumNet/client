@@ -6,6 +6,7 @@ use futures::{
 use async_std::stream;
 use libp2p::{
     gossipsub, mdns, request_response,
+    identity, identify, kad,  
     swarm::{SwarmEvent},
     PeerId,
 };
@@ -17,9 +18,11 @@ use std::time::Duration;
 use rand::Rng;
 
 use toml;
+use tracing_subscriber::EnvFilter;
+
 use clap::Parser;
 use comms::{
-    p2p::{LocalBehaviourEvent},
+    p2p::{MyBehaviourEvent},
     notice,
     compute
 };
@@ -32,20 +35,32 @@ use job::Job;
 #[command(name = "Client CLI for Wholesum: p2p verifiable computing network.")]
 #[command(author = "Wholesum team")]
 #[command(version = "1.0")]
-#[command(about = "Yet another p2p verifiable computing network.", long_about = None)]
+#[command(about = "Wholesum is a P2P verifiable computing marketplace and \
+                   this program is a CLI for client nodes.",
+          long_about = None)
+]
 struct Cli {
     #[arg(short, long)]
     job: Option<String>,
+
+    #[arg(short, long, action)]
+    dev: bool,
+
+    #[arg(short, long)]
+    key_file: Option<String>,
 }
 
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .try_init();
+
     let cli = Cli::parse();
-    println!("<-> client agent for Wholesum network <->");
-    
-    // Libp2p swarm 
-    let mut swarm = comms::p2p::setup_local_swarm();
+    println!("<-> Client agent for Wholesum network <->");
+    println!("operating mode: `{}` network",
+        if false == cli.dev {"global"} else {"local(development)"}
+    );
 
     // active jobs
     let mut jobs = HashMap::<String, Job>::new();  
@@ -57,13 +72,72 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("A new job is here: {:#?}", new_job.schema);
         jobs.insert(new_job.id.clone(), new_job);
     }    
+    
+    // key 
+    let local_key = {
+        if let Some(key_file) = cli.key_file {
+            let bytes = std::fs::read(key_file).unwrap();
+            identity::Keypair::from_protobuf_encoding(&bytes)?
+        } else {
+            // Create a random key for ourselves
+            let new_key = identity::Keypair::generate_ed25519();
+            let bytes = new_key.to_protobuf_encoding().unwrap();
+            let _bw = std::fs::write("./key.secret", bytes);
+            println!("No keys were supplied, so one has been generated for you and saved to `{}` file.", "./ket.secret");
+            new_key
+        }
+    };    
+    println!("my peer id: `{:?}`", PeerId::from_public_key(&local_key.public()));    
+
+    // swarm 
+    let mut swarm = comms::p2p::setup_swarm(&local_key).await?;
+    let topic = gossipsub::IdentTopic::new("<-- p2p compute bazaar -->");
+    let _ = 
+        swarm
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&topic); 
+
+    // bootstrap 
+    if false == cli.dev {
+        // get to know bootnodes
+        const BOOTNODES: [&str; 1] = [
+            "12D3KooWLVDsEUT8YKMbZf3zTihL3iBGoSyZnewWgpdv9B7if7Sn",
+        ];
+        for peer in &BOOTNODES {
+            swarm.behaviour_mut()
+                .kademlia
+                .add_address(&peer.parse()?, "/ip4/80.209.226.9/tcp/20201".parse()?);
+        }
+        // find myself
+        if let Err(e) = 
+            swarm
+                .behaviour_mut()
+                .kademlia
+                .bootstrap() {
+            eprintln!("bootstrap failed to initiate: `{:?}`", e);
+
+        } else {
+            println!("self-bootstrap is initiated.");
+        }
+    }
+
+    // if let Err(e) = swarm.behaviour_mut().kademlia.bootstrap() {
+    //     eprintln!("failed to initiate bootstrapping: {:#?}", e);
+    // }
+    
+    // listen on all interfaces and whatever port the os assigns
+    //@ should read from the config file
+    swarm.listen_on("/ip4/0.0.0.0/udp/20201/quic-v1".parse()?)?;
+    swarm.listen_on("/ip4/0.0.0.0/tcp/20201".parse()?)?;
+    swarm.listen_on("/ip6/::/tcp/20201".parse()?)?;
+    swarm.listen_on("/ip6/::/udp/20201/quic-v1".parse()?)?;
+
 
     // read full lines from stdin
     // let mut input = io::BufReader::new(io::stdin()).lines().fuse();
 
-    // listen on all interfaces and whatever port the os assigns
-    swarm.listen_on("/ip4/0.0.0.0/udp/0/quic-v1".parse()?)?;
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+    let mut timer_peer_discovery = stream::interval(Duration::from_secs(5 * 60)).fuse();
 
     let mut timer_post_jobs = stream::interval(Duration::from_secs(10)).fuse();
     // let mut idle_timer = stream::interval(Duration::from_secs(5 * 60)).fuse();
@@ -91,6 +165,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
             //     }
             // },
 
+            // try to discover new peers
+            () = timer_peer_discovery.select_next_some() => {
+                if true == cli.dev {
+                    continue;
+                }
+                let random_peer_id = PeerId::random();
+                println!("Searching for the closest peers to `{random_peer_id}`");
+                swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .get_closest_peers(random_peer_id);
+            },
+
             // post need `compute/verify/harvest`, and status updates
             () = timer_post_jobs.select_next_some() => { 
                 // got any compute jobs?
@@ -100,7 +187,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     // need_compute_msg.extend_from_slice(String::from("debian:bookworm-slim").as_bytes());
 
                     let gossip = &mut swarm.behaviour_mut().gossipsub;
-                    let topic = gossip.topics().nth(0).unwrap(); 
+                    // println!("known peers: {:#?}", gossip.all_peers().collect::<Vec<_>>());
                     if let Err(e) = gossip
                         .publish(topic.clone(), need_compute_msg) {
                 
@@ -114,7 +201,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     let job_status_msg = vec![notice::Notice::JobStatus.into(), nounce];
 
                     let gossip = &mut swarm.behaviour_mut().gossipsub;
-                    let topic = gossip.topics().nth(0).unwrap(); 
                     if let Err(e) = gossip
                         .publish(topic.clone(), job_status_msg) {
                 
@@ -137,7 +223,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 if true == any_harvest_ready_jobs(&jobs) {
                     let need_harvest = vec![notice::Notice::Harvest.into()];
                     let gossip = &mut swarm.behaviour_mut().gossipsub;
-                    let topic = gossip.topics().nth(0).unwrap(); 
                     if let Err(e) = gossip
                         .publish(topic.clone(), need_harvest) {
                 
@@ -152,21 +237,128 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     println!("Local node is listening on {address}");
                 },
 
-                SwarmEvent::Behaviour(LocalBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
+                // mdns events
+                SwarmEvent::Behaviour(
+                    MyBehaviourEvent::Mdns(
+                        mdns::Event::Discovered(list)
+                    )
+                ) => {
                     for (peer_id, _multiaddr) in list {
                         println!("mDNS discovered a new peer: {peer_id}");
-                        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                        swarm
+                            .behaviour_mut()
+                            .gossipsub
+                            .add_explicit_peer(&peer_id);
                     }                     
                 },
 
-                SwarmEvent::Behaviour(LocalBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
+                SwarmEvent::Behaviour(
+                    MyBehaviourEvent::Mdns(
+                        mdns::Event::Expired(list)
+                    )
+                ) => {
                     for (peer_id, _multiaddr) in list {
                         println!("mDNS discovered peer has expired: {peer_id}");
-                        swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
+                        swarm
+                            .behaviour_mut()
+                            .gossipsub
+                            .remove_explicit_peer(&peer_id);
                     }
                 },
 
-                SwarmEvent::Behaviour(LocalBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                // identify events
+                SwarmEvent::Behaviour(MyBehaviourEvent::Identify(identify::Event::Received {
+                    peer_id,
+                    info,
+                    ..
+                })) => {
+                    println!("Inbound identify event `{:#?}`", info);
+                    if false == cli.dev {
+                        for addr in info.listen_addrs {
+                            // if false == addr.iter().any(|item| item == &"127.0.0.1" || item == &"::1"){
+                            swarm
+                                .behaviour_mut()
+                                .kademlia
+                                .add_address(&peer_id, addr);
+                            // }
+                        }
+                    }
+                },
+
+                // kademlia events
+                // SwarmEvent::Behaviour(
+                //     MyBehaviourEvent::Kademlia(
+                //         kad::Event::OutboundQueryProgressed {
+                //             result: kad::QueryResult::GetClosestPeers(Ok(ok)),
+                //             ..
+                //         }
+                //     )
+                // ) => {
+                //     // The example is considered failed as there
+                //     // should always be at least 1 reachable peer.
+                //     if ok.peers.is_empty() {
+                //         eprintln!("Query finished with no closest peers.");
+                //     }
+
+                //     println!("Query finished with closest peers: {:#?}", ok.peers);
+                // },
+
+                // SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+                //     result:
+                //         kad::QueryResult::GetClosestPeers(Err(kad::GetClosestPeersError::Timeout {
+                //             ..
+                //         })),
+                //     ..
+                // })) => {
+                //     eprintln!("Query for closest peers timed out");
+                // },
+
+                // SwarmEvent::Behaviour(
+                //     MyBehaviourEvent::Kademlia(
+                //         kad::Event::OutboundQueryProgressed {
+                //             result: kad::QueryResult::Bootstrap(Ok(ok)),
+                //             ..
+                //         }
+                //     )
+                // ) => {                    
+                //     println!("bootstrap inbound: {:#?}", ok);
+                // },
+
+                // SwarmEvent::Behaviour(
+                //     MyBehaviourEvent::Kademlia(
+                //         kad::Event::OutboundQueryProgressed {
+                //             result: kad::QueryResult::Bootstrap(Err(e)),
+                //             ..
+                //         }
+                //     )
+                // ) => {                    
+                //     println!("bootstrap error: {:#?}", e);
+                // },
+
+                // SwarmEvent::Behaviour(
+                //     MyBehaviourEvent::Kademlia(
+                //         kad::Event::RoutingUpdated{
+                //             peer,
+                //             is_new_peer,
+                //             addresses,
+                //             ..
+                //         }
+                //     )
+                // ) => {
+                //     println!("Routing updated:\npeer: `{:?}`\nis new: `{:?}`\naddresses: `{:#?}`",
+                //         peer, is_new_peer, addresses
+                //     );
+                // },
+
+                // SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::UnroutablePeer{
+                //     peer: peer_id
+                // })) => {
+                //     eprintln!("unroutable peer: {:?}", peer_id);
+                // },
+
+
+                // gossipsub events
+                SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     // propagation_source: peer_id,
                     // message_id,
                     message,
@@ -178,7 +370,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     println!("received gossip message: {:#?}", message);                    
                 },
 
-                SwarmEvent::Behaviour(LocalBehaviourEvent::ReqResp(request_response::Event::Message{
+                SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
                     peer: server_peer_id,
                     message: request_response::Message::Request {
                         request,
@@ -230,7 +422,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }
                 },
 
-                _ => {}
+                _ => {
+                    // println!("{:#?}", event)
+                },
 
             },
         }
@@ -404,9 +598,10 @@ fn update_jobs(
             new_update.id, server_id58, new_update);
         let job = jobs.get_mut(&new_update.id).unwrap();
         // ensure job has bare minimum update history
-        job.status_history.entry(server_id58.clone())
-        .and_modify(|h| h.push(new_update.status.clone()))
-        .or_insert(vec![new_update.status.clone()]);
+        job.status_history
+            .entry(server_id58.clone())
+                .and_modify(|h| h.push(new_update.status.clone()))
+                .or_insert(vec![new_update.status.clone()]);
 
         match &new_update.status {                
             compute::JobStatus::Running => {
@@ -425,11 +620,14 @@ fn update_jobs(
                 //@ unverified-per-server
                 let proper_receipt_cid = receipt_cid.clone()
                     .unwrap_or_else(|| format!("{}-{}", job::UNVERIFIED_PREFIX, server_id58));
-                job.execution_trace.entry(proper_receipt_cid.clone())
-                .and_modify(|_v| {
-                    println!("Execution trace `{}` is already being tracked.", proper_receipt_cid);
-                })
-                .or_insert_with(|| job::ExecutionTrace::new(server_id58.clone()));
+                job.execution_trace
+                    .entry(proper_receipt_cid.clone())
+                        .and_modify(|_v| {
+                            println!("Execution trace `{}` is already being tracked.", proper_receipt_cid);
+                        })
+                        .or_insert_with(|| 
+                            job::ExecutionTrace::new(server_id58)
+                        );
             },
 
             compute::JobStatus::VerificationSucceeded(receipt_cid) => {
@@ -442,7 +640,7 @@ fn update_jobs(
                     continue;
                 }
                 let exec_trace = job.execution_trace.get_mut(receipt_cid).unwrap();
-                if let Some(old_decision) = exec_trace.verifications.insert(receipt_cid.clone(), true) {
+                if let Some(old_decision) = exec_trace.verifications.insert(server_id58.clone(), true) {
                     if false == old_decision {
                         println!("Warning: verification status flip, `failed` -> `succeeded`");
                     } else {
@@ -476,7 +674,7 @@ fn update_jobs(
                     continue;
                 }
                 let exec_trace = job.execution_trace.get_mut(receipt_cid).unwrap();
-                if let Some(old_decision) = exec_trace.verifications.insert(receipt_cid.clone(), false) {
+                if let Some(old_decision) = exec_trace.verifications.insert(server_id58.clone(), false) {
                     if true == old_decision {
                         println!("Warning: verification status flip, `succeeded` -> `failed`");
                     } else {
