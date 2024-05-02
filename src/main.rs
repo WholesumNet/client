@@ -16,6 +16,7 @@ use std::collections::{
 use std::error::Error;
 use std::time::Duration;
 use rand::Rng;
+use bincode;
 
 use toml;
 use tracing_subscriber::EnvFilter;
@@ -181,15 +182,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // post need `compute/verify/harvest`, and status updates
             () = timer_post_jobs.select_next_some() => { 
                 // got any compute jobs?
-                if true == any_compute_jobs(&jobs) {        
+                if let Some(job) = any_compute_jobs(&jobs) {        
                     // need compute                    
-                    let need_compute_msg = vec![notice::Notice::Compute.into()];
+                    // let need_compute_msg = vec![notice::Notice::Compute.into()];
                     // need_compute_msg.extend_from_slice(String::from("debian:bookworm-slim").as_bytes());
-
+                    let need_compute = notice::Notice::Compute(compute::MatchingCriteria {
+                        memory_capacity: job.schema.criteria.min_memory_capacity,
+                        benchmark_duration_secs: job.schema.criteria.benchmark_duration_secs,
+                        benchmark_expiry_secs: job.schema.criteria.benchmark_expiry_secs, 
+                    });
                     let gossip = &mut swarm.behaviour_mut().gossipsub;
                     // println!("known peers: {:#?}", gossip.all_peers().collect::<Vec<_>>());
                     if let Err(e) = gossip
-                        .publish(topic.clone(), need_compute_msg) {
+                        .publish(topic.clone(), bincode::serialize(&need_compute)?) {
                 
                         eprintln!("need compute publish error: {e:?}");
                     }
@@ -197,23 +202,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 // need status updates?
                 if true == any_pending_jobs(&jobs) {        
                     // status poll
-                    let nounce: u8 = rng.gen();
-                    let job_status_msg = vec![notice::Notice::JobStatus.into(), nounce];
-
+                    // let nounce: u8 = rng.gen();
+                    // let job_status_msg = vec![notice::Notice::JobStatus.into(), nounce];
+                    let job_status = notice::Notice::JobStatus;
                     let gossip = &mut swarm.behaviour_mut().gossipsub;
                     if let Err(e) = gossip
-                        .publish(topic.clone(), job_status_msg) {
+                        .publish(topic.clone(), bincode::serialize(&job_status)?) {
                 
                         eprintln!("`job status poll` publish error: {e:?}");
                     }
                 }
                 // need verification
                 if true == any_verification_jobs(&jobs) {
-                    let need_verify_msg = vec![notice::Notice::Verification.into()];
+                    // let need_verify_msg = vec![notice::Notice::Verification.into()];
+                    let need_verify = notice::Notice::Verification;
                     let gossip = &mut swarm.behaviour_mut().gossipsub;
                     let topic = gossip.topics().nth(0).unwrap(); 
                     if let Err(e) = gossip
-                        .publish(topic.clone(), need_verify_msg) {
+                        .publish(topic.clone(), bincode::serialize(&need_verify)?) {
                 
                         eprintln!("`need verify` publish error: {e:?}");
                     }
@@ -221,10 +227,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                 // need to harvest
                 if true == any_harvest_ready_jobs(&jobs) {
-                    let need_harvest = vec![notice::Notice::Harvest.into()];
+                    // let need_harvest = vec![notice::Notice::Harvest.into()];
+                    let need_harvest = notice::Notice::Harvest;
                     let gossip = &mut swarm.behaviour_mut().gossipsub;
                     if let Err(e) = gossip
-                        .publish(topic.clone(), need_harvest) {
+                        .publish(topic.clone(), bincode::serialize(&need_harvest)?) {
                 
                         eprintln!("`need harvest` publish error: {e:?}");
                     }
@@ -431,17 +438,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-// check if any compute jobs are there to gossip about
+// check if any compute jobs are there to gossip the need
 fn any_compute_jobs(
     jobs: &HashMap::<String, Job>
-) -> bool {
+) -> Option<&job::Job> {
+    //@ beware starvation
     jobs.values()
     .find(|job| {
         // brand new (short circuit), or failed, or running?
         true == job.execution_trace.is_empty() ||
         // should not have any verified execution traces 
         false == job.has_verified_execution_traces()
-    }).is_some()
+    })
 }
 
 // check if any jobs need status updates
@@ -483,20 +491,21 @@ fn evaluate_compute_offer(
     new_compute_offer: compute::Offer,
     server_peer_id: PeerId,
 ) -> Option<compute::ComputeDetails> {
+    //@ too many copies of an iterator, heavy revamps are needed
     let server_id58 = server_peer_id.to_base58();
     // basic filtering
     let filtered_jobs = jobs.values()
         .filter(|job| {
-            let min_required_memory_capacity = job.schema.compute.min_memory_capacity
-                .unwrap_or_else(|| 0u32);
+            // let min_required_memory_capacity = job.schema.compute.min_memory_capacity
+                // .unwrap_or_else(|| 0u32);
 
             // should not have an execution trace from this server
-            (false == job.execution_trace.values()
-            .find(|exec_trace| exec_trace.server == server_id58).is_some()) &&
+            (false == job.execution_trace.values().find(
+                |exec_trace| exec_trace.server == server_id58).is_some()
+            ) //&&
             // ensure memory requirement is met
-            (new_compute_offer.hw_specs.memory_capacity >= min_required_memory_capacity)
+            // (new_compute_offer.hw_specs.memory_capacity >= min_required_memory_capacity)
         });
-    //@ too many copies of an iterator, heavy revamps are needed
     // priority 1: choose from jobs with empty execution traces
     let virgin_job_ids: Vec<&str> = filtered_jobs.clone()
         .filter(|job| true == job.execution_trace.is_empty())

@@ -9,9 +9,17 @@ use comms::{
 };
 
 #[derive(Debug, Deserialize)]
-pub struct ComputeConfig {
+pub struct CriteriaConfig {    
     // minimum ram capacity(in GB) for an offer to be accepted
     pub min_memory_capacity: Option<u32>,
+
+    pub benchmark_duration_secs: Option<u32>,
+
+    pub benchmark_expiry_secs: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ComputeConfig {
     // docker image to run
     pub docker_image: String,
     // invoke this command when container is up
@@ -37,6 +45,8 @@ pub struct HarvestConfig {
 pub struct Schema {
     pub title: Option<String>,
     pub timeout: Option<u32>, // in seconds
+    
+    pub criteria: CriteriaConfig, // criteria for matching
     
     pub compute: ComputeConfig,
     
