@@ -65,7 +65,7 @@ struct Cli {
     #[arg(short, long)]
     job: Option<String>,
 
-    #[arg(short, long, action)]
+    #[arg(long, action)]
     dev: bool,
 
     #[arg(short, long)]
@@ -191,7 +191,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut timer_peer_discovery = stream::interval(Duration::from_secs(5 * 60)).fuse();
 
-    let mut timer_post_jobs = stream::interval(Duration::from_secs(10)).fuse();
+    let mut timer_post_jobs = stream::interval(Duration::from_secs(20)).fuse();
     // let mut idle_timer = stream::interval(Duration::from_secs(5 * 60)).fuse();
     // let mut timer_job_status = stream::interval(Duration::from_secs(30)).fuse();
     // gossip messages are content-addressed, so we add a random nounce to each message
@@ -255,7 +255,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
                 // need status updates?
                 if true == any_pending_jobs(&jobs) {        
-                    // status poll
+                    //@ status poll only if i've got an active job
                     // let nounce: u8 = rng.gen();
                     // let job_status_msg = vec![notice::Notice::JobStatus.into(), nounce];
                     let job_status = notice::Notice::JobStatus;
@@ -264,6 +264,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         .publish(topic.clone(), bincode::serialize(&job_status)?) {
                 
                         eprintln!("`job status poll` publish error: {e:?}");
+                    } else {
+                        println!("requested `status poll`...");
                     }
                 }
                 // need verification
@@ -308,14 +310,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                         opt.unwrap()
                     },
-                };                
+                };  
+                let job = jobs.get(&job_id).unwrap();             
                 let _req_id = swarm.behaviour_mut().req_resp
                     .send_request(
                         &server_peer_id,
                         notice::Request::ComputeJob(compute::ComputeDetails {
                             job_id: job_id,
-                            docker_image: String::from("b"),//job.schema.compute.docker_image.clone(),
-                            command: String::from("b"),//job.schema.compute.command.clone(),
+                            docker_image: job.schema.compute.docker_image.clone(),
+                            command: job.schema.compute.command.clone(),
                         })
                     );                
             },
@@ -549,7 +552,12 @@ fn any_compute_jobs<'a>(
     //     // should not have any verified execution traces 
     //     false == job.has_verified_execution_traces()
     // })
-    for (_, job) in jobs {
+    for (_, job) in jobs.iter() {
+        // no execution traces
+        if false == jobs_execution_traces.contains_key(&job.id) {
+            return Some(job);
+        }
+        // execution trace is empty
         if true == jobs_execution_traces.get(&job.id).unwrap().is_empty() {
             return Some(job);
         }        
@@ -583,6 +591,9 @@ fn any_verification_jobs(
     // }).is_some()  
 
     for (_, job) in jobs.iter() {
+        if false == jobs_execution_traces.contains_key(&job.id) {
+            continue;
+        }
         let min_required_verifications = 
             job.schema.verification.min_required.unwrap_or_else(|| u8::MAX);
         let exec_trace = jobs_execution_traces.get(&job.id).unwrap();
@@ -604,6 +615,9 @@ fn any_harvest_ready_jobs(
     jobs_execution_traces: &HashMap::<String, HashMap<String, job::ExecutionTrace>>
 ) -> bool {
     for (_, job) in jobs.iter() {
+        if false == jobs_execution_traces.contains_key(&job.id) {
+            continue;
+        }
         let min_required_verifications = 
                 job.schema.verification.min_required.unwrap_or_else(|| u8::MAX);
         let exec_trace = jobs_execution_traces.get(&job.id).unwrap();
@@ -687,15 +701,15 @@ async fn download_benchmark(
     dfs_client: &reqwest::Client,
     dfs_config: &dfs::Config,
     dfs_cookie: &String,
-    benchmark_cid: &String,
+    server_benchmark: &compute::ServerBenchmark,
 ) -> Result<String, Box<dyn Error>> {
     dfs::fork_pod(
         dfs_client, dfs_config, dfs_cookie,
-        benchmark_cid.clone(),
+        server_benchmark.cid.clone(),
     ).await?;
     if let Err(e) = dfs::open_pod(
         dfs_client, dfs_config, dfs_cookie,
-        String::from("benchmark"),
+        server_benchmark.pod_name.clone(),
     ).await {
         eprintln!("Warning: pod open error: `{e:#?}`");
     }
@@ -703,12 +717,12 @@ async fn download_benchmark(
     let residue_path = format!(
         "{}/benchmark/{}/residue",
         job::get_residue_path()?,
-        benchmark_cid,
+        server_benchmark.cid,
     );
     fs::create_dir_all(residue_path.clone())?;
     dfs::download_file(
         dfs_client, dfs_config, dfs_cookie,
-        String::from("benchmark"),
+        server_benchmark.pod_name.clone(),
         format!("/benchmark"),
         format!("{residue_path}/benchmark")
     ).await?;
@@ -737,7 +751,7 @@ async fn evaluate_compute_offer(
     //@ how about skipping disk save? we need to read it in memory shortly.
     let residue_path = download_benchmark(
         dfs_client, dfs_config, dfs_cookie,
-        &compute_offer.benchmark_cid
+        &compute_offer.server_benchmark
     ).await?;
     // unpack it
     let benchmark_blob: Vec<u8> = fs::read(format!("{residue_path}/benchmark"))?;
@@ -765,10 +779,11 @@ async fn evaluate_compute_offer(
     }
     // 3- verify the receipt
     let image_id_58 = {
+        // [u32; 8] -> [u8; 32] -> base58 encode
         let mut image_id_bytes = [0u8; 32];
         //@ watch for panics here
-        use byteorder::{ByteOrder, LittleEndian};
-        LittleEndian::write_u32_into(
+        use byteorder::{ByteOrder, BigEndian};
+        BigEndian::write_u32_into(
             &benchmark_result.r0_image_id,
             &mut image_id_bytes
         );
@@ -782,9 +797,9 @@ async fn evaluate_compute_offer(
         format!("{residue_path}/receipt"),
         benchmark_result.r0_receipt_blob.as_slice()
     )?;
-    println!("Benchmark's receipt is ready to be verified: `{}`", compute_offer.benchmark_cid);
+    println!("Benchmark's receipt is ready to be verified: `{}`", compute_offer.server_benchmark.cid);
     // run the job
-    let verification_image = String::from("rezahsnz/risc0-warrant");
+    let verification_image = String::from("rezahsnz/warrant:0.21");
     let local_receipt_path = String::from("/home/prince/residue/receipt");
     let command = vec![
         String::from("/bin/sh"),
@@ -797,7 +812,7 @@ async fn evaluate_compute_offer(
     ];                          
     match run_docker_job(
         &docker_con,
-        compute_offer.benchmark_cid.clone(),
+        compute_offer.server_benchmark.cid,
         verification_image,
         command,
         residue_path.clone()
@@ -818,6 +833,7 @@ async fn evaluate_compute_offer(
             }            
         }
     }
+    println!("Benchmark has successfully passed all checks.");
     Ok(
         Some(
         (
