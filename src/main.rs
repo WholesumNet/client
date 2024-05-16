@@ -470,6 +470,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     println!("received gossip message: {:#?}", message);                    
                 },
 
+                // requests
                 SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
                     peer: server_peer_id,
                     message: request_response::Message::Request {
@@ -521,8 +522,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             }
                         },
 
+                        _ => {},
+                    }
+                },
+
+                // responses
+                SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
+                    peer: server_peer_id,
+                    message: request_response::Message::Response {
+                        response,
+                        ..
+                    }
+                })) => {                
+                    match response {
                         // job status update 
-                        notice::Request::UpdateForJobs(updates) => {
+                        notice::Response::UpdateForJobs(updates) => {
                             update_jobs(
                                 &jobs,
                                 &mut jobs_execution_traces,
@@ -531,7 +545,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             );                            
                         },
 
-                        _ => {},
+                        _ => {}
                     }
                 },
 
@@ -554,7 +568,7 @@ fn set_to_track_job_updates(
         let mut new_deal_trace = job::ExecutionTrace::new(job::UNVERIFIED_PREFIX.to_owned());
         new_deal_trace.status_update_history.push(
             job::StatusUpdate {
-                status: compute::JobStatus::DealIsStruck,
+                status: compute::JobStatus::DealStruck,
                 timestamp: Utc::now().timestamp()
             }
         );
@@ -904,7 +918,7 @@ fn update_jobs(
 
         let timestamp = Utc::now().timestamp();
         match &new_update.status {  
-            compute::JobStatus::DealIsStruck => {
+            compute::JobStatus::DealStruck => {
                 // TBD: post deal sync
             },
 
