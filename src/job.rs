@@ -5,6 +5,8 @@ use std::collections::{
 };
 use serde::Deserialize;
 
+use comms::compute;
+
 #[derive(Debug, Deserialize)]
 pub struct CriteriaConfig {    
     // minimum ram capacity(in GB) for an offer to be accepted
@@ -77,13 +79,24 @@ pub struct Harvest {
 // unverified execution trace ids start with this prefix
 pub const UNVERIFIED_PREFIX: &str = "<!>";
 
+#[derive(Debug, Eq, PartialEq)]
+pub struct StatusUpdate {
+    pub status: compute::JobStatus,
+    pub timestamp: i64,
+}
+
 // an execution trace
 #[derive(Debug)]
 pub struct ExecutionTrace {
     // aka prover
-    pub server: String,
+    pub server_id: String,
+
+    // job status
+    pub status_update_history: Vec<StatusUpdate>,
+
     // true means that verifier approved the receipt, and false otherwise 
     pub verifications: HashMap<String, bool>,
+
     pub harvests: HashSet<Harvest>,
 }
 
@@ -91,7 +104,8 @@ impl ExecutionTrace {
 
     pub fn new(server_id: String) -> ExecutionTrace {
         ExecutionTrace {
-            server: server_id,
+            server_id: server_id,
+            status_update_history: Vec::<StatusUpdate>::new(),
             verifications: HashMap::<String, bool>::new(),
             harvests: HashSet::<Harvest>::new(),
         }
