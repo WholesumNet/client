@@ -22,7 +22,7 @@ use std::collections::{
 use std::fs;
 use std::error::Error;
 use std::time::Duration;
-// use rand::Rng;
+use rand::Rng;
 use bincode;
 use chrono::{Utc};
 
@@ -193,7 +193,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // let mut idle_timer = stream::interval(Duration::from_secs(5 * 60)).fuse();
     // let mut timer_job_status = stream::interval(Duration::from_secs(30)).fuse();
     // gossip messages are content-addressed, so we add a random nounce to each message
-    // let mut rng = rand::thread_rng();
+    let mut rng = rand::thread_rng();
 
     // kick it off
     loop {
@@ -251,33 +251,51 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
                 // need status updates?
-                let update_set = to_be_updated_jobs(&jobs_execution_traces);
-                for(server_id, job_set) in update_set.iter() {                    
-                    // let job_status = notice::Request::JobStatus;
-                    // let gossip = &mut swarm.behaviour_mut().gossipsub;
-                    // if let Err(e) = gossip
-                    //     .publish(topic.clone(), bincode::serialize(&job_status)?) {
+                // let update_set = to_be_updated_jobs(&jobs_execution_traces);
+                if true == any_pending_jobs(&jobs) {
+                // for(server_id58, job_set) in update_set.iter() {                    
+                //     // let job_status = notice::Request::JobStatus;
+                //     // let gossip = &mut swarm.behaviour_mut().gossipsub;
+                //     // if let Err(e) = gossip
+                //     //     .publish(topic.clone(), bincode::serialize(&job_status)?) {
                 
-                    //     eprintln!("`job status poll` publish error: {e:?}");
-                    // }
-                    let server_peer_id = PeerId::from_bytes(server_id.as_bytes())?;
-                    let job_id_list = job_set.iter().map(|s| String::from(*s)).collect();
-                    let _req_id = swarm.behaviour_mut()
-                    .req_resp
-                    .send_request(
-                        &server_peer_id,
-                        notice::Request::JobStatus(job_id_list),
-                    );
+                //     //     eprintln!("`job status poll` publish error: {e:?}");
+                //     // }
+                //     let server_peer_id = {
+                //         use std::str::FromStr;
+                //         PeerId::from_str(server_id58.as_str())?
+                //     };
+                //     let job_id_list = job_set.iter().map(|s| String::from(*s)).collect();
+                //     let _req_id = swarm.behaviour_mut()
+                //     .req_resp
+                //     .send_request(
+                //         &server_peer_id,
+                //         notice::Request::JobStatus(job_id_list),
+                //     );
+                    let nonce: u8 = rng.gen();
+                    let status_update = notice::Notice::StatusUpdate(nonce);
+                    let gossip = &mut swarm.behaviour_mut().gossipsub;
+                    let topic = gossip.topics().nth(0).unwrap(); 
+                    if let Err(e) = gossip
+                        .publish(
+                            topic.clone(),
+                            bincode::serialize(&status_update)?
+                    ) {                
+                        eprintln!("`status update` publish error: {e:?}");
+                    }
                 }
                 // need verification
                 if true == any_verification_jobs(&jobs, &jobs_execution_traces) {
                     // let need_verify_msg = vec![notice::Notice::Verification.into()];
-                    let need_verify = notice::Notice::Verification;
+                    let nonce: u8 = rng.gen();
+                    let need_verify = notice::Notice::Verification(nonce);
                     let gossip = &mut swarm.behaviour_mut().gossipsub;
                     let topic = gossip.topics().nth(0).unwrap(); 
                     if let Err(e) = gossip
-                        .publish(topic.clone(), bincode::serialize(&need_verify)?) {
-                
+                        .publish(
+                            topic.clone(),
+                            bincode::serialize(&need_verify)?
+                    ) {                
                         eprintln!("`need verify` publish error: {e:?}");
                     }
                 }
@@ -285,7 +303,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 // need to harvest
                 if true == any_harvest_ready_jobs(&jobs, &jobs_execution_traces) {
                     // let need_harvest = vec![notice::Notice::Harvest.into()];
-                    let need_harvest = notice::Notice::Harvest;
+                    let nonce: u8 = rng.gen();
+                    let need_harvest = notice::Notice::Harvest(nonce);
                     let gossip = &mut swarm.behaviour_mut().gossipsub;
                     if let Err(e) = gossip
                         .publish(topic.clone(), bincode::serialize(&need_harvest)?) {
@@ -297,7 +316,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             // offer has been evaluated 
             eval_res = offer_evaluation_futures.select_next_some() => {
-                let (job_id, server_peer_id) = match eval_res { 
+                let (job_id, server_peer_id): (String, PeerId) = match eval_res { 
                     Err(failed) => {
                         eprintln!("Evaluation error: {:#?}", failed);
                         // offer timeouts in server side and evaluation must be requested again
@@ -312,7 +331,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         opt.unwrap()
                     },
                 };  
-                println!("we have a deal! server has successfully passed all evaluation checks.");
+                println!("we have a deal! server `{}` has successfully passed all evaluation checks.",
+                    server_peer_id.to_string());
                 let job = jobs.get(&job_id).unwrap();             
                 let _req_id = swarm.behaviour_mut()
                     .req_resp
@@ -328,7 +348,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     &job.id, 
                     server_peer_id,
                     &mut jobs_execution_traces
-                );                
+                );               
             },
 
             event = swarm.select_next_some() => match event {
@@ -522,21 +542,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             }
                         },
 
-                        _ => {},
-                    }
-                },
-
-                // responses
-                SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
-                    peer: server_peer_id,
-                    message: request_response::Message::Response {
-                        response,
-                        ..
-                    }
-                })) => {                
-                    match response {
-                        // job status update 
-                        notice::Response::UpdateForJobs(updates) => {
+                        notice::Request::UpdateForJobs(updates) => {
                             update_jobs(
                                 &jobs,
                                 &mut jobs_execution_traces,
@@ -545,9 +551,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             );                            
                         },
 
-                        _ => {}
+                        _ => {},
                     }
                 },
+
+                // responses
+                // SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
+                //     peer: server_peer_id,
+                //     message: request_response::Message::Response {
+                //         response,
+                //         ..
+                //     }
+                // })) => {                
+                //     match response {
+                //         // job status update 
+                //         notice::Response::UpdateForJobs(updates) => {
+                //             update_jobs(
+                //                 &jobs,
+                //                 &mut jobs_execution_traces,
+                //                 server_peer_id,
+                //                 &updates,
+                //             );                            
+                //         },
+
+                //         _ => {}
+                //     }
+                // },
 
                 _ => {
                     // println!("{:#?}", event)
@@ -564,8 +593,8 @@ fn set_to_track_job_updates(
     server_peer_id: PeerId,
     jobs_execution_traces: &mut HashMap<String, HashMap<String, job::ExecutionTrace>>
 ) {
-    let new_unverified_exec_trace = || -> job::ExecutionTrace {
-        let mut new_deal_trace = job::ExecutionTrace::new(job::UNVERIFIED_PREFIX.to_owned());
+    let new_unverified_exec_trace = |server_id: &str| -> job::ExecutionTrace {
+        let mut new_deal_trace = job::ExecutionTrace::new(server_id.to_owned());
         new_deal_trace.status_update_history.push(
             job::StatusUpdate {
                 status: compute::JobStatus::DealStruck,
@@ -575,22 +604,22 @@ fn set_to_track_job_updates(
         new_deal_trace
     };
 
+    let server_id58 = server_peer_id.to_base58();
     jobs_execution_traces.entry(job_id.to_owned())
     .and_modify(|exec_trace| {
         exec_trace.entry(job::UNVERIFIED_PREFIX.to_owned())
         .and_modify(|_| {
-            println!("[warning]: execution trace is not empty.");
+            println!("[warning]: (unverified) execution trace is not empty.");
         })
         .or_insert_with(|| {
-            new_unverified_exec_trace()         
+            new_unverified_exec_trace(&server_id58)         
         });
     })
-    .or_insert_with(|| {
-        
+    .or_insert_with(|| {        
         let mut exec_trace = HashMap::<String, job::ExecutionTrace>::new();
         exec_trace.insert(
-            server_peer_id.to_base58(),
-            new_unverified_exec_trace()
+            job::UNVERIFIED_PREFIX.to_owned(),
+            new_unverified_exec_trace(&server_id58)
         );
 
         exec_trace
@@ -624,15 +653,15 @@ fn any_compute_jobs<'a>(
 // check if any jobs need status updates
 fn to_be_updated_jobs<'a>(
     jobs_execution_traces: &'a HashMap::<String, HashMap<String, job::ExecutionTrace>>
-) -> HashMap<&'a str, HashSet<&'a str>> {
+) -> HashMap<String, HashSet<&'a str>> {
     // map: (server_id, job_id list)
-    let mut to_be_updated = HashMap::<&'a str, HashSet<&'a str>>::new();
+    let mut to_be_updated = HashMap::<String, HashSet<&'a str>>::new();
     for (job_id, exec_trace) in jobs_execution_traces.iter() {
         // if false == jobs_execution_traces.contains_key(job_id) {
         //     continue;
         // }
         for (_, specific_exec_trace) in exec_trace.iter() {
-            to_be_updated.entry(&specific_exec_trace.server_id)
+            to_be_updated.entry(specific_exec_trace.server_id.clone())
                 .or_insert_with(|| {
                     let mut update_set = HashSet::new();
                     update_set.insert(job_id.as_str());
@@ -642,6 +671,12 @@ fn to_be_updated_jobs<'a>(
         }
     }
     to_be_updated
+}
+
+fn any_pending_jobs(
+    jobs: &HashMap::<String, Job>
+) -> bool {
+    false == jobs.is_empty()
 }
 
 fn any_verification_jobs(
@@ -751,7 +786,7 @@ async fn evaluate_compute_offer(
     server_peer_id: PeerId,
 ) -> Result<Option<(String, PeerId)>, Box<dyn Error>> {
     //@ test for sybils, ... 
-    let _server_id = server_peer_id.to_string();
+    println!("let's evaluate `{:?}`'s offer.", server_peer_id.to_string());
     // asking a verifier is slow, so verify locally
     // pull in the benchmark blob from dfs
     //@ how about skipping disk save? we need to read it in memory shortly.
@@ -839,7 +874,6 @@ async fn evaluate_compute_offer(
             }            
         }
     }
-    println!("Benchmark has successfully passed all checks.");
     Ok(
         Some(
         (
@@ -971,8 +1005,8 @@ fn update_jobs(
                     println!("[warning]: execution succeeded but `receipt_cid` is missing, so trace is unverified.");
                 }
                 //@ unverified-per-server
-                let proper_receipt_cid = receipt_cid.clone().unwrap_or_else(|| unverified_prefix_key);                
-                exec_trace.entry(proper_receipt_cid)
+                let proper_receipt_cid = receipt_cid.clone().unwrap_or_else(|| unverified_prefix_key);
+                exec_trace.entry(proper_receipt_cid.clone())
                     .and_modify(|specific_exec_trace| {
                         println!("Execution trace is already being tracked.");
                         specific_exec_trace.status_update_history.push(
@@ -990,6 +1024,7 @@ fn update_jobs(
                                 timestamp: timestamp,
                             }
                         );
+                        specific_exec_trace.receipt_cid = Some(proper_receipt_cid);
                         specific_exec_trace
                     });
             },

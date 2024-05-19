@@ -91,6 +91,9 @@ pub struct ExecutionTrace {
     // aka prover
     pub server_id: String,
 
+    //@ fill it
+    pub receipt_cid: Option<String>,
+
     // job status
     pub status_update_history: Vec<StatusUpdate>,
 
@@ -105,6 +108,7 @@ impl ExecutionTrace {
     pub fn new(server_id: String) -> ExecutionTrace {
         ExecutionTrace {
             server_id: server_id,
+            receipt_cid: None,
             status_update_history: Vec::<StatusUpdate>::new(),
             verifications: HashMap::<String, bool>::new(),
             harvests: HashSet::<Harvest>::new(),
