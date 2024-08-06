@@ -43,7 +43,7 @@ use comms::{
     notice,
     compute
 };
-use dstorage::dfs;
+use dstorage::lighthouse;
 use benchmark;
 
 mod job;
@@ -60,7 +60,7 @@ use job::Job;
 ]
 struct Cli {
     #[arg(short, long)]
-    dfs_config_file: Option<String>,
+    dstorage_key_file: Option<String>,
 
     #[arg(short, long)]
     job: Option<String>,
@@ -84,28 +84,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if false == cli.dev {"global"} else {"local(development)"}
     );
 
-    // FairOS-dfs http client
-    let dfs_config_file = cli.dfs_config_file
-        .ok_or_else(|| "FairOS-dfs config file is missing.")?;
-    let dfs_config = toml::from_str(&std::fs::read_to_string(dfs_config_file)?)?;
+    let ds_key_file = cli.dstorage_key_file
+        .ok_or_else(|| "dStorage key file is missing.")?;
 
-    let dfs_client = reqwest::Client::builder()
+    let ds_key = toml::from_str(&std::fs::read_to_string(ds_key_file)?)?;
+    let ds_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60)) //@ how much timeout is enough?
-        .build()
-        .expect("FairOS-dfs server should be available and be running to continue.");
-    let dfs_cookie = dfs::login(
-        &dfs_client, 
-        &dfs_config
-    ).await
-    .expect("Login failed, shutting down.");
-    assert_ne!(
-        dfs_cookie, String::from(""),
-        "Cookie from FairOS-dfs cannot be empty."
-    );
+        .build()?;
 
     println!("Connecting to docker daemon...");
     let docker_con = Docker::connect_with_socket_defaults()?;
-
 
     // jobs
     let mut jobs = HashMap::<String, Job>::new(); 
@@ -511,9 +499,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             offer_evaluation_futures.push(
                                 evaluate_compute_offer(
                                     &docker_con,
-                                    &dfs_client,
-                                    &dfs_config,
-                                    &dfs_cookie,
+                                    &ds_client,
                                     &job,
                                     compute_offer,
                                     server_peer_id
@@ -737,34 +723,21 @@ fn any_harvest_ready_jobs(
     false
 }
 
-// download benchmark from dfs and put it into the docker volume
+// download benchmark from dstorage and put it into the docker volume
 async fn download_benchmark(
-    dfs_client: &reqwest::Client,
-    dfs_config: &dfs::Config,
-    dfs_cookie: &String,
+    ds_client: &reqwest::Client,
     server_benchmark: &compute::ServerBenchmark,
 ) -> Result<String, Box<dyn Error>> {
-    dfs::fork_pod(
-        dfs_client, dfs_config, dfs_cookie,
-        server_benchmark.cid.clone(),
-    ).await?;
-    if let Err(e) = dfs::open_pod(
-        dfs_client, dfs_config, dfs_cookie,
-        server_benchmark.pod_name.clone(),
-    ).await {
-        eprintln!("Warning: pod open error: `{e:#?}`");
-    }
-    // put the benchmark into a docker volume
+    // save the benchmark to the docker volume
     let residue_path = format!(
         "{}/benchmark/{}/residue",
         job::get_residue_path()?,
         server_benchmark.cid,
     );
     fs::create_dir_all(residue_path.clone())?;
-    dfs::download_file(
-        dfs_client, dfs_config, dfs_cookie,
-        server_benchmark.pod_name.clone(),
-        format!("/benchmark"),
+    lighthouse::download_file(
+        ds_client,
+        &server_benchmark.cid,
         format!("{residue_path}/benchmark")
     ).await?;
     Ok(residue_path)
@@ -778,9 +751,7 @@ async fn download_benchmark(
 
 async fn evaluate_compute_offer(
     docker_con: &Docker,
-    dfs_client: &reqwest::Client,
-    dfs_config: &dfs::Config,
-    dfs_cookie: &String,
+    ds_client: &reqwest::Client,
     job: &Job,
     compute_offer: compute::Offer,
     server_peer_id: PeerId,
@@ -788,10 +759,10 @@ async fn evaluate_compute_offer(
     //@ test for sybils, ... 
     println!("let's evaluate `{:?}`'s offer.", server_peer_id.to_string());
     // asking a verifier is slow, so verify locally
-    // pull in the benchmark blob from dfs
+    // pull in the benchmark blob from dstorage
     //@ how about skipping disk save? we need to read it in memory shortly.
     let residue_path = download_benchmark(
-        dfs_client, dfs_config, dfs_cookie,
+        ds_client,
         &compute_offer.server_benchmark
     ).await?;
     // unpack it
