@@ -84,10 +84,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if false == cli.dev {"global"} else {"local(development)"}
     );
 
+    // dStorage keys
     let ds_key_file = cli.dstorage_key_file
         .ok_or_else(|| "dStorage key file is missing.")?;
-
     let ds_key = toml::from_str(&std::fs::read_to_string(ds_key_file)?)?;
+
     let ds_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60)) //@ how much timeout is enough?
         .build()?;
@@ -273,20 +274,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
                 // need verification
-                if true == any_verification_jobs(&jobs, &jobs_execution_traces) {
-                    // let need_verify_msg = vec![notice::Notice::Verification.into()];
-                    let nonce: u8 = rng.gen();
-                    let need_verify = notice::Notice::Verification(nonce);
-                    let gossip = &mut swarm.behaviour_mut().gossipsub;
-                    let topic = gossip.topics().nth(0).unwrap(); 
-                    if let Err(e) = gossip
-                        .publish(
-                            topic.clone(),
-                            bincode::serialize(&need_verify)?
-                    ) {                
-                        eprintln!("`need verify` publish error: {e:?}");
-                    }
-                }
+                // if true == _any_verification_jobs(&jobs, &jobs_execution_traces) {
+                //     // let need_verify_msg = vec![notice::Notice::Verification.into()];
+                //     let nonce: u8 = rng.gen();
+                //     let need_verify = notice::Notice::Verification(nonce);
+                //     let gossip = &mut swarm.behaviour_mut().gossipsub;
+                //     let topic = gossip.topics().nth(0).unwrap(); 
+                //     if let Err(e) = gossip
+                //         .publish(
+                //             topic.clone(),
+                //             bincode::serialize(&need_verify)?
+                //     ) {                
+                //         eprintln!("`need verify` publish error: {e:?}");
+                //     }
+                // }
 
                 // need to harvest
                 if true == any_harvest_ready_jobs(&jobs, &jobs_execution_traces) {
@@ -637,7 +638,7 @@ fn any_compute_jobs<'a>(
 }
 
 // check if any jobs need status updates
-fn to_be_updated_jobs<'a>(
+fn _to_be_updated_jobs<'a>(
     jobs_execution_traces: &'a HashMap::<String, HashMap<String, job::ExecutionTrace>>
 ) -> HashMap<String, HashSet<&'a str>> {
     // map: (server_id, job_id list)
@@ -665,7 +666,7 @@ fn any_pending_jobs(
     false == jobs.is_empty()
 }
 
-fn any_verification_jobs(
+fn _any_verification_jobs(
     jobs: &HashMap::<String, Job>,
     jobs_execution_traces: &HashMap::<String, HashMap<String, job::ExecutionTrace>>
 ) -> bool {
@@ -711,11 +712,12 @@ fn any_harvest_ready_jobs(
         if false == jobs_execution_traces.contains_key(&job.id) {
             continue;
         }
-        let min_required_verifications = 
-                job.schema.verification.min_required.unwrap_or_else(|| u8::MAX);
+        // let min_required_verifications = 
+        //         job.schema.verification.min_required.unwrap_or_else(|| u8::MAX);
         let exec_trace = jobs_execution_traces.get(&job.id).unwrap();
         if true == exec_trace.values().find(|specific_exec_trace|
-            true == specific_exec_trace.is_verified(min_required_verifications)
+            // true == specific_exec_trace.is_verified(min_required_verifications)
+            true == specific_exec_trace.is_locally_verified
         ).is_some() {
             return true;
         }
@@ -996,6 +998,10 @@ fn update_jobs(
                             }
                         );
                         specific_exec_trace.receipt_cid = Some(proper_receipt_cid);
+                        // locally verify the receipt
+                        // if false == receipt_cid.is_none() {                            
+                        // }
+
                         specific_exec_trace
                     });
             },
@@ -1101,13 +1107,13 @@ fn update_jobs(
                     }
                 );
                 // ignore unverified harvests that need to be verified first, @ how about being opportunistic? 
-                let min_required_verifications = 
-                    job.schema.verification.min_required.unwrap_or_else(|| u8::MAX); 
-                if job.schema.verification.min_required.is_some() && 
-                   false == specific_exec_trace.is_verified(min_required_verifications) {
-                    println!("[warning]: execution trace must first be verified.");
-                    continue;
-                }
+                // let min_required_verifications = 
+                //     job.schema.verification.min_required.unwrap_or_else(|| u8::MAX); 
+                // if job.schema.verification.min_required.is_some() && 
+                //    false == specific_exec_trace.is_verified(min_required_verifications) {
+                //     println!("[warning]: execution trace must first be verified.");
+                //     continue;
+                // }
                 let harvest = job::Harvest {
                     fd12_cid: harvest_details.fd12_cid.clone().unwrap(),
                 };
@@ -1120,4 +1126,10 @@ fn update_jobs(
             },
         };
     }
+}
+
+async fn locally_verify_receipt(
+
+) -> bool {
+    true
 }
