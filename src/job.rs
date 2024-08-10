@@ -85,6 +85,14 @@ pub struct StatusUpdate {
     pub timestamp: i64,
 }
 
+// verification result
+#[derive(Debug, Eq, PartialEq)]
+pub enum VerificationResult {
+    Pending,
+    Verified,
+    Unverified,
+}
+
 // an execution trace
 #[derive(Debug)]
 pub struct ExecutionTrace {
@@ -94,7 +102,7 @@ pub struct ExecutionTrace {
     //@ fill it
     pub receipt_cid: Option<String>,
 
-    pub is_locally_verified: bool,
+    pub local_verification: VerificationResult,
 
     // job status
     pub status_update_history: Vec<StatusUpdate>,
@@ -111,7 +119,7 @@ impl ExecutionTrace {
         ExecutionTrace {
             server_id: server_id,
             receipt_cid: None,
-            is_locally_verified: false,
+            local_verification: VerificationResult::Pending,
             status_update_history: Vec::<StatusUpdate>::new(),
             verifications: HashMap::<String, bool>::new(),
             harvests: HashSet::<Harvest>::new(),

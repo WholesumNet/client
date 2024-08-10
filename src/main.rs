@@ -1,7 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 use futures::{
-    // prelude::*,
+    prelude::*,
     select,
     stream::{
         FuturesUnordered,
@@ -101,8 +101,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // execution traces: (job_id, (receipt_cid, exec_trace))
     let mut jobs_execution_traces = HashMap::<String, HashMap::<String, job::ExecutionTrace>>::new();
 
-    // future for 
+    // future for offer evaluation
     let mut offer_evaluation_futures = FuturesUnordered::new();
+
+    // future for local verification of receipts
+    let mut local_verification_futures = FuturesUnordered::new();
 
     if let Some(job_filename) = cli.job {
         let new_job = job::Job::new(None, 
@@ -340,6 +343,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 );               
             },
 
+            // local verification has been finished
+            verification_res = local_verification_futures.select_next_some() => {
+                let (job_id, receipt_cid, is_verified): (String, String, bool) = match verification_res {
+                    Err(failed) => {
+                        eprintln!("Verification error: {:#?}", failed);
+                        continue;                        
+                    },
+
+                    Ok(res) => res
+                };
+                println!("Verification result for `{job_id}-{receipt_cid}` is ready: `{}`.",
+                    if true == is_verified {"verified"} else {"not verified"}
+                );
+                if false == jobs.contains_key(&job_id) {
+                    println!("[warn] No such job `{job_id}`, ignored.");
+                    continue;
+                }
+                let job = jobs.get(&job_id).unwrap();
+                let exec_trace = jobs_execution_traces.get_mut(&job.id).unwrap();
+                if false == exec_trace.contains_key(&receipt_cid) {
+                    eprintln!("[warn] No such execution trace `{receipt_cid}, ignored.`");
+                    continue;
+                }
+                let specific_exec_trace = exec_trace.get_mut(&receipt_cid).unwrap();
+                specific_exec_trace.local_verification = 
+                    if true == is_verified {job::VerificationResult::Verified} else {job::VerificationResult::Unverified};
+            },
+
             event = swarm.select_next_some() => match event {
                 
                 SwarmEvent::NewListenAddr { address, .. } => {
@@ -530,12 +561,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         },
 
                         notice::Request::UpdateForJobs(updates) => {
-                            update_jobs(
+                            let mut to_be_locally_verified: Vec<(String, String)> = Vec::new();
+                            update_jobs(                   
                                 &jobs,
                                 &mut jobs_execution_traces,
                                 server_peer_id,
                                 &updates,
-                            );                            
+                                &mut to_be_locally_verified
+                            );
+                            for (job_id, receipt_cid) in to_be_locally_verified {
+                                local_verification_futures.push(
+                                    locally_verify_receipt(
+                                        &docker_con,
+                                        &ds_client,
+                                        job_id.clone(),
+                                        &jobs.get(&job_id).unwrap().schema.verification.image_id,
+                                        receipt_cid,
+                                    )
+                                );                                   
+                            }
+                                                    
                         },
 
                         _ => {},
@@ -717,7 +762,7 @@ fn any_harvest_ready_jobs(
         let exec_trace = jobs_execution_traces.get(&job.id).unwrap();
         if true == exec_trace.values().find(|specific_exec_trace|
             // true == specific_exec_trace.is_verified(min_required_verifications)
-            true == specific_exec_trace.is_locally_verified
+            job::VerificationResult::Verified == specific_exec_trace.local_verification
         ).is_some() {
             return true;
         }
@@ -760,93 +805,6 @@ async fn evaluate_compute_offer(
 ) -> Result<Option<(String, PeerId)>, Box<dyn Error>> {
     //@ test for sybils, ... 
     println!("let's evaluate `{:?}`'s offer.", server_peer_id.to_string());
-    // asking a verifier is slow, so verify locally
-    // pull in the benchmark blob from dstorage
-    //@ how about skipping disk save? we need to read it in memory shortly.
-    let residue_path = download_benchmark(
-        ds_client,
-        &compute_offer.server_benchmark
-    ).await?;
-    // unpack it
-    let benchmark_blob: Vec<u8> = fs::read(format!("{residue_path}/benchmark"))?;
-    let benchmark_result: benchmark::Benchmark = 
-        bincode::deserialize(benchmark_blob.as_slice())?;
-    // 1- check timestamp for expiry
-    //@ honesty checks with timestamps in benchmark execution
-    //@ negativity in config file
-    let expiry = Utc::now().timestamp() - benchmark_result.timestamp;
-    if expiry > job.schema.criteria.benchmark_expiry_secs.unwrap_or_else(|| i64::MAX) {
-        println!("Benchmark expiry check failed: good for `{:?}` secs, but `{:?}` secs detected.",
-            job.schema.criteria.benchmark_expiry_secs, expiry);
-        return Ok(None);
-    } else {
-        println!("Benchmark expiry check `passed`.");
-    }
-    // 2- check if duration is acceptable
-    let max_acceptable_duration = 
-        job.schema.criteria.benchmark_duration_msecs.unwrap_or_else(|| u128::MAX);
-    if benchmark_result.duration_msecs > max_acceptable_duration {
-        println!("Benchmark execution duration check `failed`.");
-        return Ok(None);
-    } else {
-        println!("Benchmark execution duration `passed`.");        
-    }
-    // 3- verify the receipt
-    let image_id_58 = {
-        // [u32; 8] -> [u8; 32] -> base58 encode
-        let mut image_id_bytes = [0u8; 32];
-        //@ watch for panics here
-        use byteorder::{ByteOrder, BigEndian};
-        BigEndian::write_u32_into(
-            &benchmark_result.r0_image_id,
-            &mut image_id_bytes
-        );
-        bs58::encode(&image_id_bytes)
-            .with_alphabet(bs58::Alphabet::BITCOIN)
-            .with_check()
-            .into_string()
-    };
-    // write benchmark's receipt into the vol used by warrant
-    fs::write(
-        format!("{residue_path}/receipt"),
-        benchmark_result.r0_receipt_blob.as_slice()
-    )?;
-    println!("Benchmark's receipt is ready to be verified: `{}`", compute_offer.server_benchmark.cid);
-    // run the job
-    let verification_image = String::from("rezahsnz/warrant:0.21");
-    let local_receipt_path = String::from("/home/prince/residue/receipt");
-    let command = vec![
-        String::from("/bin/sh"),
-        String::from("-c"),
-        format!(
-            "/home/prince/warrant --image-id {} --receipt-file {}",
-            image_id_58,
-            local_receipt_path,
-        )
-    ];                          
-    match run_docker_job(
-        &docker_con,
-        compute_offer.server_benchmark.cid,
-        verification_image,
-        command,
-        residue_path.clone()
-    ).await {
-        Err(failed) => {
-            eprintln!("Failed to verify the receipt: `{:#?}`", failed);       
-            return Ok(None);
-        },
-
-        Ok(job_exec_res) => {
-            if job_exec_res.exit_status_code != 0 { 
-                println!("Verification failed with error: `{}`",
-                    job_exec_res.error_message.unwrap_or_else(|| String::from("")),
-                );
-                return Ok(None);
-            } else {
-                println!("Verification suceeded.");
-            }            
-        }
-    }
     Ok(
         Some(
         (
@@ -854,6 +812,101 @@ async fn evaluate_compute_offer(
             server_peer_id
         ))
     )
+    //@ vbs needs adjustments
+    // asking a verifier is slow, so verify locally
+    // pull in the benchmark blob from dstorage
+    //@ how about skipping disk save? we need to read it in memory shortly.
+    // let residue_path = download_benchmark(
+    //     ds_client,
+    //     &compute_offer.server_benchmark
+    // ).await?;
+    // // unpack it
+    // let benchmark_blob: Vec<u8> = fs::read(format!("{residue_path}/benchmark"))?;
+    // let benchmark_result: benchmark::Benchmark = 
+    //     bincode::deserialize(benchmark_blob.as_slice())?;
+    // // 1- check timestamp for expiry
+    // //@ honesty checks with timestamps in benchmark execution
+    // //@ negativity in config file
+    // let expiry = Utc::now().timestamp() - benchmark_result.timestamp;
+    // if expiry > job.schema.criteria.benchmark_expiry_secs.unwrap_or_else(|| i64::MAX) {
+    //     println!("Benchmark expiry check failed: good for `{:?}` secs, but `{:?}` secs detected.",
+    //         job.schema.criteria.benchmark_expiry_secs, expiry);
+    //     return Ok(None);
+    // } else {
+    //     println!("Benchmark expiry check `passed`.");
+    // }
+    // // 2- check if duration is acceptable
+    // let max_acceptable_duration = 
+    //     job.schema.criteria.benchmark_duration_msecs.unwrap_or_else(|| u128::MAX);
+    // if benchmark_result.duration_msecs > max_acceptable_duration {
+    //     println!("Benchmark execution duration check `failed`.");
+    //     return Ok(None);
+    // } else {
+    //     println!("Benchmark execution duration `passed`.");        
+    // }
+    // // 3- verify the receipt
+    // let image_id_58 = {
+    //     // [u32; 8] -> [u8; 32] -> base58 encode
+    //     let mut image_id_bytes = [0u8; 32];
+    //     //@ watch for panics here
+    //     use byteorder::{ByteOrder, BigEndian};
+    //     BigEndian::write_u32_into(
+    //         &benchmark_result.r0_image_id,
+    //         &mut image_id_bytes
+    //     );
+    //     bs58::encode(&image_id_bytes)
+    //         .with_alphabet(bs58::Alphabet::BITCOIN)
+    //         .with_check()
+    //         .into_string()
+    // };
+    // // write benchmark's receipt into the vol used by warrant
+    // fs::write(
+    //     format!("{residue_path}/receipt"),
+    //     benchmark_result.r0_receipt_blob.as_slice()
+    // )?;
+    // println!("Benchmark's receipt is ready to be verified: `{}`", compute_offer.server_benchmark.cid);
+    // // run the job
+    // let verification_image = String::from("rezahsnz/warrant:0.21");
+    // let local_receipt_path = String::from("/home/prince/residue/receipt");
+    // let command = vec![
+    //     String::from("/bin/sh"),
+    //     String::from("-c"),
+    //     format!(
+    //         "/home/prince/warrant --image-id {} --receipt-file {}",
+    //         image_id_58,
+    //         local_receipt_path,
+    //     )
+    // ];                          
+    // match run_docker_job(
+    //     &docker_con,
+    //     compute_offer.server_benchmark.cid,
+    //     verification_image,
+    //     command,
+    //     residue_path.clone()
+    // ).await {
+    //     Err(failed) => {
+    //         eprintln!("Failed to verify the receipt: `{:#?}`", failed);       
+    //         return Ok(None);
+    //     },
+
+    //     Ok(job_exec_res) => {
+    //         if job_exec_res.exit_status_code != 0 { 
+    //             println!("Verification failed with error: `{}`",
+    //                 job_exec_res.error_message.unwrap_or_else(|| String::from("")),
+    //             );
+    //             return Ok(None);
+    //         } else {
+    //             println!("Verification suceeded.");
+    //         }            
+    //     }
+    // }
+    // Ok(
+    //     Some(
+    //     (
+    //         job.id.clone(),
+    //         server_peer_id
+    //     ))
+    // )
 }
 
 // probe verify offer and respond needful
@@ -900,6 +953,7 @@ fn update_jobs(
     jobs_execution_traces: &mut HashMap::<String, HashMap::<String, job::ExecutionTrace>>,
     server_peer_id: PeerId,
     updates: &Vec<compute::JobUpdate>,
+    to_be_locally_verified: &mut Vec<(String, String)>,
 ) {
     // process updates for jobs
     for new_update in updates {
@@ -987,7 +1041,7 @@ fn update_jobs(
                                 status: compute::JobStatus::ExecutionSucceeded(receipt_cid.clone()),
                                 timestamp: timestamp,
                             }
-                        );
+                        );                        
                     })
                     .or_insert_with(|| {
                         let mut specific_exec_trace = job::ExecutionTrace::new(server_id);
@@ -997,13 +1051,16 @@ fn update_jobs(
                                 timestamp: timestamp,
                             }
                         );
-                        specific_exec_trace.receipt_cid = Some(proper_receipt_cid);
-                        // locally verify the receipt
-                        // if false == receipt_cid.is_none() {                            
-                        // }
-
+                        specific_exec_trace.receipt_cid = Some(proper_receipt_cid);                        
                         specific_exec_trace
-                    });
+                    });  
+                //@ how about pushing "job_id-receipt_cid" to a stream and verify them in a less ugly way
+                if true == receipt_cid.is_some() &&
+                   job::VerificationResult::Pending == exec_trace.get(&job.id).unwrap().local_verification {
+                    to_be_locally_verified.push(
+                        (job.id.clone(), receipt_cid.clone().unwrap())
+                    );                    
+                }              
             },
 
             compute::JobStatus::VerificationSucceeded(receipt_cid) => {
@@ -1128,8 +1185,90 @@ fn update_jobs(
     }
 }
 
-async fn locally_verify_receipt(
+// download blob from dStorage
+async fn download_receipt(
+    ds_client: &reqwest::Client,
+    cid: &str
+) -> Result<String, Box<dyn Error>> {
+    // save the benchmark to the docker volume
+    let residue_path = format!(
+        "{}/verification/{}/residue",
+        job::get_residue_path()?,
+        cid,
+    );
+    fs::create_dir_all(residue_path.clone())?;
+    lighthouse::download_file(
+        ds_client,
+        cid,
+        format!("{residue_path}/receipt")
+    ).await?;
+    Ok(residue_path)
+}
 
-) -> bool {
-    true
+// verify any receipt locally
+async fn locally_verify_receipt(
+    docker_con: &Docker,
+    ds_client: &reqwest::Client,
+    job_id: String,
+    image_id: &str,
+    receipt_cid: String
+) -> Result<(String, String, bool), Box<dyn Error>> {
+    let residue_path = download_receipt(
+        ds_client,
+        &receipt_cid
+    ).await?;
+    // run the job
+    let verification_image = String::from("rezahsnz/warrant:0.21");
+    let local_receipt_path = String::from("/home/prince/residue/receipt");
+    let command = vec![
+        String::from("/bin/sh"),
+        String::from("-c"),
+        format!(
+            "/home/prince/warrant --image-id {} --receipt-file {}",
+            image_id,
+            local_receipt_path,
+        )
+    ];                          
+    match run_docker_job(
+        &docker_con,
+        receipt_cid.clone(),
+        verification_image,
+        command,
+        residue_path.clone()
+    ).await {
+        Err(failed) => {
+            eprintln!("Failed to verify the receipt: `{:#?}`", failed);       
+            return Ok(
+                (
+                    job_id,
+                    receipt_cid,
+                    false
+                )
+            );
+        },
+
+        Ok(job_exec_res) => {
+            if job_exec_res.exit_status_code != 0 { 
+                println!("Verification failed with error: `{}`",
+                    job_exec_res.error_message.unwrap_or_else(|| String::from("")),
+                );
+                return Ok(
+                    (
+                        job_id,
+                        receipt_cid,
+                        false
+                    )
+                );
+            } else {
+                println!("Verification suceeded.");
+            }            
+        }
+    }
+    Ok(
+        (
+            job_id,
+            receipt_cid,
+            true
+        )
+    )
 }
