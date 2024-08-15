@@ -1,7 +1,6 @@
 #![doc = include_str!("../README.md")]
 
 use futures::{
-    prelude::*,
     select,
     stream::{
         FuturesUnordered,
@@ -85,9 +84,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
 
     // dStorage keys
-    let ds_key_file = cli.dstorage_key_file
-        .ok_or_else(|| "dStorage key file is missing.")?;
-    let ds_key = toml::from_str(&std::fs::read_to_string(ds_key_file)?)?;
+    // let ds_key_file = cli.dstorage_key_file
+    //     .ok_or_else(|| "dStorage key file is missing.")?;
+    // let ds_key = toml::from_str(&std::fs::read_to_string(ds_key_file)?)?;
 
     let ds_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60)) //@ how much timeout is enough?
@@ -125,7 +124,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let new_key = identity::Keypair::generate_ed25519();
             let bytes = new_key.to_protobuf_encoding().unwrap();
             let _bw = fs::write("./key.secret", bytes);
-            println!("No keys were supplied, so one has been generated for you and saved to `{}` file.", "./ket.secret");
+            println!("No keys were supplied, so one has been generated for you and saved to `{}` file.", "./key.secret");
             new_key
         }
     };    
@@ -1035,7 +1034,7 @@ fn update_jobs(
                 let proper_receipt_cid = receipt_cid.clone().unwrap_or_else(|| unverified_prefix_key);
                 exec_trace.entry(proper_receipt_cid.clone())
                     .and_modify(|specific_exec_trace| {
-                        println!("Execution trace is already being tracked.");
+                        println!("[info] Execution trace is already being tracked.");
                         specific_exec_trace.status_update_history.push(
                             job::StatusUpdate {
                                 status: compute::JobStatus::ExecutionSucceeded(receipt_cid.clone()),
@@ -1055,11 +1054,14 @@ fn update_jobs(
                         specific_exec_trace
                     });  
                 //@ how about pushing "job_id-receipt_cid" to a stream and verify them in a less ugly way
-                if true == receipt_cid.is_some() &&
-                   job::VerificationResult::Pending == exec_trace.get(&job.id).unwrap().local_verification {
-                    to_be_locally_verified.push(
-                        (job.id.clone(), receipt_cid.clone().unwrap())
-                    );                    
+                if true == receipt_cid.is_some() {
+                    let unw_receipt_cid = receipt_cid.clone().unwrap();
+                    let specific_exec_trace = exec_trace.get(&unw_receipt_cid).unwrap();
+                    if job::VerificationResult::Pending == specific_exec_trace.local_verification {
+                        to_be_locally_verified.push(
+                            (job.id.clone(), unw_receipt_cid)
+                        );
+                    }                    
                 }              
             },
 
@@ -1176,7 +1178,7 @@ fn update_jobs(
                 };
 
                 if false == specific_exec_trace.harvests.insert(harvest) {
-                    println!("[info]: execution trace is already harvested.");
+                    println!("[info]: Execution trace is already harvested.");
                 }
                 
                 println!("Harvested the execution residues for `{proper_receipt_cid}`");
@@ -1218,7 +1220,7 @@ async fn locally_verify_receipt(
         &receipt_cid
     ).await?;
     // run the job
-    let verification_image = String::from("rezahsnz/warrant:0.21");
+    let verification_image = String::from("rezahsnz/warrant:1.0.1");
     let local_receipt_path = String::from("/home/prince/residue/receipt");
     let command = vec![
         String::from("/bin/sh"),
