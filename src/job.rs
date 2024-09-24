@@ -15,15 +15,12 @@ pub struct CriteriaConfig {
     pub benchmark_expiry_secs: Option<i64>,
 
     pub benchmark_duration_msecs: Option<u128>,
-
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ComputeConfig {
-    // docker image to run
-    pub docker_image: String,
-    // invoke this command when container is up
-    pub command: String,
+    // path on disk; it should contain 000.seg files
+    pub segments_path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,21 +51,6 @@ pub struct Schema {
     
     pub harvest: HarvestConfig,
 }
-
-/*
-development stages of a job:
- 0. created 
- 1. running
- 2. execution finished
-    a. succeeded, ready for verification
-    b. failed, harvest ready(unverified)
- 3. verification finished
-    a. succeeded(n independent sources), harvest ready(verified)
-    b. failed, harvest ready(unverified)
- 4. harvest ready
-
- the ideal development sequence: 0, 1, 2.a, 3.a, 4
-*/
 
 #[derive(Debug, Eq, PartialEq, Hash)]
 pub struct Harvest {
@@ -175,7 +157,7 @@ pub struct Job {
     pub id: String,
    
     pub schema: Schema,
-      
+  
     // update history from servers
     // pub status_history: HashMap::<String, Vec<compute::JobStatus>>, 
 
@@ -192,7 +174,7 @@ impl Job {
                 Uuid::new_v4().simple().to_string()[..4].to_string()
             }),
             schema: schema,
-            
+
             // status_history: HashMap::<String, Vec<compute::JobStatus>>::new(),
 
             // execution_trace: HashMap::<String, ExecutionTrace>::new(),

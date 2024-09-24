@@ -18,16 +18,19 @@ use libp2p::{
 use std::collections::{
     HashMap, HashSet
 };
-use std::fs;
-use std::error::Error;
-use std::time::Duration;
+use std::{
+    fs,
+    error::Error,
+    time::Duration,
+    path::PathBuf
+};
 use rand::Rng;
 use bincode;
 use chrono::{Utc};
 
 use toml;
 use tracing_subscriber::EnvFilter;
-
+use anyhow;
 use reqwest;
 
 use bollard::Docker;
@@ -47,6 +50,12 @@ use benchmark;
 
 mod job;
 use job::Job;
+
+mod recursion;
+use recursion::{
+    Recursion, Segment, LifeCycle
+};
+
 
 // CLI
 #[derive(Parser, Debug)]
@@ -84,9 +93,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
 
     // dStorage keys
-    // let ds_key_file = cli.dstorage_key_file
-    //     .ok_or_else(|| "dStorage key file is missing.")?;
-    // let ds_key = toml::from_str(&std::fs::read_to_string(ds_key_file)?)?;
+    let ds_key_file = cli.dstorage_key_file
+        .ok_or_else(|| "dStorage key file is missing.")?;
+    let lighthouse_config: lighthouse::Config = 
+        toml::from_str(&fs::read_to_string(ds_key_file)?)?;
+    let ds_key = lighthouse_config.apiKey;
 
     let ds_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60)) //@ how much timeout is enough?
@@ -99,6 +110,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut jobs = HashMap::<String, Job>::new(); 
     // execution traces: (job_id, (receipt_cid, exec_trace))
     let mut jobs_execution_traces = HashMap::<String, HashMap::<String, job::ExecutionTrace>>::new();
+    // recursion for jobs: (job_id, recursion)
+    let mut recursions = HashMap::<String, Recursion>::new();
 
     // future for offer evaluation
     let mut offer_evaluation_futures = FuturesUnordered::new();
@@ -106,12 +119,55 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // future for local verification of receipts
     let mut local_verification_futures = FuturesUnordered::new();
 
+    // futures for segments' uploads
+    let mut segments_upload_futures = FuturesUnordered::new();
+
+    // see if there's any jobs
     if let Some(job_filename) = cli.job {
-        let new_job = job::Job::new(None, 
+        let mut job = Job::new(
+            None, 
             toml::from_str(&fs::read_to_string(job_filename)?)?
         );
-        println!("A new job is here: {:#?}", new_job.schema);
-        jobs.insert(new_job.id.clone(), new_job);
+        let mut segments = HashMap::<String, Segment>::new();        
+        // read segments off disk
+        let mut segment_files: Vec<PathBuf> = vec![];
+        for entry in fs::read_dir(&job.schema.compute.segments_path)? {
+            let path = entry?.path();
+            if path.extension().and_then(|s| s.to_str().map(|s| s.to_ascii_lowercase())) == Some(String::from("seg")) {
+                segment_files.push(path);
+            }
+        }
+        segment_files.sort();
+        println!("read {} segments in total.", segment_files.len());
+        for seg_file in segment_files {
+            let seg_name = seg_file.file_stem()
+                    .ok_or_else(|| "<0>")?
+                    .to_str().ok_or_else(|| "<0>")?;
+            let upload_id = format!("{}-{}", job.id, seg_name);
+            let seg_path = String::from(seg_file.to_string_lossy());
+            segments_upload_futures.push(
+                lighthouse::upload_file(
+                    &ds_client,
+                    &ds_key,
+                    seg_path.clone(),
+                    upload_id.clone(),
+                )
+            );
+            segments.insert(seg_name.to_string(), 
+                Segment {
+                    id: seg_name.to_string(),
+                    life_cycle: LifeCycle::Local(seg_path)
+                }
+            );
+        }        
+        println!("A new job is here: {:#?}", job.schema);
+        recursions.insert(job.id.clone(),
+            Recursion {
+                job_id: job.id.clone(),
+                segments: segments,
+            }
+        );
+        jobs.insert(job.id.clone(), job);
     }    
     
     // key 
@@ -331,8 +387,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         &server_peer_id,
                         notice::Request::ComputeJob(compute::ComputeDetails {
                             job_id: job_id,
-                            docker_image: job.schema.compute.docker_image.clone(),
-                            command: job.schema.compute.command.clone(),
+                            //@ job details
+                            docker_image: String::from(""),//job.schema.compute.docker_image.clone(),
+                            command: String::from("")//job.schema.compute.command.clone(),
                         })
                     );
                 set_to_track_job_updates(
@@ -362,7 +419,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let job = jobs.get(&job_id).unwrap();
                 let exec_trace = jobs_execution_traces.get_mut(&job.id).unwrap();
                 if false == exec_trace.contains_key(&receipt_cid) {
-                    eprintln!("[warn] No such execution trace `{receipt_cid}, ignored.`");
+                    eprintln!("[warn] No such execution trace `{receipt_cid}`, ignored.");
                     continue;
                 }
                 let specific_exec_trace = exec_trace.get_mut(&receipt_cid).unwrap();
@@ -370,10 +427,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     if true == is_verified {job::VerificationResult::Verified} else {job::VerificationResult::Unverified};
             },
 
+            // segments upload is finished
+            ur = segments_upload_futures.select_next_some() => {
+                let upload_res = ur?;
+                let tokens: Vec<&str> = upload_res.id.split("-").collect();
+                let job_id = tokens[0];
+                let seg_id = tokens[1];
+                if false == jobs.contains_key(job_id) {
+                    eprintln!("[warn] No such job `{}`", job_id);
+                    continue;
+                }
+                let rec = recursions.get_mut(job_id).unwrap();
+                if false == rec.segments.contains_key(seg_id) {
+                    eprintln!("[warn] No such segment `{}` for job {}", seg_id, job_id);
+                    continue;
+                }
+                let segment = rec.segments.get_mut(seg_id).unwrap();
+                segment.life_cycle = LifeCycle::Unproved(upload_res.cid);
+                println!("segment lifecycle changed to {:#?}", segment.life_cycle);
+            },
+
             event = swarm.select_next_some() => match event {
                 
                 SwarmEvent::NewListenAddr { address, .. } => {
-                    println!("Local node is listening on {address}");
+                    println!("[info] Local node is listening on {address}");
                 },
 
                 // mdns events
@@ -523,7 +600,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             println!("received `compute offer` from server: `{}`, offer: {:#?}", 
                                 server_peer_id, compute_offer);
                             if false == jobs.contains_key(&compute_offer.job_id) {
-                                println!("No such job, ignored offer.");
+                                println!("No such job, ignored the offer.");
                                 continue;
                             }
                             let job = jobs.get(&compute_offer.job_id).unwrap();        
