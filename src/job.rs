@@ -1,11 +1,6 @@
 use std::error::Error;
 use uuid::Uuid;
-use std::collections::{
-    HashMap, HashSet
-};
 use serde::Deserialize;
-
-use comms::compute;
 
 #[derive(Debug, Deserialize)]
 pub struct CriteriaConfig {    
@@ -52,118 +47,12 @@ pub struct Schema {
     pub harvest: HarvestConfig,
 }
 
-#[derive(Debug, Eq, PartialEq, Hash)]
-pub struct Harvest {
-    pub fd12_cid: String,
-    //@ more fields TBD
-}
-
-// unverified execution trace ids start with this prefix
-pub const UNVERIFIED_PREFIX: &str = "<!>";
-
-#[derive(Debug, Eq, PartialEq)]
-pub struct StatusUpdate {
-    pub status: compute::JobStatus,
-    pub timestamp: i64,
-}
-
-// verification result
-#[derive(Debug, Eq, PartialEq)]
-pub enum VerificationResult {
-    Pending,
-    Verified,
-    Unverified,
-}
-
-// an execution trace
-#[derive(Debug)]
-pub struct ExecutionTrace {
-    // aka prover
-    pub server_id: String,
-
-    //@ fill it
-    pub receipt_cid: Option<String>,
-
-    pub local_verification: VerificationResult,
-
-    // job status
-    pub status_update_history: Vec<StatusUpdate>,
-
-    // true means that verifier approved the receipt, and false otherwise 
-    pub verifications: HashMap<String, bool>,
-
-    pub harvests: HashSet<Harvest>,
-}
-
-impl ExecutionTrace {
-
-    pub fn new(server_id: String) -> ExecutionTrace {
-        ExecutionTrace {
-            server_id: server_id,
-            receipt_cid: None,
-            local_verification: VerificationResult::Pending,
-            status_update_history: Vec::<StatusUpdate>::new(),
-            verifications: HashMap::<String, bool>::new(),
-            harvests: HashSet::<Harvest>::new(),
-        }
-    } 
-
-    pub fn num_verifications(
-        &self,
-        is_approved: bool
-    ) -> usize {
-        self.verifications.values()
-        .filter(|v| is_approved == **v)
-        .count()
-    }
-
-    pub fn is_verified(
-        &self,
-        min_required_approved_verifications: u8
-    ) -> bool {
-        let num_approved = self.num_verifications(true);
-        let num_rejected = self.num_verifications(false);
-        //@ temporary until strategies go live
-        (num_approved > 2 * num_rejected) &&
-        (num_approved >= min_required_approved_verifications.into())
-    }
-}
-
-// check to see if we have any verified execution traces 
-// pub fn has_verified_execution_traces(
-//     min_req_verifications: u8,
-//     execution_trace: &HashMap::<String, ExecutionTrace>
-// ) -> bool {    
-//     execution_trace.values()
-//         .find(|exec_trace| 
-//             exec_trace.is_verified(min_required_verifications)
-//         ).is_some()
-// }
-
-// check to see if we have any harvest-ready execution traces
-// pub fn has_harvest_ready_execution_traces(
-//     min_req_verifications: u8,
-//     execution_trace: &HashMap::<String, ExecutionTrace>
-// ) -> bool {
-//     execution_trace.values()
-//     .find(|exec_trace| 
-//         true == exec_trace.is_verified(min_required_verifications)
-//     ).is_some()
-// }
-
 // maintains lifecycle for a job
 #[derive(Debug)]
 pub struct Job {
     pub id: String,
    
     pub schema: Schema,
-  
-    // update history from servers
-    // pub status_history: HashMap::<String, Vec<compute::JobStatus>>, 
-
-    // if a job is finished execution, it leaves a receipt to be verified
-    // a server is allowed to have several distinct execution traces 
-    // pub execution_trace: HashMap::<String, ExecutionTrace>,
 }
 
 impl Job {
@@ -174,38 +63,8 @@ impl Job {
                 Uuid::new_v4().simple().to_string()[..4].to_string()
             }),
             schema: schema,
-
-            // status_history: HashMap::<String, Vec<compute::JobStatus>>::new(),
-
-            // execution_trace: HashMap::<String, ExecutionTrace>::new(),
         }
     }
-
-    // check to see if we have any verified execution traces
-    // pub fn has_verified_execution_traces(&self) -> bool {
-    //     if self.schema.verification.min_required.is_some() {
-    //         let min_required_verifications = self.schema.verification.min_required.unwrap();
-    //         return self.execution_trace.values()
-    //         .find(|exec_trace| 
-    //             exec_trace.is_verified(min_required_verifications)
-    //         ).is_some()
-    //     }
-    //     false
-    // }
-
-    // // check to see if we have any harvest-ready execution traces
-    // pub fn has_harvest_ready_execution_traces(&self) -> bool {
-    //     if let Some(min_required_verifications) = self.schema.verification.min_required {
-    //         // verified traces are required
-    //         return self.execution_trace.values()
-    //         .find(|exec_trace| 
-    //             true == exec_trace.is_verified(min_required_verifications)
-    //         ).is_some()
-    //     } else {
-    //         // un-verified traces are ok
-    //         return false == self.execution_trace.is_empty()
-    //     }
-    // }
 }
 
 // get base residue path of the host

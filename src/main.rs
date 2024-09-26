@@ -51,9 +51,12 @@ use benchmark;
 mod job;
 use job::Job;
 
+mod exec_trace;
+use exec_trace::ExecutionTrace;
+
 mod recursion;
 use recursion::{
-    Recursion, Segment, LifeCycle
+    Recursion, Segment, Status
 };
 
 
@@ -109,7 +112,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // jobs
     let mut jobs = HashMap::<String, Job>::new(); 
     // execution traces: (job_id, (receipt_cid, exec_trace))
-    let mut jobs_execution_traces = HashMap::<String, HashMap::<String, job::ExecutionTrace>>::new();
+    let mut jobs_execution_traces = HashMap::<String, HashMap::<String, ExecutionTrace>>::new();
     // recursion for jobs: (job_id, recursion)
     let mut recursions = HashMap::<String, Recursion>::new();
 
@@ -124,7 +127,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // see if there's any jobs
     if let Some(job_filename) = cli.job {
-        let mut job = Job::new(
+        let job = Job::new(
             None, 
             toml::from_str(&fs::read_to_string(job_filename)?)?
         );
@@ -156,7 +159,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             segments.insert(seg_name.to_string(), 
                 Segment {
                     id: seg_name.to_string(),
-                    life_cycle: LifeCycle::Local(seg_path)
+                    status: recursion::Status::Local(Some(seg_path))
                 }
             );
         }        
@@ -165,6 +168,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Recursion {
                 job_id: job.id.clone(),
                 segments: segments,
+                status: recursion::Status::Unknown,
             }
         );
         jobs.insert(job.id.clone(), job);
@@ -278,12 +282,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // post need `compute/verify/harvest`, and status updates
             () = timer_post_jobs.select_next_some() => { 
                 // got any compute jobs?
-                if let Some(job_id) = any_compute_jobs(&jobs, &jobs_execution_traces) {        
+                if let Some((job_id, compute_type)) = any_compute_jobs(&recursions) {        
                     // need compute
                     let job = jobs.get(job_id).unwrap();
                     let need_compute = notice::Notice::Compute(compute::NeedCompute {
                         job_id: job_id.clone(),
                         criteria: compute::Criteria {
+                            compute_type: compute_type,
                             memory_capacity: job.schema.criteria.memory_capacity,
                             benchmark_expiry_secs: job.schema.criteria.benchmark_expiry_secs,
                             benchmark_duration_msecs: job.schema.criteria.benchmark_duration_msecs,
@@ -298,27 +303,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
                 // need status updates?
-                // let update_set = to_be_updated_jobs(&jobs_execution_traces);
-                if true == any_pending_jobs(&jobs) {
-                // for(server_id58, job_set) in update_set.iter() {                    
-                //     // let job_status = notice::Request::JobStatus;
-                //     // let gossip = &mut swarm.behaviour_mut().gossipsub;
-                //     // if let Err(e) = gossip
-                //     //     .publish(topic.clone(), bincode::serialize(&job_status)?) {
-                
-                //     //     eprintln!("`job status poll` publish error: {e:?}");
-                //     // }
-                //     let server_peer_id = {
-                //         use std::str::FromStr;
-                //         PeerId::from_str(server_id58.as_str())?
-                //     };
-                //     let job_id_list = job_set.iter().map(|s| String::from(*s)).collect();
-                //     let _req_id = swarm.behaviour_mut()
-                //     .req_resp
-                //     .send_request(
-                //         &server_peer_id,
-                //         notice::Request::JobStatus(job_id_list),
-                //     );
+                if true == any_pending_jobs(&jobs) {                
                     let nonce: u8 = rng.gen();
                     let status_update = notice::Notice::StatusUpdate(nonce);
                     let gossip = &mut swarm.behaviour_mut().gossipsub;
@@ -378,25 +363,66 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         opt.unwrap()
                     },
                 };  
-                println!("we have a deal! server `{}` has successfully passed all evaluation checks.",
-                    server_peer_id.to_string());
-                let job = jobs.get(&job_id).unwrap();             
-                let _req_id = swarm.behaviour_mut()
-                    .req_resp
-                    .send_request(
-                        &server_peer_id,
-                        notice::Request::ComputeJob(compute::ComputeDetails {
-                            job_id: job_id,
-                            //@ job details
-                            docker_image: String::from(""),//job.schema.compute.docker_image.clone(),
-                            command: String::from("")//job.schema.compute.command.clone(),
-                        })
-                    );
-                set_to_track_job_updates(
-                    &job.id, 
-                    server_peer_id,
-                    &mut jobs_execution_traces
-                );               
+                println!(
+                    "we have a deal! server `{}` has successfully passed all evaluation checks.",
+                    server_peer_id.to_string()
+                );
+                if false == jobs.contains_key(&job_id) {
+                    eprintln!("[warn] no such job `{job_id}`, ignored.");
+                }
+                let job = jobs.get(&job_id).unwrap();
+                if false == recursions.contains_key(&job_id) {
+                    eprintln!("[warn] no such recursion `{job_id}`, ignored.");
+                }
+                let rec = recursions.get(&job_id).unwrap();
+                match rec.status {
+                    // pick one segment and send it for prove+lift
+                    recursion::Status::ProveReady(_) => {
+                        if let Some(segment) = rec.segments.values().find(|any_seg| {
+                            match any_seg.status {
+                                recursion::Status::ProveReady(Some(_)) => true,
+                                _ => false                                
+                            }
+                        }) {
+                            let cmd = format!("/home/prince/reprove prove \
+                                              -i /home/prince/residue/in.seg \
+                                              -o /home/prince/residue/out.sr \
+                                              1 > /home/prince/residue/stdout \
+                                              2 > /home/prince/residue/stderr");
+                            let cid = match &segment.status {
+                                recursion::Status::ProveReady(Some(cid)) => cid,
+                                _ => &String::from(""),
+                            };
+                            let prove_job_id = format!("{}-{}", job_id, segment.id);
+                            set_to_track_job_updates(
+                                &prove_job_id, 
+                                server_peer_id,
+                                &mut jobs_execution_traces
+                            );
+                            let _req_id = swarm.behaviour_mut()
+                            .req_resp
+                            .send_request(
+                                &server_peer_id,
+                                notice::Request::ComputeJob(compute::ComputeDetails {
+                                    job_id: prove_job_id,
+                                    //@ job details
+                                    docker_image: String::from("rezahsnz/r0-zoo:1.0.5"),
+                                    command: cmd,
+                                    input: vec![cid.clone()],
+                                })
+                            );
+                        } else {
+                            eprintln!("[warn] no segments to prove for `{job_id}.`");
+                        }
+                    },
+
+                    _ => {},
+                }                
+                // set_to_track_job_updates(
+                //     &job.id, 
+                //     server_peer_id,
+                //     &mut jobs_execution_traces
+                // );               
             },
 
             // local verification has been finished
@@ -430,6 +456,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // segments upload is finished
             ur = segments_upload_futures.select_next_some() => {
                 let upload_res = ur?;
+                // job_id-seg_id
                 let tokens: Vec<&str> = upload_res.id.split("-").collect();
                 let job_id = tokens[0];
                 let seg_id = tokens[1];
@@ -443,8 +470,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     continue;
                 }
                 let segment = rec.segments.get_mut(seg_id).unwrap();
-                segment.life_cycle = LifeCycle::Unproved(upload_res.cid);
-                println!("segment lifecycle changed to {:#?}", segment.life_cycle);
+                segment.status = recursion::Status::ProveReady(Some(upload_res.cid));
+                println!("segment `{seg_id}`'s status changed to `{:?}`", segment.status);
+                // check if recursion can go to prove&lift stage
+                if false == rec.segments.is_empty() &&
+                   true == rec.segments.values().all(|s| s.status != recursion::Status::ProveReady(None)) {
+                   // recursion is ready for prove and lift 
+                   println!("[info] all segments of job `{job_id}` are uploaded to dstorage and they are ready for prove and lift stage.");
+                   rec.status = recursion::Status::ProveReady(None);
+                } 
             },
 
             event = swarm.select_next_some() => match event {
@@ -699,13 +733,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 fn set_to_track_job_updates(
     job_id: &str,
     server_peer_id: PeerId,
-    jobs_execution_traces: &mut HashMap<String, HashMap<String, job::ExecutionTrace>>
+    jobs_execution_traces: &mut HashMap<String, HashMap<String, ExecutionTrace>>
 ) {
-    let new_unverified_exec_trace = |server_id: &str| -> job::ExecutionTrace {
-        let mut new_deal_trace = job::ExecutionTrace::new(server_id.to_owned());
+    let new_unverified_exec_trace = |server_id: &str| -> ExecutionTrace {
+        let mut new_deal_trace = ExecutionTrace::new(server_id.to_owned());
         new_deal_trace.status_update_history.push(
             job::StatusUpdate {
-                status: compute::JobStatus::DealStruck,
+                status: compute::JobStatus::Running,
                 timestamp: Utc::now().timestamp()
             }
         );
@@ -724,7 +758,7 @@ fn set_to_track_job_updates(
         });
     })
     .or_insert_with(|| {        
-        let mut exec_trace = HashMap::<String, job::ExecutionTrace>::new();
+        let mut exec_trace = HashMap::<String, ExecutionTrace>::new();
         exec_trace.insert(
             job::UNVERIFIED_PREFIX.to_owned(),
             new_unverified_exec_trace(&server_id58)
@@ -736,49 +770,24 @@ fn set_to_track_job_updates(
 
 // check if any compute jobs are there to gossip the need
 fn any_compute_jobs<'a>(
-    jobs: &'a HashMap::<String, Job>,
-    jobs_execution_traces: &'a HashMap::<String, HashMap::<String, job::ExecutionTrace>>,
-
-) -> Option<&'a String> {
+    recursions: &'a HashMap::<String, Recursion>,
+) -> Option<(&'a String, comms::compute::ComputeType)> {
     //@ beware starvation
     //@ the exact strategy TBD
-    // jobs.values()
-    // .find(|job| {
-    //     // brand new (short circuit), or failed, or running?
-    //     true == job.execution_trace.is_empty() ||
-    //     // should not have any verified execution traces 
-    //     false == job.has_verified_execution_traces()
-    // })
-    for (job_id, _) in jobs.iter() {
-        // no execution traces at all
-        if false == jobs_execution_traces.contains_key(job_id) {
-            return Some(job_id);
-        }
+    
+    // do we need to prove and lift?
+    if let Some(to_be_proved_rec) = recursions.values()
+    .find(|rec| {
+        rec.status == recursion::Status::ProveReady(None)
+    }) {
+        return Some(
+        (
+            &to_be_proved_rec.job_id,
+            comms::compute::ComputeType::ProveAndLift
+        ));
     }
+    
     None
-}
-
-// check if any jobs need status updates
-fn _to_be_updated_jobs<'a>(
-    jobs_execution_traces: &'a HashMap::<String, HashMap<String, job::ExecutionTrace>>
-) -> HashMap<String, HashSet<&'a str>> {
-    // map: (server_id, job_id list)
-    let mut to_be_updated = HashMap::<String, HashSet<&'a str>>::new();
-    for (job_id, exec_trace) in jobs_execution_traces.iter() {
-        // if false == jobs_execution_traces.contains_key(job_id) {
-        //     continue;
-        // }
-        for (_, specific_exec_trace) in exec_trace.iter() {
-            to_be_updated.entry(specific_exec_trace.server_id.clone())
-                .or_insert_with(|| {
-                    let mut update_set = HashSet::new();
-                    update_set.insert(job_id.as_str());
-
-                    update_set
-                });
-        }
-    }
-    to_be_updated
 }
 
 fn any_pending_jobs(
@@ -789,7 +798,7 @@ fn any_pending_jobs(
 
 fn _any_verification_jobs(
     jobs: &HashMap::<String, Job>,
-    jobs_execution_traces: &HashMap::<String, HashMap<String, job::ExecutionTrace>>
+    jobs_execution_traces: &HashMap::<String, HashMap<String, ExecutionTrace>>
 ) -> bool {
     // jobs.values().find(|job| {
     //     let min_required_verifications = 
@@ -827,7 +836,7 @@ fn _any_verification_jobs(
 
 fn any_harvest_ready_jobs(
     jobs: &HashMap::<String, Job>,
-    jobs_execution_traces: &HashMap::<String, HashMap<String, job::ExecutionTrace>>
+    jobs_execution_traces: &HashMap::<String, HashMap<String, ExecutionTrace>>
 ) -> bool {
     for (_, job) in jobs.iter() {
         if false == jobs_execution_traces.contains_key(&job.id) {
@@ -988,7 +997,7 @@ async fn evaluate_compute_offer(
 // probe verify offer and respond needful
 fn evaluate_verify_offer(
     jobs: &HashMap::<String, Job>,
-    jobs_execution_traces: &HashMap<String, HashMap<String, job::ExecutionTrace>>,
+    jobs_execution_traces: &HashMap<String, HashMap<String, ExecutionTrace>>,
     server_peer_id: PeerId
 ) -> Option<compute::VerificationDetails> {
     //@ fifo atm, should change once strategies go live
@@ -1026,38 +1035,42 @@ fn evaluate_verify_offer(
 // process bulk status updates
 fn update_jobs(
     jobs: &HashMap::<String, Job>,
-    jobs_execution_traces: &mut HashMap::<String, HashMap::<String, job::ExecutionTrace>>,
+    jobs_execution_traces: &mut HashMap::<String, HashMap::<String, ExecutionTrace>>,
     server_peer_id: PeerId,
     updates: &Vec<compute::JobUpdate>,
     to_be_locally_verified: &mut Vec<(String, String)>,
 ) {
     // process updates for jobs
     for new_update in updates {
-        // process a new update for job
-        if false == jobs.contains_key(&new_update.id) {
-            println!("Status update for an unknown job: `{}`",
-                new_update.id);
+        let tokens: Vec<&str> = new_update.id.split("-").collect();
+        if tokens.len() != 2 {
+            eprintln!("[warn] update_id `{:?}` is invalid.", new_update.id);
             continue;
         }
-        let job = jobs.get(&new_update.id).unwrap();
+        let job_id = tokens[0];
+        let seg_id = tokens[1];
+        // process a new update for job
+        // if false == jobs.contains_key(&job_id) {
+        //     println!("[warn] Status update for an unknown job `{}`, ignored.",
+        //         new_update.id);
+        //     continue;
+        // }         
+        let job = jobs.get(&job_id).unwrap();
 
         let server_id = server_peer_id.to_string();
-        println!("Status update for job `{}`, from `{}`: `{:#?}`",
+        println!("[info] Status update for job `{}` from `{}`: `{:#?}`",
             new_update.id, server_id, new_update);
 
         if false == jobs_execution_traces.contains_key(&new_update.id) {
-            println!("Execution trace not found for status update: `{:#?}`",
+            println!("[warn] Execution trace not found for status update: `{:#?}`",
                 new_update);
             continue;
         }
-        let exec_trace = jobs_execution_traces.get_mut(&job.id).unwrap();
+        let exec_trace = jobs_execution_traces.get_mut(&new_update.id).unwrap();
         let unverified_prefix_key = job::UNVERIFIED_PREFIX.to_string();
 
         let timestamp = Utc::now().timestamp();
-        match &new_update.status {  
-            compute::JobStatus::DealStruck => {
-                // TBD: post deal sync
-            },
+        match &new_update.status {
 
             compute::JobStatus::Running => {
                 exec_trace.entry(unverified_prefix_key)                
@@ -1070,7 +1083,7 @@ fn update_jobs(
                         );
                     })
                     .or_insert_with(|| {
-                        let mut specific_exec_trace = job::ExecutionTrace::new(server_id);
+                        let mut specific_exec_trace = ExecutionTrace::new(server_id);
                         specific_exec_trace.status_update_history.push(
                             job::StatusUpdate {
                                 status: compute::JobStatus::Running,
@@ -1092,7 +1105,7 @@ fn update_jobs(
                         );
                     })
                     .or_insert_with(|| {
-                        let mut specific_exec_trace = job::ExecutionTrace::new(server_id);
+                        let mut specific_exec_trace = ExecutionTrace::new(server_id);
                         specific_exec_trace.status_update_history.push(
                             job::StatusUpdate {
                                 status: compute::JobStatus::ExecutionFailed(_fd12_cid.clone()),
@@ -1120,7 +1133,7 @@ fn update_jobs(
                         );                        
                     })
                     .or_insert_with(|| {
-                        let mut specific_exec_trace = job::ExecutionTrace::new(server_id);
+                        let mut specific_exec_trace = ExecutionTrace::new(server_id);
                         specific_exec_trace.status_update_history.push(
                             job::StatusUpdate {
                                 status: compute::JobStatus::ExecutionSucceeded(receipt_cid.clone()),

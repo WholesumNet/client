@@ -26,19 +26,24 @@ development stages of a job:
  4. harvest ready
 */
 
-#[derive(Debug)]
-pub enum LifeCycle {
-    // r0 segment blob, arg is file path of the segment on disk
-    Local(String), 
+#[derive(Debug, PartialEq, Clone)]
+pub enum Status {
+    Unknown, 
 
-    // r0 segment blob(on dstorage), arg is the cid of the segment
-    Unproved(String),
+    // r0 segment blob on disk, args:
+    //   - file path of the segment on disk
+    Local(Option<String>), 
 
-    // proved and lifted blob(on dstorage), arg is the cid of the succinct receipt
-    ProvedAndLifted(String),
+    // r0 segment blob is uploaded to dstorage and awaits proving, args:
+    //   - cid of the segment on dstorage
+    ProveReady(Option<String>),
+
+    // proved and lifted blob, args:
+    //   - cid of the succinct receipt on dstorage
+    ProvedAndLifted(Option<String>),
 
     // joined blob(on dstorage), args:
-    //     round number, left sr(cid), right sr(cid), and the resulting sr(cid)
+    //   - round number, left sr(cid), right sr(cid), and the resulting sr(cid)
     Joined(u8, String, String, String),
 
     // snark blob(on dstorage), arg is r0 receipt's cid
@@ -49,11 +54,17 @@ pub enum LifeCycle {
 pub struct Segment {
     // the id of the segment, ie for file"0000.seg", id is "0000"
     pub id: String,
-    pub life_cycle: LifeCycle,    
+
+    // per segment status
+    pub status: Status,    
 }
 
 pub struct Recursion {
     pub job_id: String,
-    // segment file stem is the key
+    
+    // segment's file name, without its extension, is used as key
     pub segments: HashMap<String, Segment>,
+    
+    // recursion-wide status. reuse the Status enum, though not all enum values are used here.
+    pub status: Status,
 }
