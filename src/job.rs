@@ -21,9 +21,7 @@ pub struct ComputeConfig {
 #[derive(Debug, Deserialize)]
 pub struct VerificationConfig {
     // image_id as in risc0, it's a hash digest
-    pub image_id: String,            
-    // min number of independent successful verifications to regard an executoin trace as verified
-    pub min_required: Option<u8>,    
+    pub image_id: String,
 }
 
 #[derive(Debug, Deserialize)]

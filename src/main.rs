@@ -52,7 +52,11 @@ mod job;
 use job::Job;
 
 mod exec_trace;
-use exec_trace::ExecutionTrace;
+use exec_trace::{    
+    ExecutionTrace,
+    VerificationResult,
+    Harvest
+};
 
 mod recursion;
 use recursion::{
@@ -168,7 +172,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Recursion {
                 job_id: job.id.clone(),
                 segments: segments,
-                status: recursion::Status::Unknown,
+                stage: recursion::Stage::UploadingSegments,
             }
         );
         jobs.insert(job.id.clone(), job);
@@ -279,7 +283,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .get_closest_peers(random_peer_id);
             },
 
-            // post need `compute/verify/harvest`, and status updates
+            // post need `compute/harvest`, and status updates
             () = timer_post_jobs.select_next_some() => { 
                 // got any compute jobs?
                 if let Some((job_id, compute_type)) = any_compute_jobs(&recursions) {        
@@ -350,36 +354,36 @@ async fn main() -> Result<(), Box<dyn Error>> {
             eval_res = offer_evaluation_futures.select_next_some() => {
                 let (job_id, server_peer_id): (String, PeerId) = match eval_res { 
                     Err(failed) => {
-                        eprintln!("Evaluation error: {:#?}", failed);
+                        eprintln!("[warn] Evaluation error: {:#?}", failed);
                         // offer timeouts in server side and evaluation must be requested again
-                        continue;                        
+                        continue;
                     },
 
                     Ok(opt) => {
                         if let None = opt {
-                            println!("Evaluation not passed.");
+                            println!("[warn] Evaluation not passed.");
                             continue;
                         }
                         opt.unwrap()
                     },
                 };  
                 println!(
-                    "we have a deal! server `{}` has successfully passed all evaluation checks.",
+                    "[info] We have a deal! server `{}` has successfully passed all evaluation checks.",
                     server_peer_id.to_string()
                 );
                 if false == jobs.contains_key(&job_id) {
-                    eprintln!("[warn] no such job `{job_id}`, ignored.");
+                    eprintln!("[warn] No such job `{job_id}`, ignored.");
                 }
                 let job = jobs.get(&job_id).unwrap();
                 if false == recursions.contains_key(&job_id) {
-                    eprintln!("[warn] no such recursion `{job_id}`, ignored.");
+                    eprintln!("[warn] No such recursion `{job_id}`, ignored.");
                 }
                 let rec = recursions.get(&job_id).unwrap();
-                match rec.status {
+                match rec.stage {
                     // pick one segment and send it for prove+lift
-                    recursion::Status::ProveReady(_) => {
-                        if let Some(segment) = rec.segments.values().find(|any_seg| {
-                            match any_seg.status {
+                    recursion::Stage::Proving => {
+                        if let Some(segment) = rec.segments.values().find(|some_seg| {
+                            match some_seg.status {
                                 recursion::Status::ProveReady(Some(_)) => true,
                                 _ => false                                
                             }
@@ -388,17 +392,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                               -i /home/prince/residue/in.seg \
                                               -o /home/prince/residue/out.sr \
                                               1 > /home/prince/residue/stdout \
-                                              2 > /home/prince/residue/stderr");
+                                              2 > /home/prince/residue/stderr");                            
                             let cid = match &segment.status {
                                 recursion::Status::ProveReady(Some(cid)) => cid,
-                                _ => &String::from(""),
+                                _ => &String::from(""), //@ careful here as no cid is sent for prover
                             };
+
                             let prove_job_id = format!("{}-{}", job_id, segment.id);
-                            set_to_track_job_updates(
-                                &prove_job_id, 
-                                server_peer_id,
-                                &mut jobs_execution_traces
-                            );
+                            // set_to_track_job_updates(
+                            //     &prove_job_id, 
+                            //     server_peer_id,
+                            //     &mut jobs_execution_traces
+                            // );
                             let _req_id = swarm.behaviour_mut()
                             .req_resp
                             .send_request(
@@ -427,7 +432,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             // local verification has been finished
             verification_res = local_verification_futures.select_next_some() => {
-                let (job_id, receipt_cid, is_verified): (String, String, bool) = match verification_res {
+                let (exec_trace_id, receipt_cid, is_verified): (String, String, bool) = match verification_res {
                     Err(failed) => {
                         eprintln!("Verification error: {:#?}", failed);
                         continue;                        
@@ -435,22 +440,61 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                     Ok(res) => res
                 };
-                println!("Verification result for `{job_id}-{receipt_cid}` is ready: `{}`.",
-                    if true == is_verified {"verified"} else {"not verified"}
-                );
-                if false == jobs.contains_key(&job_id) {
-                    println!("[warn] No such job `{job_id}`, ignored.");
+                
+                if false == jobs_execution_traces.contains_key(&exec_trace_id) {
+                    println!("[warn] No such job `{exec_trace_id}`, ignored.");
                     continue;
                 }
-                let job = jobs.get(&job_id).unwrap();
-                let exec_trace = jobs_execution_traces.get_mut(&job.id).unwrap();
+                let exec_trace = jobs_execution_traces.get_mut(&exec_trace_id).unwrap();
                 if false == exec_trace.contains_key(&receipt_cid) {
                     eprintln!("[warn] No such execution trace `{receipt_cid}`, ignored.");
                     continue;
                 }
                 let specific_exec_trace = exec_trace.get_mut(&receipt_cid).unwrap();
-                specific_exec_trace.local_verification = 
-                    if true == is_verified {job::VerificationResult::Verified} else {job::VerificationResult::Unverified};
+                let rec = recursions.get_mut(&exec_trace_id).unwrap();
+                let segment_id = match specific_exec_trace.compute_type {
+                    compute::ComputeType::ProveAndLift |
+                    compute::ComputeType::ToSnark => {
+                        // job-id: "job_id-seg_id"
+                        let tokens: Vec<&str> = exec_trace_id.split("-").collect();
+                        if tokens.len() != 2 {
+                            eprintln!("[warn] Execution trace id `{:?}` is invalid for the `prove and lift`/`to snark` compute type.",
+                                exec_trace_id);
+                            continue;
+                        }
+                        String::from(tokens[1])
+                    },
+                    compute::ComputeType::Join => {
+                        // job-id: "job_id-left_seg_id-right_seg_id"
+                        let tokens: Vec<&str> = exec_trace_id.split("-").collect();
+                        if tokens.len() != 3 {
+                            eprintln!("[warn] Execution trace id `{:?}` is invalid for the `join` compute type.",
+                                exec_trace_id);
+                            continue;
+                        }
+                        format!("{}-{}", tokens[1], tokens[2])
+                    }, 
+                };
+                let segment = rec.segments.get_mut(&segment_id).unwrap();
+                println!("[info] Verification result for `{exec_trace_id}-{receipt_cid}`: `{}`",
+                    if true == is_verified {"verified!"} else {"unverified"});
+                if false == is_verified {
+                    specific_exec_trace.local_verification = VerificationResult::Unverified;
+                    continue;
+                }
+                segment.status = recursion::Status::ProvedAndLifted(Some(receipt_cid.clone()));
+                specific_exec_trace.local_verification = VerificationResult::Verified;
+                // if all segments are verified, prepare for join
+                if false == rec.segments.values().all(|some_seg| {
+                    if let recursion::Status::ProvedAndLifted(Some(_)) = some_seg.status {
+                        true
+                    } else {
+                        false 
+                    }
+                }) {
+                    continue;
+                }
+                rec.stage = recursion::Stage::Join(0);
             },
 
             // segments upload is finished
@@ -476,8 +520,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 if false == rec.segments.is_empty() &&
                    true == rec.segments.values().all(|s| s.status != recursion::Status::ProveReady(None)) {
                    // recursion is ready for prove and lift 
-                   println!("[info] all segments of job `{job_id}` are uploaded to dstorage and they are ready for prove and lift stage.");
-                   rec.status = recursion::Status::ProveReady(None);
+                   println!("[info] all segments of job `{job_id}` are uploaded to dstorage and they are ready for the prove and lift stage.");
+                   rec.stage = recursion::Stage::Proving;
                 } 
             },
 
@@ -649,29 +693,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             );                            
                         },      
 
-                        notice::Request::VerificationOffer => {
-                            println!("received `verify offer` from server: `{}`", 
-                                server_peer_id);
-                            //@ evaluate verify offer
-                            if let Some(verification_details) = evaluate_verify_offer(
-                                &jobs,
-                                &jobs_execution_traces,
-                                server_peer_id
-                            ) {
-                                let _ = swarm
-                                    .behaviour_mut().req_resp
-                                    .send_response(
-                                        channel,
-                                        notice::Response::VerificationJob(verification_details.clone()),
-                                    );
-                                println!("Verification job has been sent to the verifier!");
-                            } else {
-                                println!("Got no verification jobs to respond to the offer.");
-                            }
-                        },
-
                         notice::Request::UpdateForJobs(updates) => {
-                            let mut to_be_locally_verified: Vec<(String, String)> = Vec::new();
+                            let mut to_be_locally_verified: Vec<(String, String, String)> = vec![];
                             update_jobs(                   
                                 &jobs,
                                 &mut jobs_execution_traces,
@@ -679,18 +702,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 &updates,
                                 &mut to_be_locally_verified
                             );
-                            for (job_id, receipt_cid) in to_be_locally_verified {
+                            for (job_id, exec_trace_id, receipt_cid) in to_be_locally_verified {
                                 local_verification_futures.push(
                                     locally_verify_receipt(
                                         &docker_con,
                                         &ds_client,
-                                        job_id.clone(),
+                                        exec_trace_id.clone(),
                                         &jobs.get(&job_id).unwrap().schema.verification.image_id,
                                         receipt_cid,
                                     )
                                 );                                   
                             }
-                                                    
                         },
 
                         _ => {},
@@ -730,61 +752,60 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 // begin to track job updates
-fn set_to_track_job_updates(
-    job_id: &str,
-    server_peer_id: PeerId,
-    jobs_execution_traces: &mut HashMap<String, HashMap<String, ExecutionTrace>>
+fn _set_to_track_job_updates(
+    _job_id: &str,
+    _server_peer_id: PeerId,
+    _jobs_execution_traces: &mut HashMap<String, HashMap<String, ExecutionTrace>>
 ) {
-    let new_unverified_exec_trace = |server_id: &str| -> ExecutionTrace {
-        let mut new_deal_trace = ExecutionTrace::new(server_id.to_owned());
-        new_deal_trace.status_update_history.push(
-            job::StatusUpdate {
-                status: compute::JobStatus::Running,
-                timestamp: Utc::now().timestamp()
-            }
-        );
-        new_deal_trace
-    };
+    // let new_unverified_exec_trace = |server_id: &str| -> ExecutionTrace {
+    //     let mut new_deal_trace = ExecutionTrace::new(server_id.to_owned());
+    //     new_deal_trace.status_update_history.push(
+    //         job::StatusUpdate {
+    //             status: compute::JobStatus::Running,
+    //             timestamp: Utc::now().timestamp()
+    //         }
+    //     );
+    //     new_deal_trace
+    // };
 
-    let server_id58 = server_peer_id.to_base58();
-    jobs_execution_traces.entry(job_id.to_owned())
-    .and_modify(|exec_trace| {
-        exec_trace.entry(job::UNVERIFIED_PREFIX.to_owned())
-        .and_modify(|_| {
-            println!("[warning]: (unverified) execution trace is not empty.");
-        })
-        .or_insert_with(|| {
-            new_unverified_exec_trace(&server_id58)         
-        });
-    })
-    .or_insert_with(|| {        
-        let mut exec_trace = HashMap::<String, ExecutionTrace>::new();
-        exec_trace.insert(
-            job::UNVERIFIED_PREFIX.to_owned(),
-            new_unverified_exec_trace(&server_id58)
-        );
+    // let server_id58 = server_peer_id.to_base58();
+    // jobs_execution_traces.entry(job_id.to_owned())
+    // .and_modify(|exec_trace| {
+    //     exec_trace.entry(job::UNVERIFIED_PREFIX.to_owned())
+    //     .and_modify(|_| {
+    //         println!("[warning]: (unverified) execution trace is not empty.");
+    //     })
+    //     .or_insert_with(|| {
+    //         new_unverified_exec_trace(&server_id58)         
+    //     });
+    // })
+    // .or_insert_with(|| {        
+    //     let mut exec_trace = HashMap::<String, ExecutionTrace>::new();
+    //     exec_trace.insert(
+    //         job::UNVERIFIED_PREFIX.to_owned(),
+    //         new_unverified_exec_trace(&server_id58)
+    //     );
 
-        exec_trace
-    });
+    //     exec_trace
+    // });
 }
 
 // check if any compute jobs are there to gossip the need
 fn any_compute_jobs<'a>(
     recursions: &'a HashMap::<String, Recursion>,
 ) -> Option<(&'a String, comms::compute::ComputeType)> {
-    //@ beware starvation
-    //@ the exact strategy TBD
-    
+    //@ beware starvation    
     // do we need to prove and lift?
     if let Some(to_be_proved_rec) = recursions.values()
     .find(|rec| {
-        rec.status == recursion::Status::ProveReady(None)
+        rec.stage == recursion::Stage::Proving
     }) {
         return Some(
-        (
-            &to_be_proved_rec.job_id,
-            comms::compute::ComputeType::ProveAndLift
-        ));
+            (
+                &to_be_proved_rec.job_id,
+                comms::compute::ComputeType::ProveAndLift
+            )
+        );
     }
     
     None
@@ -796,67 +817,29 @@ fn any_pending_jobs(
     false == jobs.is_empty()
 }
 
-fn _any_verification_jobs(
-    jobs: &HashMap::<String, Job>,
-    jobs_execution_traces: &HashMap::<String, HashMap<String, ExecutionTrace>>
-) -> bool {
-    // jobs.values().find(|job| {
-    //     let min_required_verifications = 
-    //         job.schema.verification.min_required.unwrap_or_else(|| u8::MAX);
-    //     // job requires to be verified
-    //     true == job.schema.verification.min_required.is_some() &&
-    //     // should have at least one execution succeeded
-    //     false == job.execution_trace.is_empty() &&
-    //     // should have at least one unverified execution trace
-    //     true == job.execution_trace.values()
-    //     .find(|exec_trace| 
-    //         false == exec_trace.is_verified(min_required_verifications)
-    //     ).is_some()
-    // }).is_some()  
-
-    for (_, job) in jobs.iter() {
-        if false == jobs_execution_traces.contains_key(&job.id) {
-            continue;
-        }
-        let min_required_verifications = 
-            job.schema.verification.min_required.unwrap_or_else(|| u8::MAX);
-        let exec_trace = jobs_execution_traces.get(&job.id).unwrap();
-        if (true == job.schema.verification.min_required.is_some()) &&
-           (false == exec_trace.is_empty()) &&
-           (true == exec_trace.values()
-                .find(|specific_exec_trace| 
-                    false == specific_exec_trace.is_verified(min_required_verifications)
-                ).is_some()
-            ) {
-            return true;
-        }
-    }
-    false
-}
-
 fn any_harvest_ready_jobs(
-    jobs: &HashMap::<String, Job>,
-    jobs_execution_traces: &HashMap::<String, HashMap<String, ExecutionTrace>>
+    _jobs: &HashMap::<String, Job>,
+    _jobs_execution_traces: &HashMap::<String, HashMap<String, ExecutionTrace>>
 ) -> bool {
-    for (_, job) in jobs.iter() {
-        if false == jobs_execution_traces.contains_key(&job.id) {
-            continue;
-        }
-        // let min_required_verifications = 
-        //         job.schema.verification.min_required.unwrap_or_else(|| u8::MAX);
-        let exec_trace = jobs_execution_traces.get(&job.id).unwrap();
-        if true == exec_trace.values().find(|specific_exec_trace|
-            // true == specific_exec_trace.is_verified(min_required_verifications)
-            job::VerificationResult::Verified == specific_exec_trace.local_verification
-        ).is_some() {
-            return true;
-        }
-    }
+    // for (_, job) in jobs.iter() {
+    //     if false == jobs_execution_traces.contains_key(&job.id) {
+    //         continue;
+    //     }
+    //     // let min_required_verifications = 
+    //     //         job.schema.verification.min_required.unwrap_or_else(|| u8::MAX);
+    //     let exec_trace = jobs_execution_traces.get(&job.id).unwrap();
+    //     if true == exec_trace.values().find(|specific_exec_trace|
+    //         // true == specific_exec_trace.is_verified(min_required_verifications)
+    //         job::VerificationResult::Verified == specific_exec_trace.local_verification
+    //     ).is_some() {
+    //         return true;
+    //     }
+    // }
     false
 }
 
 // download benchmark from dstorage and put it into the docker volume
-async fn download_benchmark(
+async fn _download_benchmark(
     ds_client: &reqwest::Client,
     server_benchmark: &compute::ServerBenchmark,
 ) -> Result<String, Box<dyn Error>> {
@@ -882,10 +865,10 @@ async fn download_benchmark(
 //  - score/duration checks
 
 async fn evaluate_compute_offer(
-    docker_con: &Docker,
-    ds_client: &reqwest::Client,
+    _docker_con: &Docker,
+    _ds_client: &reqwest::Client,
     job: &Job,
-    compute_offer: compute::Offer,
+    _compute_offer: compute::Offer,
     server_peer_id: PeerId,
 ) -> Result<Option<(String, PeerId)>, Box<dyn Error>> {
     //@ test for sybils, ... 
@@ -994,284 +977,125 @@ async fn evaluate_compute_offer(
     // )
 }
 
-// probe verify offer and respond needful
-fn evaluate_verify_offer(
-    jobs: &HashMap::<String, Job>,
-    jobs_execution_traces: &HashMap<String, HashMap<String, ExecutionTrace>>,
-    server_peer_id: PeerId
-) -> Option<compute::VerificationDetails> {
-    //@ fifo atm, should change once strategies go live
-    let verifier_id58 = server_peer_id.to_base58();
-    for job in jobs.values() {
-        let exec_trace = jobs_execution_traces.get(&job.id).unwrap();
-        // should have at least one execution succeeded or
-        // if verification is needed at all
-        if true == exec_trace.is_empty() ||
-           false == job.schema.verification.min_required.is_some() {
-            continue;
-        }
-        let min_required_verifications = job.schema.verification.min_required.unwrap();
-        for (receipt_cid, specific_exec_trace) in exec_trace.iter() {
-            // server != verifier,
-            // the execution trace should be unverified, 
-            // and receipt_cid must be present
-            if specific_exec_trace.server_id == verifier_id58 ||
-               specific_exec_trace.is_verified(min_required_verifications) ||
-               true == receipt_cid.starts_with(job::UNVERIFIED_PREFIX) {
-                continue;
-            }
-
-            return Some(compute::VerificationDetails {
-                job_id: job.id.clone(),
-                risc0_image_id: job.schema.verification.image_id.clone(),
-                receipt_cid: receipt_cid.clone(),
-                pod_name: format!("receipt_{}", job.id),
-            })
-        }
-    }
-    None    
-}
-
 // process bulk status updates
 fn update_jobs(
     jobs: &HashMap::<String, Job>,
     jobs_execution_traces: &mut HashMap::<String, HashMap::<String, ExecutionTrace>>,
     server_peer_id: PeerId,
     updates: &Vec<compute::JobUpdate>,
-    to_be_locally_verified: &mut Vec<(String, String)>,
+    to_be_locally_verified: &mut Vec<(String, String, String)>,
 ) {
     // process updates for jobs
     for new_update in updates {
-        let tokens: Vec<&str> = new_update.id.split("-").collect();
-        if tokens.len() != 2 {
-            eprintln!("[warn] update_id `{:?}` is invalid.", new_update.id);
+        let (job_id, seg_id) = match new_update.compute_type {
+            compute::ComputeType::ProveAndLift |
+            compute::ComputeType::ToSnark => {
+                // job-id: "job_id-seg_id"
+                let tokens: Vec<&str> = new_update.id.split("-").collect();
+                if tokens.len() != 2 {
+                    eprintln!("[warn] update_id `{:?}` is invalid for the `prove and lift`/`to snark` compute type.",
+                        new_update.id);
+                    continue;
+                }
+                (String::from(tokens[0]), String::from(tokens[1]))
+            },
+
+            compute::ComputeType::Join => {
+                // job-id: "job_id-left_seg_id-right_seg_id"
+                let tokens: Vec<&str> = new_update.id.split("-").collect();
+                if tokens.len() != 3 {
+                    eprintln!("[warn] update_id `{:?}` is invalid for the `join` compute type.",
+                        new_update.id);
+                    continue;
+                }
+                (String::from(tokens[0]), format!("{}-{}", tokens[1], tokens[2]))
+            },            
+        };
+        let exec_trace_id = format!("{}-{}", job_id, seg_id);
+        
+        if false == jobs.contains_key(&job_id) {
+            println!("[warn] Status update for an unknown job `{job_id}`, ignored.");
             continue;
-        }
-        let job_id = tokens[0];
-        let seg_id = tokens[1];
-        // process a new update for job
-        // if false == jobs.contains_key(&job_id) {
-        //     println!("[warn] Status update for an unknown job `{}`, ignored.",
-        //         new_update.id);
-        //     continue;
-        // }         
-        let job = jobs.get(&job_id).unwrap();
+        }         
+        // let job = jobs.get(&job_id).unwrap();
 
         let server_id = server_peer_id.to_string();
         println!("[info] Status update for job `{}` from `{}`: `{:#?}`",
-            new_update.id, server_id, new_update);
+            job_id, server_id, new_update);
 
-        if false == jobs_execution_traces.contains_key(&new_update.id) {
+        if false == jobs_execution_traces.contains_key(&job_id) {
             println!("[warn] Execution trace not found for status update: `{:#?}`",
                 new_update);
             continue;
         }
-        let exec_trace = jobs_execution_traces.get_mut(&new_update.id).unwrap();
-        let unverified_prefix_key = job::UNVERIFIED_PREFIX.to_string();
-
-        let timestamp = Utc::now().timestamp();
+        let exec_traces = jobs_execution_traces.get_mut(&job_id).unwrap();
+        // let timestamp = Utc::now().timestamp();
         match &new_update.status {
-
             compute::JobStatus::Running => {
-                exec_trace.entry(unverified_prefix_key)                
-                    .and_modify(|specific_exec_trace| {
-                        specific_exec_trace.status_update_history.push(
-                            job::StatusUpdate {
-                                status: compute::JobStatus::Running,
-                                timestamp: timestamp,
-                            }
-                        );
-                    })
-                    .or_insert_with(|| {
-                        let mut specific_exec_trace = ExecutionTrace::new(server_id);
-                        specific_exec_trace.status_update_history.push(
-                            job::StatusUpdate {
-                                status: compute::JobStatus::Running,
-                                timestamp: timestamp,
-                            }
-                        );
-                        specific_exec_trace
-                    });
+                println!("[info] Job `{exec_trace_id}` is running.");
             },
 
-            compute::JobStatus::ExecutionFailed(_fd12_cid) => { 
-                exec_trace.entry(unverified_prefix_key)                
-                    .and_modify(|specific_exec_trace| {
-                        specific_exec_trace.status_update_history.push(
-                            job::StatusUpdate {
-                                status: compute::JobStatus::ExecutionFailed(_fd12_cid.clone()),
-                                timestamp: timestamp,
-                            }
-                        );
-                    })
-                    .or_insert_with(|| {
-                        let mut specific_exec_trace = ExecutionTrace::new(server_id);
-                        specific_exec_trace.status_update_history.push(
-                            job::StatusUpdate {
-                                status: compute::JobStatus::ExecutionFailed(_fd12_cid.clone()),
-                                timestamp: timestamp,
-                            }
-                        );
-                        specific_exec_trace
-                    });
+            compute::JobStatus::ExecutionFailed(fd12_cid) => { 
+                // let's not keep track of failed jobs
+                println!("[info] Execution failed for `{exec_trace_id}`, details: `{fd12_cid:?}`");
             },
 
             compute::JobStatus::ExecutionSucceeded(receipt_cid) => {
-                if true == receipt_cid.is_none() {
-                    println!("[warning]: execution succeeded but `receipt_cid` is missing, so trace is unverified.");
+                if true == exec_traces.contains_key(receipt_cid) {
+                    continue;
                 }
-                //@ unverified-per-server
-                let proper_receipt_cid = receipt_cid.clone().unwrap_or_else(|| unverified_prefix_key);
-                exec_trace.entry(proper_receipt_cid.clone())
-                    .and_modify(|specific_exec_trace| {
-                        println!("[info] Execution trace is already being tracked.");
-                        specific_exec_trace.status_update_history.push(
-                            job::StatusUpdate {
-                                status: compute::JobStatus::ExecutionSucceeded(receipt_cid.clone()),
-                                timestamp: timestamp,
-                            }
-                        );                        
-                    })
-                    .or_insert_with(|| {
-                        let mut specific_exec_trace = ExecutionTrace::new(server_id);
-                        specific_exec_trace.status_update_history.push(
-                            job::StatusUpdate {
-                                status: compute::JobStatus::ExecutionSucceeded(receipt_cid.clone()),
-                                timestamp: timestamp,
-                            }
-                        );
-                        specific_exec_trace.receipt_cid = Some(proper_receipt_cid);                        
-                        specific_exec_trace
-                    });  
+                println!("[info] Execution succeded for `{exec_trace_id}`, receipt_cid: `{receipt_cid}`");
+                exec_traces.insert(receipt_cid.clone(), 
+                    ExecutionTrace {
+                        server_id: server_id,
+                        receipt_cid: receipt_cid.clone(),
+                        compute_type: new_update.compute_type.clone(),
+                        local_verification: VerificationResult::Pending,
+                        harvests: HashSet::<Harvest>::new(),
+                    }
+                ); 
                 //@ how about pushing "job_id-receipt_cid" to a stream and verify them in a less ugly way
-                if true == receipt_cid.is_some() {
-                    let unw_receipt_cid = receipt_cid.clone().unwrap();
-                    let specific_exec_trace = exec_trace.get(&unw_receipt_cid).unwrap();
-                    if job::VerificationResult::Pending == specific_exec_trace.local_verification {
-                        to_be_locally_verified.push(
-                            (job.id.clone(), unw_receipt_cid)
-                        );
-                    }                    
-                }              
-            },
-
-            compute::JobStatus::VerificationSucceeded(receipt_cid) => {
-                if false == job.schema.verification.min_required.is_some() {
-                    println!("[info]: job is `not even required` to be verified.");
-                }
-                if false == exec_trace.contains_key(receipt_cid) {
-                    //@wtd, its probably a successful execution that we have missed
-                    println!("[warning]: no prior execution trace for this receipt `{}`", receipt_cid);
-                    continue;
-                }
-                let specific_exec_trace = exec_trace.get_mut(receipt_cid).unwrap();
-                specific_exec_trace.status_update_history.push(
-                    job::StatusUpdate {
-                        status: compute::JobStatus::VerificationSucceeded(receipt_cid.clone()),
-                        timestamp: timestamp,
-                    }
-                );
-                if let Some(old_decision) = specific_exec_trace.verifications.insert(server_id.clone(), true) {
-                    if false == old_decision {
-                        println!("[warning]: verification status flip, `failed` -> `succeeded`");
-                    } else {
-                        println!("[info]: verification status `succeeded` is already noted.");
-                    }
-                }                
-                
-                let num_approved = specific_exec_trace.num_verifications(true);
-                let num_rejected = specific_exec_trace.num_verifications(false);
-                let min_required_verifications = 
-                    job.schema.verification.min_required.unwrap_or_else(|| u8::MAX);
-                println!(
-                    "Verifications so far, succeded: `{}`, failed: `{}`, required: `{}`",
-                    num_approved, num_rejected, min_required_verifications
-                );
-                if num_approved >= min_required_verifications.into() &&
-                   num_approved >= 2 * num_rejected {
-                    println!("Congrats!, the job has received the minimum number of required \
-                        verifications and is now considered to be verified.");
-                } else {
-                    println!("Still unverified.");
-                }               
-            },
-
-            compute::JobStatus::VerificationFailed(receipt_cid) => { 
-                if false == job.schema.verification.min_required.is_some() {
-                    println!("[warning]: job is `not even required` to be verified.");
-                }
-                if false == exec_trace.contains_key(receipt_cid) {
-                    //@wtd
-                    println!("No prior execution trace for this receipt `{}`", receipt_cid);
-                    continue;
-                }
-                let specific_exec_trace = exec_trace.get_mut(receipt_cid).unwrap();         
-                specific_exec_trace.status_update_history.push(
-                    job::StatusUpdate {
-                        status: compute::JobStatus::VerificationFailed(receipt_cid.clone()),
-                        timestamp: timestamp,
-                    }
-                );
-                if let Some(old_decision) = specific_exec_trace.verifications.insert(server_id.clone(), false) {
-                    if true == old_decision {
-                        println!("[warning]: verification status flip, `succeeded` -> `failed`");
-                    } else {
-                        println!("[info]: verification status `failed` is already noted.");
-                    }
-                }
-                let min_required_verifications = 
-                    job.schema.verification.min_required.unwrap_or_else(|| u8::MAX);
-                let num_approved = specific_exec_trace.num_verifications(true);
-                let num_rejected = specific_exec_trace.num_verifications(false);
-                println!(
-                    "Verifications so far, succeded: `{}`, failed: `{}`, required: `{}`",
-                    num_approved, num_rejected, min_required_verifications
-                );
-                if num_approved >= min_required_verifications.into() &&
-                   num_approved >= 2 * num_rejected {
-                    println!("Congrats!, the job has received the minimum number of required /
-                        verifications and is now considered to be `verified`.");
-                } else {
-                    println!("Still unverified.");
-                }    
+                to_be_locally_verified.push(
+                    (job_id.clone(), exec_trace_id.clone(), receipt_cid.clone())
+                );                
             },
 
             compute::JobStatus::Harvested(harvest_details) => {
-                if false == harvest_details.fd12_cid.is_some() {
-                    println!("[warning]: missing `fd12_cid` from harvest, ignored.");
-                    continue;
-                }
-
-                let proper_receipt_cid = harvest_details.receipt_cid.clone().unwrap_or_else(|| unverified_prefix_key);                
-                if false == exec_trace.contains_key(&proper_receipt_cid) {
-                    println!("[warning]: no prior execution trace for this receipt.");
-                    continue;
-                }
-
-                let specific_exec_trace = exec_trace.get_mut(&proper_receipt_cid).unwrap();
-                specific_exec_trace.status_update_history.push(
-                    job::StatusUpdate {
-                        status: compute::JobStatus::Harvested(harvest_details.clone()),
-                        timestamp: timestamp,
-                    }
-                );
-                // ignore unverified harvests that need to be verified first, @ how about being opportunistic? 
-                // let min_required_verifications = 
-                //     job.schema.verification.min_required.unwrap_or_else(|| u8::MAX); 
-                // if job.schema.verification.min_required.is_some() && 
-                //    false == specific_exec_trace.is_verified(min_required_verifications) {
-                //     println!("[warning]: execution trace must first be verified.");
+                // if false == harvest_details.fd12_cid.is_some() {
+                //     println!("[warning]: missing `fd12_cid` from harvest, ignored.");
                 //     continue;
                 // }
-                let harvest = job::Harvest {
-                    fd12_cid: harvest_details.fd12_cid.clone().unwrap(),
-                };
 
-                if false == specific_exec_trace.harvests.insert(harvest) {
-                    println!("[info]: Execution trace is already harvested.");
-                }
+                // let proper_receipt_cid = harvest_details.receipt_cid.clone().unwrap_or_else(|| unverified_prefix_key);                
+                // if false == exec_trace.contains_key(&proper_receipt_cid) {
+                //     println!("[warning]: no prior execution trace for this receipt.");
+                //     continue;
+                // }
+
+                // let specific_exec_trace = exec_trace.get_mut(&proper_receipt_cid).unwrap();
+                // specific_exec_trace.status_update_history.push(
+                //     job::StatusUpdate {
+                //         status: compute::JobStatus::Harvested(harvest_details.clone()),
+                //         timestamp: timestamp,
+                //     }
+                // );
+                // // ignore unverified harvests that need to be verified first, @ how about being opportunistic? 
+                // // let min_required_verifications = 
+                // //     job.schema.verification.min_required.unwrap_or_else(|| u8::MAX); 
+                // // if job.schema.verification.min_required.is_some() && 
+                // //    false == specific_exec_trace.is_verified(min_required_verifications) {
+                // //     println!("[warning]: execution trace must first be verified.");
+                // //     continue;
+                // // }
+                // let harvest = job::Harvest {
+                //     fd12_cid: harvest_details.fd12_cid.clone().unwrap(),
+                // };
+
+                // if false == specific_exec_trace.harvests.insert(harvest) {
+                //     println!("[info]: Execution trace is already harvested.");
+                // }
                 
-                println!("Harvested the execution residues for `{proper_receipt_cid}`");
+                // println!("Harvested the execution residues for `{proper_receipt_cid}`");
             },
         };
     }
@@ -1301,7 +1125,7 @@ async fn download_receipt(
 async fn locally_verify_receipt(
     docker_con: &Docker,
     ds_client: &reqwest::Client,
-    job_id: String,
+    exec_trace_id: String,
     image_id: &str,
     receipt_cid: String
 ) -> Result<(String, String, bool), Box<dyn Error>> {
@@ -1310,13 +1134,13 @@ async fn locally_verify_receipt(
         &receipt_cid
     ).await?;
     // run the job
-    let verification_image = String::from("rezahsnz/warrant:1.0.1");
+    let verification_image = String::from("rezahsnz/r0-zoo:1.0.5");
     let local_receipt_path = String::from("/home/prince/residue/receipt");
     let command = vec![
         String::from("/bin/sh"),
         String::from("-c"),
         format!(
-            "/home/prince/warrant --image-id {} --receipt-file {}",
+            "/home/prince/veritas --image-id {} --receipt-file {}",
             image_id,
             local_receipt_path,
         )
@@ -1332,7 +1156,7 @@ async fn locally_verify_receipt(
             eprintln!("Failed to verify the receipt: `{:#?}`", failed);       
             return Ok(
                 (
-                    job_id,
+                    exec_trace_id,
                     receipt_cid,
                     false
                 )
@@ -1346,7 +1170,7 @@ async fn locally_verify_receipt(
                 );
                 return Ok(
                     (
-                        job_id,
+                        exec_trace_id,
                         receipt_cid,
                         false
                     )
@@ -1358,7 +1182,7 @@ async fn locally_verify_receipt(
     }
     Ok(
         (
-            job_id,
+            exec_trace_id,
             receipt_cid,
             true
         )

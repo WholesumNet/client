@@ -59,12 +59,26 @@ pub struct Segment {
     pub status: Status,    
 }
 
+#[derive(Debug, PartialEq)]
+pub enum Stage {
+    // waiting for the segments to be upload to dstorage
+    UploadingSegments,
+
+    // waiting for all segments to be proved and lifted
+    Proving,
+
+    // join, param is round number
+    Join(u8),
+
+    Snarked,
+}
+
+#[derive(Debug)]
 pub struct Recursion {
     pub job_id: String,
     
-    // segment's file name, without its extension, is used as key
+    // segment's file name(without its extension) is used as key
     pub segments: HashMap<String, Segment>,
     
-    // recursion-wide status. reuse the Status enum, though not all enum values are used here.
-    pub status: Status,
+    pub stage: Stage,
 }
