@@ -1,6 +1,6 @@
-use std::error::Error;
 use uuid::Uuid;
 use serde::Deserialize;
+use anyhow;
 
 #[derive(Debug, Deserialize)]
 pub struct CriteriaConfig {    
@@ -24,25 +24,19 @@ pub struct VerificationConfig {
     pub image_id: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct HarvestConfig {
-    // min number of verified traces to consider the whole job as verified and done
-    pub min_verified_traces: Option<u8>,    
-}
-
 // job template as read in(e.g. from disk)
 #[derive(Debug, Deserialize)]
 pub struct Schema {
     pub title: Option<String>,
-    pub timeout: Option<u32>, // in seconds
+    // in seconds
+    pub timeout: Option<u32>, 
     
-    pub criteria: CriteriaConfig, // criteria for matching
-    
+    // criteria for matching
+    pub criteria: CriteriaConfig, 
+
     pub compute: ComputeConfig,
     
     pub verification: VerificationConfig,
-    
-    pub harvest: HarvestConfig,
 }
 
 // maintains lifecycle for a job
@@ -66,10 +60,11 @@ impl Job {
 }
 
 // get base residue path of the host
-pub fn get_residue_path() -> Result<String, Box<dyn Error>> {
-    let home_dir = home::home_dir()
-        .ok_or_else(|| Box::<dyn Error>::from("Home dir is not available."))?
-        .into_os_string().into_string()
-        .or_else(|_| Err(Box::<dyn Error>::from("OS_String conversion failed.")))?;
+pub fn get_residue_path() -> anyhow::Result<String> {
+    let err_msg = "Home dir is not available";
+    let binding = home::home_dir()
+        .ok_or_else(|| anyhow::Error::msg(err_msg))?;
+    let home_dir = binding.to_str()
+        .ok_or_else(|| anyhow::Error::msg(err_msg))?;
     Ok(format!("{home_dir}/.wholesum/jobs"))
 }

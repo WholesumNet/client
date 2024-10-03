@@ -20,13 +20,12 @@ use std::collections::{
 };
 use std::{
     fs,
-    error::Error,
     time::Duration,
     path::PathBuf
 };
 use rand::Rng;
 use bincode;
-use chrono::{Utc};
+// use chrono::{Utc};
 
 use toml;
 use tracing_subscriber::EnvFilter;
@@ -60,9 +59,8 @@ use exec_trace::{
 
 mod recursion;
 use recursion::{
-    Recursion, Segment, Status
+    Recursion, Segment
 };
-
 
 // CLI
 #[derive(Parser, Debug)]
@@ -88,7 +86,7 @@ struct Cli {
 }
 
 #[async_std::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> anyhow::Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .try_init();
@@ -101,7 +99,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // dStorage keys
     let ds_key_file = cli.dstorage_key_file
-        .ok_or_else(|| "dStorage key file is missing.")?;
+        .ok_or_else(|| anyhow::Error::msg("dStorage key file is missing."))?;
     let lighthouse_config: lighthouse::Config = 
         toml::from_str(&fs::read_to_string(ds_key_file)?)?;
     let ds_key = lighthouse_config.apiKey;
@@ -135,7 +133,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             None, 
             toml::from_str(&fs::read_to_string(job_filename)?)?
         );
-        let mut segments = HashMap::<String, Segment>::new();        
+        let mut segments = Vec::<Segment>::new();        
         // read segments off disk
         let mut segment_files: Vec<PathBuf> = vec![];
         for entry in fs::read_dir(&job.schema.compute.segments_path)? {
@@ -148,8 +146,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("read {} segments in total.", segment_files.len());
         for seg_file in segment_files {
             let seg_name = seg_file.file_stem()
-                    .ok_or_else(|| "<0>")?
-                    .to_str().ok_or_else(|| "<0>")?;
+                    .ok_or_else(|| anyhow::Error::msg("<0>"))?
+                    .to_str().ok_or_else(|| anyhow::Error::msg("<0>"))?;
             let upload_id = format!("{}-{}", job.id, seg_name);
             let seg_path = String::from(seg_file.to_string_lossy());
             segments_upload_futures.push(
@@ -160,7 +158,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     upload_id.clone(),
                 )
             );
-            segments.insert(seg_name.to_string(), 
+            segments.push(
                 Segment {
                     id: seg_name.to_string(),
                     status: recursion::Status::Local(Some(seg_path))
@@ -374,7 +372,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 if false == jobs.contains_key(&job_id) {
                     eprintln!("[warn] No such job `{job_id}`, ignored.");
                 }
-                let job = jobs.get(&job_id).unwrap();
+                // let job = jobs.get(&job_id).unwrap();
                 if false == recursions.contains_key(&job_id) {
                     eprintln!("[warn] No such recursion `{job_id}`, ignored.");
                 }
@@ -382,7 +380,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 match rec.stage {
                     // pick one segment and send it for prove+lift
                     recursion::Stage::Proving => {
-                        if let Some(segment) = rec.segments.values().find(|some_seg| {
+                        if let Some(segment) = rec.segments.iter().find(|some_seg| {
                             match some_seg.status {
                                 recursion::Status::ProveReady(Some(_)) => true,
                                 _ => false                                
@@ -413,6 +411,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     //@ job details
                                     docker_image: String::from("rezahsnz/r0-zoo:1.0.5"),
                                     command: cmd,
+                                    compute_type: compute::ComputeType::ProveAndLift,
                                     input: vec![cid.clone()],
                                 })
                             );
@@ -475,17 +474,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         format!("{}-{}", tokens[1], tokens[2])
                     }, 
                 };
-                let segment = rec.segments.get_mut(&segment_id).unwrap();
+                let segment = rec.segments.iter_mut().find(|x| x.id == segment_id);
+                if false == segment.is_some() {
+                    eprintln!("[warn] Segment `{segment_id}` is missing.");
+                    continue;
+                }
+                // segment = segment.unwrap();
                 println!("[info] Verification result for `{exec_trace_id}-{receipt_cid}`: `{}`",
                     if true == is_verified {"verified!"} else {"unverified"});
                 if false == is_verified {
                     specific_exec_trace.local_verification = VerificationResult::Unverified;
                     continue;
                 }
-                segment.status = recursion::Status::ProvedAndLifted(Some(receipt_cid.clone()));
+                segment.unwrap().status = recursion::Status::ProvedAndLifted(Some(receipt_cid.clone()));
                 specific_exec_trace.local_verification = VerificationResult::Verified;
                 // if all segments are verified, prepare for join
-                if false == rec.segments.values().all(|some_seg| {
+                if false == rec.segments.iter().all(|some_seg| {
                     if let recursion::Status::ProvedAndLifted(Some(_)) = some_seg.status {
                         true
                     } else {
@@ -509,18 +513,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     continue;
                 }
                 let rec = recursions.get_mut(job_id).unwrap();
-                if false == rec.segments.contains_key(seg_id) {
-                    eprintln!("[warn] No such segment `{}` for job {}", seg_id, job_id);
+                let segment = rec.segments.iter_mut().find(|x| x.id == seg_id);
+                if false == segment.is_some() {
+                    eprintln!("[warn] Segment `{seg_id}` is missing.");
                     continue;
                 }
-                let segment = rec.segments.get_mut(seg_id).unwrap();
-                segment.status = recursion::Status::ProveReady(Some(upload_res.cid));
-                println!("segment `{seg_id}`'s status changed to `{:?}`", segment.status);
+                segment.unwrap().status = recursion::Status::ProveReady(Some(upload_res.cid));
+                println!("segment `{seg_id}`'s status changed to ProveReady");
                 // check if recursion can go to prove&lift stage
                 if false == rec.segments.is_empty() &&
-                   true == rec.segments.values().all(|s| s.status != recursion::Status::ProveReady(None)) {
+                   true == rec.segments.iter().all(|s| s.status != recursion::Status::ProveReady(None)) {
                    // recursion is ready for prove and lift 
-                   println!("[info] all segments of job `{job_id}` are uploaded to dstorage and they are ready for the prove and lift stage.");
+                   println!("[info] all segments of job `{job_id}` are uploaded to dstorage and it is ready for the `prove and lift` stage.");
                    rec.stage = recursion::Stage::Proving;
                 } 
             },
@@ -669,7 +673,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     peer: server_peer_id,
                     message: request_response::Message::Request {
                         request,
-                        channel,
+                        // channel,
                         ..//request_id,
                     }
                 })) => {                
@@ -842,7 +846,7 @@ fn any_harvest_ready_jobs(
 async fn _download_benchmark(
     ds_client: &reqwest::Client,
     server_benchmark: &compute::ServerBenchmark,
-) -> Result<String, Box<dyn Error>> {
+) -> anyhow::Result<String> {
     // save the benchmark to the docker volume
     let residue_path = format!(
         "{}/benchmark/{}/residue",
@@ -870,7 +874,7 @@ async fn evaluate_compute_offer(
     job: &Job,
     _compute_offer: compute::Offer,
     server_peer_id: PeerId,
-) -> Result<Option<(String, PeerId)>, Box<dyn Error>> {
+) -> anyhow::Result<Option<(String, PeerId)>> {
     //@ test for sybils, ... 
     println!("let's evaluate `{:?}`'s offer.", server_peer_id.to_string());
     Ok(
@@ -1105,7 +1109,7 @@ fn update_jobs(
 async fn download_receipt(
     ds_client: &reqwest::Client,
     cid: &str
-) -> Result<String, Box<dyn Error>> {
+) -> anyhow::Result<String> {
     // save the benchmark to the docker volume
     let residue_path = format!(
         "{}/verification/{}/residue",
@@ -1128,7 +1132,7 @@ async fn locally_verify_receipt(
     exec_trace_id: String,
     image_id: &str,
     receipt_cid: String
-) -> Result<(String, String, bool), Box<dyn Error>> {
+) -> anyhow::Result<(String, String, bool)> {
     let residue_path = download_receipt(
         ds_client,
         &receipt_cid

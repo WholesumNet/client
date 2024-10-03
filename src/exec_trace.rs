@@ -1,9 +1,6 @@
-use std::error::Error;
-use uuid::Uuid;
 use std::collections::{
-    HashMap, HashSet
+    HashSet
 };
-use serde::Deserialize;
 
 use comms::compute;
 
@@ -12,7 +9,6 @@ pub struct Harvest {
     pub fd12_cid: String,
     //@ more fields TBD
 }
-
 
 // verification result
 #[derive(Debug, Eq, PartialEq)]

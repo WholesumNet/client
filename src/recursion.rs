@@ -1,6 +1,4 @@
-use std::collections::{
-    HashMap
-};
+use std::vec::Vec;
 
 /*
 verifiable computing is resource hungry, with at least 10x more compute steps
@@ -78,7 +76,7 @@ pub struct Recursion {
     pub job_id: String,
     
     // segment's file name(without its extension) is used as key
-    pub segments: HashMap<String, Segment>,
+    pub segments: Vec<Segment>,
     
     pub stage: Stage,
 }
