@@ -1,6 +1,8 @@
-use uuid::Uuid;
+
 use serde::Deserialize;
 use anyhow;
+
+use crate::recursion;
 
 #[derive(Debug, Deserialize)]
 pub struct CriteriaConfig {    
@@ -45,18 +47,8 @@ pub struct Job {
     pub id: String,
    
     pub schema: Schema,
-}
 
-impl Job {
-    pub fn new (custom_id: Option<String>, schema: Schema) -> Job {
-        Job {                  
-            id: custom_id.unwrap_or_else(|| {
-                //@ use safer id generation methods              
-                Uuid::new_v4().simple().to_string()[..4].to_string()
-            }),
-            schema: schema,
-        }
-    }
+    pub recursion: recursion::Recursion,
 }
 
 // get base residue path of the host

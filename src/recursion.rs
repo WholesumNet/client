@@ -25,7 +25,7 @@ development stages of a job:
 */
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum Status {
+pub enum SegmentStatus {
     // r0 segment blob on disk, args:
     //   - file path of the segment on disk
     Local(String), 
@@ -37,13 +37,6 @@ pub enum Status {
     // proved and lifted blob, args:
     //   - cid of the succinct receipt on dstorage
     ProvedAndLifted(String),
-
-    // joined blob, args:
-    //   - round number, cid of left sr, cid of right sr, and cid of resulting sr
-    Joined(u8, String, String, String),
-
-    // snark blob(on dstorage), arg is r0 receipt's cid
-    Snark(String),
 }
 
 #[derive(Debug)]
@@ -56,7 +49,7 @@ pub struct Segment {
     pub num_prove_deals: u32,
 
     // per segment status
-    pub status: Status,    
+    pub status: SegmentStatus,    
 }
 
 
@@ -72,7 +65,8 @@ pub enum Stage {
     // joining segments
     Join,
 
-    // Stark,
+    // join completed
+    Stark,
 
     // extracting the final snark
     Snark,
@@ -89,34 +83,32 @@ pub struct ProveAndLift {
 #[derive(Debug)]
 pub struct Join {
     // most recent join round, vec<cid>
-    pub joined_segments: Vec<Vec<String>>,
+    pub joined: Vec<Vec<String>>,
 
-    // join candidates for the next round
-    pub to_be_joined: Vec<Vec<(String, String)>>,
+    // join pairs for the current round
+    pub to_be_joined: Vec<(String, String)>,
 
     // when the join list is odd, the last one called lucky advances to the next round automatically
-    lucky_segments: Vec<String>,
+    lucky: Option<String>,    
 }
 
 impl Join {
     pub fn new() -> Join {
         Join {
-            joined_segments: vec![],
+            joined: vec![],
             to_be_joined: vec![],
-            lucky_segments: vec![],
+            lucky: None,
         }
     }
 
     pub fn cur_join_round(&self) -> usize {
-        self.joined_segments.len()        
+        self.joined.len()        
     }
 }
 
 
 #[derive(Debug)]
 pub struct Recursion {
-    pub job_id: String,
-    
     pub stage: Stage,
     
     // prove and lift data
@@ -124,44 +116,52 @@ pub struct Recursion {
 
     // join data
     pub join: Join,
+
+    // snark data
+    pub snark: Option<String>,
 }
 
 impl Recursion {
     pub fn new(
-        job_id: String,
         segments: Vec<Segment>,
     ) -> Recursion {
         Recursion {
-            job_id: job_id,
             stage: Stage::Upload,
             prove_and_lift: ProveAndLift {
                 segments: segments,
             },
             join: Join::new(),
+            snark: None,
         }
     }
 
     // prepare for the next join round(starting at 0)
     pub fn prepare_next_join_round(&mut self) {
         if self.join.cur_join_round() == 0 {
-            self.join.joined_segments.push(self.prove_and_lift.segments.iter().map(|seg| seg.id.clone()).collect());
+            self.join.joined.push(
+                self.prove_and_lift.segments.iter()
+                .map(|seg| seg.id.clone()).collect()
+            );
         }
-        let mut new_join_pairs = Vec::<(String, String)>::new();
-        let mut join_candidates: Vec<String> = self.join.joined_segments.last().unwrap().to_vec();
-        if false == self.join.lucky_segments.is_empty() {
-            join_candidates.extend_from_slice(self.join.lucky_segments.as_slice());
-            self.join.lucky_segments.clear();
+        let mut join_candidates: Vec<String> = self.join.joined.last().unwrap().to_vec();
+        if let Some(lucky) = &self.join.lucky {
+            join_candidates.push(lucky.to_string());
+            self.join.lucky = None;
         }
         for i in (0..join_candidates.len()).step_by(2) {
             if i == join_candidates.len() - 1 {
-                // lucky advances to the next round automatically
-                self.join.lucky_segments.push(join_candidates[i].clone());
+                // the lucky segment advances to the next round automatically
+                self.join.lucky = Some(join_candidates[i].clone());
                 break;
             }
-            new_join_pairs.push(
+            self.join.to_be_joined.push(
                 (join_candidates[i].clone(), join_candidates[i + 1].clone())
             );
         }
-        self.join.to_be_joined.push(new_join_pairs);        
+        // join is complete
+        if true == self.join.to_be_joined.is_empty() {
+            self.join.joined.push(vec![self.join.lucky.clone().unwrap()]);            
+            self.stage = Stage::Stark;
+        }
     }
 }
