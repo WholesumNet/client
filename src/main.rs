@@ -47,6 +47,10 @@ use comms::{
 
 use uuid::Uuid;
 
+use risc0_zkvm::{
+    SuccinctReceipt, ReceiptClaim
+};
+
 use dstorage::lighthouse;
 use benchmark;
 
@@ -93,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
         if false == cli.dev {"global"} else {"local(development)"}
     );
 
-    // dStorage keys
+    // dStorage initialization
     let ds_key_file = cli.dstorage_key_file
         .ok_or_else(|| anyhow::Error::msg("dStorage key file is missing."))?;
     let lighthouse_config: lighthouse::Config = 
@@ -113,11 +117,11 @@ async fn main() -> anyhow::Result<()> {
     // future for offer evaluation
     let mut offer_evaluation_futures = FuturesUnordered::new();
 
-    // future for local verification of receipts
-    // let mut local_verification_futures = FuturesUnordered::new();
+    // future for local verification of succinct receipts
+    let mut succinct_receipt_verification_futures = FuturesUnordered::new();
 
     // futures for segments' uploads
-    let mut segments_upload_futures = FuturesUnordered::new();   
+    // let mut segments_upload_futures = FuturesUnordered::new();   
     
     // local libp2p key 
     let local_key = {
@@ -136,40 +140,50 @@ async fn main() -> anyhow::Result<()> {
     println!("my peer id: `{:?}`", PeerId::from_public_key(&local_key.public()));  
 
     // job
-    let job_schema: job::Schema = toml::from_str(&fs::read_to_string(cli.job.unwrap())?)?;
+    let job_schema: job::Schema = toml::from_str(
+        &fs::read_to_string(cli.job.unwrap())?
+    )?;
     let job_rec = {
         let mut segments = Vec::<Segment>::new();        
         // read segments off disk
-        let mut segment_files: Vec<PathBuf> = vec![];
-        for entry in fs::read_dir(&job_schema.compute.segments_path)? {
-            let path = entry?.path();
-            if path.extension().and_then(|s| s.to_str().map(|s| s.to_ascii_lowercase())) == Some(String::from("seg")) {
-                segment_files.push(path);
-            }
-        }
-        segment_files.sort();
-        println!("read {} segments in total.", segment_files.len());
-        for seg_file in segment_files {
-            let seg_name = seg_file.file_stem()
-                    .ok_or_else(|| anyhow::Error::msg("<0>"))?
-                    .to_str().ok_or_else(|| anyhow::Error::msg("<0>"))?;
-            let seg_path = String::from(seg_file.to_string_lossy());
-            segments_upload_futures.push(
-                lighthouse::upload_file(
-                    &ds_client,
-                    &ds_key,
-                    seg_path.clone(),
-                    seg_name.to_string(),
+        // let mut segment_files: Vec<PathBuf> = vec![];
+        // for entry in fs::read_dir(&job_schema.compute.segments_path)? {
+        //     let path = entry?.path();
+        //     if path.extension().and_then(|s| s.to_str().map(|s| s.to_ascii_lowercase())) == Some(String::from("seg")) {
+        //         segment_files.push(path);
+        //     }
+        // }
+        // segment_files.sort();
+        // println!("read {} segments in total.", segment_files.len());
+        // for seg_file in segment_files {
+        //     let seg_name = seg_file.file_stem()
+        //             .ok_or_else(|| anyhow::Error::msg("<0>"))?
+        //             .to_str().ok_or_else(|| anyhow::Error::msg("<0>"))?;
+        //     let seg_path = String::from(seg_file.to_string_lossy());
+        //     segments_upload_futures.push(
+        //         lighthouse::upload_file(
+        //             &ds_client,
+        //             &ds_key,
+        //             seg_path.clone(),
+        //             seg_name.to_string(),
+        //         )
+        //     );
+        //     segments.push(
+        //         Segment {
+        //             id: seg_name.to_string(),
+        //             num_prove_deals: 0,
+        //             status: SegmentStatus::Local(seg_path)
+        //         }
+        //     );
+        // }
+        for index in 0..job_schema.compute.num_segments {
+            segments.push(
+                Segment::new(
+                    &format!("segment-{index}"),
+                    &job_schema.compute.segments_cid
                 )
             );
-            segments.push(
-                Segment {
-                    id: seg_name.to_string(),
-                    num_prove_deals: 0,
-                    status: SegmentStatus::Local(seg_path)
-                }
-            );
-        }               
+        }
         Recursion::new(        
             segments
         )
@@ -273,43 +287,42 @@ async fn main() -> anyhow::Result<()> {
             // post need `compute/harvest`, and status updates
             () = timer_post_jobs.select_next_some() => { 
                 // got any compute jobs?
-                let compute_type = match job.recursion.stage {
+                let needed_compute_type = match job.recursion.stage {
                     Stage::Prove => compute::ComputeType::ProveAndLift,
                     Stage::Join => compute::ComputeType::Join,
-                    Stage::Snark => compute::ComputeType::Snark,
-                    _ => continue,
+                    Stage::Stark => compute::ComputeType::Snark,
+                    Stage::Snark => continue,                    
                 };
                 let need_compute = compute::NeedCompute {
                     criteria: compute::Criteria {
-                        compute_type: compute_type,
+                        compute_type: needed_compute_type,
                         memory_capacity: job.schema.criteria.memory_capacity,
                         benchmark_expiry_secs: job.schema.criteria.benchmark_expiry_secs,
                         benchmark_duration_msecs: job.schema.criteria.benchmark_duration_msecs,
                     }
                 };
+                let notice_need_compute = notice::Notice::Compute(need_compute);                
                 let gossip = &mut swarm.behaviour_mut().gossipsub;
                 // println!("known peers: {:#?}", gossip.all_peers().collect::<Vec<_>>());
                 if let Err(e) = gossip
                 .publish(
                     topic.clone(),
-                    bincode::serialize(&need_compute)?
+                    bincode::serialize(&notice_need_compute)?
                 ) {            
                     eprintln!("(gossip) `need compute` publish error: {e:?}");
                 }
                 
                 // need status updates?
-                if job.recursion.stage != Stage::Upload {                
-                    let nonce: u8 = rng.gen();
-                    let status_update = notice::Notice::StatusUpdate(nonce);
-                    let gossip = &mut swarm.behaviour_mut().gossipsub;
-                    let topic = gossip.topics().nth(0).unwrap(); 
-                    if let Err(e) = gossip
-                    .publish(
-                        topic.clone(),
-                        bincode::serialize(&status_update)?
-                    ) {                
-                        eprintln!("`status update` publish error: {e:?}");
-                    }
+                let nonce: u8 = rng.gen();
+                let status_update = notice::Notice::StatusUpdate(nonce);
+                let gossip = &mut swarm.behaviour_mut().gossipsub;
+                let topic = gossip.topics().nth(0).unwrap(); 
+                if let Err(e) = gossip
+                .publish(
+                    topic.clone(),
+                    bincode::serialize(&status_update)?
+                ) {                
+                    eprintln!("`status update` publish error: {e:?}");
                 }
                 // need verification
                 // if true == _any_verification_jobs(&jobs, &jobs_execution_traces) {
@@ -369,26 +382,23 @@ async fn main() -> anyhow::Result<()> {
                         }
                         // segment with the lowest prove deals has the highest priority
                         let chosen_segment = job.recursion.prove_and_lift
-                        .segments.iter_mut()
-                        .min_by(|x, y| x.num_prove_deals.cmp(&y.num_prove_deals))
-                        .unwrap();                        
-                        chosen_segment.num_prove_deals += 1;
-                        let cmd = format!("/home/prince/reprove prove \
-                                          -i /home/prince/residue/in.seg \
-                                          -o /home/prince/residue/out.sr \
-                                          1 > /home/prince/residue/stdout \
-                                          2 > /home/prince/residue/stderr");                            
-                        let cid = if let SegmentStatus::ProveReady(cid) = &chosen_segment.status { cid } else { continue };
-                        let prove_job_id = format!("{}-{}", job.id, chosen_segment.id);
+                            .segments.iter_mut()
+                            .min_by(|x, y| x.num_prove_deals.cmp(&y.num_prove_deals))
+                            .unwrap();                        
+                        let cid = if let SegmentStatus::ProveReady(cid) = &chosen_segment.status { 
+                            cid 
+                        } else { 
+                            eprintln!("[warn] `{}`'s cid is missing.", chosen_segment.id);
+                            continue
+                        };
+                        chosen_segment.num_prove_deals += 1;                           
+                        let prove_job_id = format!("{}@{}", job.id, chosen_segment.id);
                         let _req_id = swarm.behaviour_mut()
                         .req_resp
                         .send_request(
                             &server_peer_id,
                             notice::Request::ComputeJob(compute::ComputeDetails {
                                 job_id: prove_job_id,
-                                //@ job details
-                                docker_image: String::from("rezahsnz/r0-zoo:1.0.5"),
-                                command: cmd,
                                 compute_type: compute::ComputeType::ProveAndLift,
                                 input: vec![cid.clone()],
                             })
@@ -399,28 +409,33 @@ async fn main() -> anyhow::Result<()> {
                         if job.recursion.stage != Stage::Join {
                             continue;
                         }
-                        let (left_cid, right_cid) = {
-                            let join_pair = job.recursion.join.to_be_joined.first().unwrap();
-                            (join_pair.0.clone(), join_pair.1.clone())
-                        };                        
-                        
-                        let cmd = format!("/home/prince/reprove join \
-                                          -l /home/prince/residue/left.sr \
-                                          -r /home/prince/residue/right.sr \
-                                          -o /home/prince/residue/out.sr \
-                                          1 > /home/prince/residue/stdout \
-                                          2 > /home/prince/residue/stderr");                            
-                        //@ cid as job_id is tricky                        
-                        let join_job_id = format!("{}-{}-{}", job.id, left_cid, right_cid);
+                        let left_cid = {
+                            if job.recursion.join.index > 1 {
+                                &job.recursion.join.agg
+                            } else {
+                                if let SegmentStatus::ProvedAndLifted(receipt_cid) = &job.recursion.prove_and_lift.segments[0].status {
+                                    receipt_cid
+                                } else {
+                                    eprintln!("[warn] left cid is missing.");
+                                    continue
+                                }
+                            }
+                        };
+                        let right_cid = if let SegmentStatus::ProvedAndLifted(receipt_cid) = 
+                            &job.recursion
+                            .prove_and_lift
+                            .segments[job.recursion.join.index].status {
+                                 receipt_cid
+                            } else {
+                                eprintln!("[warn] right cid is missing.");
+                                continue
+                            };
                         let _req_id = swarm.behaviour_mut()
                         .req_resp
                         .send_request(
                             &server_peer_id,
                             notice::Request::ComputeJob(compute::ComputeDetails {
-                                job_id: join_job_id,
-                                //@ job details
-                                docker_image: String::from("rezahsnz/r0-zoo:1.0.5"),
-                                command: cmd,
+                                job_id: format!("{}@{}", job.id, job.recursion.join.index),
                                 compute_type: compute::ComputeType::Join,
                                 input: vec![left_cid.to_string(), right_cid.to_string()],
                             })
@@ -431,130 +446,117 @@ async fn main() -> anyhow::Result<()> {
                         if job.recursion.stage != Stage::Stark {
                             continue;
                         }
-                        let cmd = format!("/home/prince/reprove snark \
-                                          -i /home/prince/residue/in.sr \
-                                          -o /home/prince/residue/out.snark \
-                                          1 > /home/prince/residue/stdout \
-                                          2 > /home/prince/residue/stderr");                            
-                        let cid = job.recursion.join.joined.last().unwrap().first().unwrap();
-                        let prove_job_id = format!("{}-stark", job.id);
-                        let _req_id = swarm.behaviour_mut()
-                        .req_resp
-                        .send_request(
-                            &server_peer_id,
-                            notice::Request::ComputeJob(compute::ComputeDetails {
-                                job_id: prove_job_id,
-                                //@ job details
-                                docker_image: String::from("rezahsnz/r0-zoo:1.0.5"),
-                                command: cmd,
-                                compute_type: compute::ComputeType::Snark,
-                                input: vec![cid.clone()],
-                            })
-                        );                     
+                        // let cmd = format!("/home/prince/reprove snark \
+                        //                   -i /home/prince/residue/in.sr \
+                        //                   -o /home/prince/residue/out.snark \
+                        //                   1 > /home/prince/residue/stdout \
+                        //                   2 > /home/prince/residue/stderr");                            
+                        // let cid = job.recursion.join.joined.last().unwrap().first().unwrap();
+                        // let prove_job_id = format!("{}-stark", job.id);
+                        // let _req_id = swarm.behaviour_mut()
+                        // .req_resp
+                        // .send_request(
+                        //     &server_peer_id,
+                        //     notice::Request::ComputeJob(compute::ComputeDetails {
+                        //         job_id: prove_job_id,
+                        //         //@ job details
+                        //         docker_image: String::from("rezahsnz/r0-zoo:1.0.5"),
+                        //         command: cmd,
+                        //         compute_type: compute::ComputeType::Snark,
+                        //         input: vec![cid.clone()],
+                        //     })
+                        // );                     
 
                     },
                 }                             
             },
 
             // segments upload is finished
-            ur = segments_upload_futures.select_next_some() => {
-                let upload_res = ur?;
-                let seg_id = upload_res.id;
+            // ur = segments_upload_futures.select_next_some() => {
+                // let upload_res = ur?;
+                // let seg_id = upload_res.id;
                 
-                if job.recursion.stage != recursion::Stage::Upload {
-                    continue;
-                }
-                let segment = job.recursion.prove_and_lift.segments.iter_mut()
-                .find(|x| x.id == seg_id);
-                if false == segment.is_some() {
-                    eprintln!("[warn] Uploaded segment `{seg_id}`'s data is missing.");
-                    continue;
-                }
-                segment.unwrap().status = SegmentStatus::ProveReady(upload_res.cid);
-                println!("segment `{seg_id}`'s status changed to ProveReady");
-                // check if recursion can go to prove&lift stage
-                if false == job.recursion.prove_and_lift.segments.is_empty() &&
-                   true == job.recursion.prove_and_lift.segments.iter().all(|s| 
-                       if let SegmentStatus::ProveReady(_) = s.status { true } else { false }
-                   ) {
-                   // recursion is ready for prove and lift 
-                   println!("[info] all segments of the job are uploaded to dstorage and it is ready for the `prove and lift` stage.");
-                   job.recursion.stage = recursion::Stage::Prove;
-                } 
-            },
-
-            // local verification has been finished
-            // verification_res = local_verification_futures.select_next_some() => {
-            //     let (exec_trace_id, receipt_cid, is_verified): (String, String, bool) = match verification_res {
-            //         Err(failed) => {
-            //             eprintln!("Verification error: {:#?}", failed);
-            //             continue;                        
-            //         },
-
-            //         Ok(res) => res
-            //     };
-                
-            //     if false == jobs_execution_traces.contains_key(&exec_trace_id) {
-            //         println!("[warn] No such job `{exec_trace_id}`, ignored.");
-            //         continue;
-            //     }
-            //     let exec_trace = jobs_execution_traces.get_mut(&exec_trace_id).unwrap();
-            //     if false == exec_trace.contains_key(&receipt_cid) {
-            //         eprintln!("[warn] No such execution trace `{receipt_cid}`, ignored.");
-            //         continue;
-            //     }
-            //     let specific_exec_trace = exec_trace.get_mut(&receipt_cid).unwrap();
-            //     let rec = recursions.get_mut(&exec_trace_id).unwrap();
-            //     let segment_id = match specific_exec_trace.compute_type {
-            //         compute::ComputeType::ProveAndLift |
-            //         compute::ComputeType::Snark => {
-            //             // job-id: "job_id-seg_id"
-            //             let tokens: Vec<&str> = exec_trace_id.split("-").collect();
-            //             if tokens.len() != 2 {
-            //                 eprintln!("[warn] Execution trace id `{:?}` is invalid for the `prove and lift`/`to snark` compute type.",
-            //                     exec_trace_id);
-            //                 continue;
-            //             }
-            //             String::from(tokens[1])
-            //         },
-            //         compute::ComputeType::Join => {
-            //             // job-id: "job_id-left_seg_id-right_seg_id"
-            //             let tokens: Vec<&str> = exec_trace_id.split("-").collect();
-            //             if tokens.len() != 3 {
-            //                 eprintln!("[warn] Execution trace id `{:?}` is invalid for the `join` compute type.",
-            //                     exec_trace_id);
-            //                 continue;
-            //             }
-            //             format!("{}-{}", tokens[1], tokens[2])
-            //         }, 
-            //     };
-            //     let segment = rec.prove_and_lift.segments.iter_mut().find(|x| x.id == segment_id);
-            //     if false == segment.is_some() {
-            //         eprintln!("[warn] Segment `{segment_id}` is missing.");
-            //         continue;
-            //     }
-            //     // segment = segment.unwrap();
-            //     println!("[info] Verification result for `{exec_trace_id}-{receipt_cid}`: `{}`",
-            //         if true == is_verified {"verified!"} else {"unverified"});
-            //     if false == is_verified {
-            //         specific_exec_trace.local_verification = VerificationResult::Unverified;
-            //         continue;
-            //     }
-            //     specific_exec_trace.local_verification = VerificationResult::Verified;
-            //     segment.unwrap().status = SegmentStatus::ProvedAndLifted(receipt_cid.clone());
-            //     // if all segments are verified, prepare for join
-            //     if true == rec.prove_and_lift.segments.iter().all(|some_seg| {
-            //         match some_seg.status {
-            //             SegmentStatus::ProvedAndLifted(_) => true,
-            //             _ => false,
-            //         }                        
-            //     }) {
-            //         // begin join
-            //         println!("[info] All segments are proved and lifted so the join stage begins.");
-            //         rec.stage = Stage::Join;
-            //         rec.prepare_next_join_round();                    
-            //     }
+                // if job.recursion.stage != recursion::Stage::Upload {
+                //     continue;
+                // }
+                // let segment = job.recursion.prove_and_lift.segments.iter_mut()
+                // .find(|x| x.id == seg_id);
+                // if false == segment.is_some() {
+                //     eprintln!("[warn] Uploaded segment `{seg_id}`'s data is missing.");
+                //     continue;
+                // }
+                // segment.unwrap().status = SegmentStatus::ProveReady(upload_res.cid);
+                // println!("segment `{seg_id}`'s status changed to ProveReady");
+                // // check if recursion can go to prove&lift stage
+                // if false == job.recursion.prove_and_lift.segments.is_empty() &&
+                //    true == job.recursion.prove_and_lift.segments.iter().all(|s| 
+                //        if let SegmentStatus::ProveReady(_) = s.status { true } else { false }
+                //    ) {
+                //    // recursion is ready for prove and lift 
+                //    println!("[info] all segments of the job are uploaded to dstorage and it is ready for the `prove and lift` stage.");
+                //    job.recursion.stage = recursion::Stage::Prove;
+                // } 
             // },
+
+            // succinct receipt's verification has been finished
+            verification_res = succinct_receipt_verification_futures.select_next_some() => {                
+                let (prover_id, receipt_cid, item_id): (String, String, String) = match verification_res {
+                    Err(failed) => {
+                        //@ which segment? 
+                        eprintln!("[warn] Proved receipt's verification has failed. error: `{:#?}`", failed);
+                        continue;                        
+                    },
+
+                    Ok(res) => res
+                };
+                match job.recursion.stage {
+                    Stage::Prove => {
+                        println!(
+                            "[info] Segment's proof is verified! \
+                            segment: `{}`, receipt_cid: `{}`, prover: `{}`",
+                            item_id, receipt_cid, prover_id
+                        );
+                        let segment = job.recursion.prove_and_lift.segments.iter_mut()
+                            .find(|x| x.id == item_id);
+                        if false == segment.is_some() {
+                            eprintln!("[warn] Segment `{item_id}` is missing.");
+                            continue;
+                        }                
+                        segment.unwrap().status = SegmentStatus::ProvedAndLifted(receipt_cid.clone());
+                        // if all segments are verified, prepare for join
+                        if true == job.recursion.prove_and_lift.segments.iter().all(|some_seg| {
+                            match some_seg.status {
+                                SegmentStatus::ProvedAndLifted(_) => true,
+                                _ => false,
+                            }                        
+                        }) {
+                            // begin join
+                            println!("[info] All segments are proved and lifted. so, the join stage begins.");
+                            job.recursion.stage = Stage::Join;                   
+                        }
+                    },
+
+                    Stage::Join => {
+                        println!(
+                            "[info] Join's proof is verified! \
+                            index: `{}`, receipt_cid: `{}`, prover: `{}`",
+                            item_id, receipt_cid, prover_id
+                        );
+                        if false == job.recursion.join.to_be_verified.contains_key(&prover_id) {
+                            eprintln!("[warn] Missing join data.");
+                        }
+                        job.recursion.join.index += 1;
+                        if job.recursion.join.index == job.recursion.prove_and_lift.segments.len() - 1 {
+                            // begin snark extraction
+                            println!("[info] Join is complete! stark receipt is here!");
+                            job.recursion.stage = Stage::Stark;
+                            //@ verify the receipt 
+                        } 
+                    },
+
+                    _ => {},
+                }
+            },
 
             event = swarm.select_next_some() => match event {
                 
@@ -719,25 +721,25 @@ async fn main() -> anyhow::Result<()> {
                             );                            
                         },      
 
-                        notice::Request::UpdateForJobs(updates) => {
-                            // let mut to_be_locally_verified: Vec<(String, String, String)> = vec![];
-                            update_jobs(                   
+                        notice::Request::UpdateForJobs(new_updates) => {
+                            let to_be_locally_verified = update_jobs(
                                 &mut job,
                                 server_peer_id,
-                                &updates,
-                                // &mut to_be_locally_verified
+                                new_updates
                             );
-                            // for (job_id, exec_trace_id, receipt_cid) in to_be_locally_verified {
-                            //     local_verification_futures.push(
-                            //         locally_verify_receipt(
-                            //             &docker_con,
-                            //             &ds_client,
-                            //             exec_trace_id.clone(),
-                            //             &jobs.get(&job_id).unwrap().schema.verification.image_id,
-                            //             receipt_cid,
-                            //         )
-                            //     );                                   
-                            // }
+                            for v in to_be_locally_verified {
+                                let (v_server_id, v_receipt_cid, v_item_id) = v;
+                                succinct_receipt_verification_futures.push(                                    
+                                    verify_succinct_receipt(
+                                        &ds_client,
+                                        &ds_key,
+                                        job.id.clone(),
+                                        v_server_id,
+                                        v_receipt_cid,
+                                        v_item_id
+                                    )
+                                );
+                            }                            
                         },
 
                         _ => {},
@@ -913,45 +915,33 @@ async fn evaluate_compute_offer(
 fn update_jobs(
     job: &mut Job,
     server_peer_id: PeerId,
-    updates: &Vec<compute::JobUpdate>,
-) {
-    // process updates for jobs
-    for new_update in updates {
-        let (job_id, seg_id) = match new_update.compute_type {
-            compute::ComputeType::ProveAndLift |
-            compute::ComputeType::Snark => {
-                // job-id: "job_id-seg_id"
-                let tokens: Vec<&str> = new_update.id.split("-").collect();
-                if tokens.len() != 2 {
-                    eprintln!("[warn] update_id `{:?}` is invalid for the `prove and lift`/`to snark` compute type.",
-                        new_update.id
-                    );
-                    continue;
-                }
-                (String::from(tokens[0]), String::from(tokens[1]))
-            },
-
-            compute::ComputeType::Join => {
-                // job-id: "job_id-left_seg_id-right_seg_id"
-                let tokens: Vec<&str> = new_update.id.split("-").collect();
-                if tokens.len() != 3 {
-                    eprintln!("[warn] update_id `{:?}` is invalid for the `join` compute type.",
-                        new_update.id
-                    );
-                    continue;
-                }
-                (String::from(tokens[0]), format!("{}-{}", tokens[1], tokens[2]))
-            },            
-        };    
-        if job.id != job_id {
-            println!("[warn] Status update for an unknown job `{job_id}`, ignored.");
-            continue;
-        }         
-
+    new_updates: Vec<compute::JobUpdate>,
+) -> Vec<(String, String, String)> {
+    let mut to_be_locally_verified = vec![];
+    for new_update in new_updates {
         let server_id = server_peer_id.to_string();
         println!("[info] Status update for job from `{}`: `{:#?}`",
             server_id, new_update
         );
+
+        let (job_id, seg_id) = {            
+            // job-id: "job_id@seg_id"
+            let tokens: Vec<&str> = new_update.id.split("@").collect();
+            if tokens.len() != 2 {
+                eprintln!("[warn] update_id `{:?}` is invalid for the `prove and lift`/`to snark` compute type.",
+                    new_update.id
+                );
+                continue;
+            }               
+            (
+                String::from(tokens[0]),
+                String::from(tokens[1])
+            )
+        };
+        if job.id != job_id {
+            println!("[warn] Status update for an unknown job `{job_id}`, ignored.");
+            continue;
+        }
 
         // let timestamp = Utc::now().timestamp();
         match &new_update.status {
@@ -972,23 +962,26 @@ fn update_jobs(
                             continue;
                         }
                         if let Some(proved_segment) = job.recursion.prove_and_lift.segments.iter_mut()
-                        .find(|some_seg| 
-                            some_seg.id == seg_id && 
-                            if let SegmentStatus::ProveReady(_) = some_seg.status { true } else { false }
-                        ) {                            
-                            proved_segment.status = SegmentStatus::ProvedAndLifted(receipt_cid.to_string());
+                        .find(|some_seg| some_seg.id == seg_id) {                            
+                            if let SegmentStatus::ProveReady(_) = proved_segment.status { 
+                                println!("Segment `{seg_id}` is proved and lifted, waiting to be verified.");
+                                proved_segment.to_be_verified.insert(
+                                    server_id.clone(),
+                                    receipt_cid.to_string(),
+                                );
+                                to_be_locally_verified.push(
+                                    (
+                                        server_id.clone(),
+                                        receipt_cid.to_string(),
+                                        proved_segment.id.clone()
+                                    )
+                                );
+                            } else {
+                                println!("Segment `{seg_id}` is already proved, lifted, and verified.");                                                                
+                            }
+                            
                         } else {
                             println!("[warn] Prove for an unknown segment `{seg_id}`");
-                            continue;
-                        }
-                        if true == job.recursion.prove_and_lift.segments.iter()
-                        .all(|some_seg|
-                            if let SegmentStatus::ProvedAndLifted(_) = some_seg.status
-                            { true } else { false }
-                        ) {
-                            job.recursion.stage = Stage::Join;
-                            job.recursion.prepare_next_join_round();
-                            //@ local verification is needed
                         }
                     },
 
@@ -996,22 +989,19 @@ fn update_jobs(
                         if job.recursion.stage != Stage::Join { 
                             continue;
                         }
-                        let (left_id, right_id) = {
-                            let mut tokens = seg_id.split("-");
-                            (tokens.nth(0).unwrap(), tokens.nth(1).unwrap())
-                        };
-                        let joined_pair_index = job.recursion.join
-                        .to_be_joined.last().iter()
-                        .position(|&p| p.0 == left_id && p.1 == right_id);
-                        if true == joined_pair_index.is_none() {
-                            continue;
-                        }
-                        let _removed_pair = job.recursion.join.to_be_joined.remove(joined_pair_index.unwrap());
-                        job.recursion.join.joined.last_mut().unwrap()
-                        .push(receipt_cid.to_string());
-                        if true == job.recursion.join.to_be_joined.is_empty() {
-                            job.recursion.prepare_next_join_round();
-                        }
+                        //@ wtd with this data?
+                        job.recursion.join.to_be_verified.insert(
+                            server_id.clone(),
+                            receipt_cid.to_string()
+                        );
+                        to_be_locally_verified.push(
+                            (
+                                server_id.clone(),
+                                receipt_cid.to_string(),
+                                job.recursion.join.index.to_string()
+                            )
+                        );
+                        
                     },
 
                     compute::ComputeType::Snark => {
@@ -1019,7 +1009,7 @@ fn update_jobs(
                             continue;
                         }
                         job.recursion.snark = Some(receipt_cid.to_string());
-                        job.recursion.stage = Stage::Done;
+                        job.recursion.stage = Stage::Snark;
                         println!("[info] a SNARK proof has been extracted for the job `{job_id}`: {receipt_cid} ");
                     },
 
@@ -1066,92 +1056,36 @@ fn update_jobs(
             },
         };
     }
+    to_be_locally_verified    
 }
 
-// download blob from dStorage
-async fn download_receipt(
+// verify proved and lifted receipt 
+async fn verify_succinct_receipt(
     ds_client: &reqwest::Client,
-    cid: &str
-) -> anyhow::Result<String> {
+    ds_key: &str,
+    job_id: String,
+    prover_id: String,
+    receipt_cid: String,
+    item_id: String
+) -> anyhow::Result<(String, String, String)> {
     // save the benchmark to the docker volume
     let residue_path = format!(
-        "{}/verification/{}/residue",
+        "{}/verification/{}",
         job::get_residue_path()?,
-        cid,
+        job_id
     );
     fs::create_dir_all(residue_path.clone())?;
+    let blob_file_path = format!("{residue_path}/receipt");
     lighthouse::download_file(
         ds_client,
-        cid,
-        format!("{residue_path}/receipt")
+        &receipt_cid,
+        blob_file_path.clone()
     ).await?;
-    Ok(residue_path)
-}
-
-// verify any receipt locally
-async fn locally_verify_receipt(
-    docker_con: &Docker,
-    ds_client: &reqwest::Client,
-    exec_trace_id: String,
-    image_id: &str,
-    receipt_cid: String
-) -> anyhow::Result<(String, String, bool)> {
-    let residue_path = download_receipt(
-        ds_client,
-        &receipt_cid
-    ).await?;
-    // run the job
-    let verification_image = String::from("rezahsnz/r0-zoo:1.0.5");
-    let local_receipt_path = String::from("/home/prince/residue/receipt");
-    let command = vec![
-        String::from("/bin/sh"),
-        String::from("-c"),
-        format!(
-            "/home/prince/veritas --image-id {} --receipt-file {}",
-            image_id,
-            local_receipt_path,
-        )
-    ];                          
-    match run_docker_job(
-        &docker_con,
-        receipt_cid.clone(),
-        verification_image,
-        command,
-        residue_path.clone()
-    ).await {
-        Err(failed) => {
-            eprintln!("Failed to verify the receipt: `{:#?}`", failed);       
-            return Ok(
-                (
-                    exec_trace_id,
-                    receipt_cid,
-                    false
-                )
-            );
-        },
-
-        Ok(job_exec_res) => {
-            if job_exec_res.exit_status_code != 0 { 
-                println!("Verification failed with error: `{}`",
-                    job_exec_res.error_message.unwrap_or_else(|| String::from("")),
-                );
-                return Ok(
-                    (
-                        exec_trace_id,
-                        receipt_cid,
-                        false
-                    )
-                );
-            } else {
-                println!("Verification suceeded.");
-            }            
-        }
+    let succinct_receipt: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(
+        &fs::read(blob_file_path)?
+    )?;
+    match succinct_receipt.verify_integrity() {
+        Err(e) => Err(e.into()),
+        Ok(_) => Ok((prover_id, receipt_cid, item_id))
     }
-    Ok(
-        (
-            exec_trace_id,
-            receipt_cid,
-            true
-        )
-    )
 }

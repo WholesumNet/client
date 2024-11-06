@@ -1,4 +1,7 @@
-use std::vec::Vec;
+use std::{
+    vec::Vec,
+    collections::HashMap
+};
 
 /*
 verifiable computing is resource hungry, with at least 10x more compute steps
@@ -11,30 +14,44 @@ development stages of a job:
     a. prove and lift
         - N iterations -> N SuccinctReceipts
     b. join
-        - Log2(N) rounds of join -> the final SuccinctReceipt
+        - Log2(N) + 1 steps of join to obtain the final SuccinctReceipt aka stark receip
           e.g. starting with N = 5 and segments labeled 1-5:
-          r1: (1, 2) -> 12, (3, 4) -> 34, 5 -> 5
-          r2: (12, 34) -> 1234, 5 -> 5
-          r3: (1234, 5) -> final sr
+          1: (1, 2) -> 12
+          2: (12, 3) -> 123
+          3: (123, 4) -> 1234
+          4: (1234, 5) -> the final stark receipt
     c. snark extraction
         - apply identity_p254 and then compress -> ~300 bytes snark(Receipt)
  3. verification
-    a. succeeded(k independent sources) => harvest ready(verified)
+    a. succeeded => harvest ready(verified)
     b. failed => harvest ready(unverified)
  4. harvest ready
 */
 
+// stages of the recursion process
+#[derive(Debug, PartialEq)]
+pub enum Stage {
+    // proving(and lifting) segments
+    Prove,
+
+    // joining segments
+    Join,
+
+    // join completed
+    Stark,
+
+    // extracting the final snark
+    Snark,
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum SegmentStatus {
-    // r0 segment blob on disk, args:
-    //   - file path of the segment on disk
-    Local(String), 
-
-    // r0 segment blob is uploaded to dstorage and awaits proving, args:
+    // r0 segment blob is uploaded to dstorage and awaits proving
+    // or is proved but awaits verification, args:
     //   - cid of the segment on dstorage
     ProveReady(String),
 
-    // proved and lifted blob, args:
+    // proved(and lifted), and verified blob, args:
     //   - cid of the succinct receipt on dstorage
     ProvedAndLifted(String),
 }
@@ -49,30 +66,26 @@ pub struct Segment {
     pub num_prove_deals: u32,
 
     // per segment status
-    pub status: SegmentStatus,    
+    pub status: SegmentStatus,
+
+    // proved(and lifted) segments awaiting verification: <prover_peer_id, receipt_cid>
+    pub to_be_verified: HashMap<String, String>,
 }
 
-
-// stages of the recursion
-#[derive(Debug, PartialEq)]
-pub enum Stage {
-    // uploading segments to dstorage
-    Upload,
-
-    // proving(and lifting) segments
-    Prove,
-
-    // joining segments
-    Join,
-
-    // join completed
-    Stark,
-
-    // extracting the final snark
-    Snark,
-
-    // recursion has been processed completely
-    Done,
+impl Segment {
+    pub fn new(
+        id: &str,
+        base_segment_cid: &str,
+    ) -> Self {
+        Segment {
+            id: id.to_string(),
+            num_prove_deals: 0,
+            status: SegmentStatus::ProveReady(
+                format!("{base_segment_cid}/{id}")
+            ),
+            to_be_verified: HashMap::<String, String>::new(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -81,28 +94,24 @@ pub struct ProveAndLift {
 }
 
 #[derive(Debug)]
-pub struct Join {
-    // most recent join round, vec<cid>
-    pub joined: Vec<Vec<String>>,
+pub struct Join {    
+    // which segment to join next? starts at 1
+    pub index: usize,
 
-    // join pairs for the current round
-    pub to_be_joined: Vec<(String, String)>,
+    // the latest joined and verifier receipt_cid
+    pub agg: String,
 
-    // when the join list is odd, the last one called lucky advances to the next round automatically
-    lucky: Option<String>,    
+    // joined segments awaiting verification: <prover_peer_id, receipt_cid>
+    pub to_be_verified: HashMap<String, String>,
 }
 
 impl Join {
     pub fn new() -> Join {
         Join {
-            joined: vec![],
-            to_be_joined: vec![],
-            lucky: None,
+            index: 1,
+            agg: String::new(),
+            to_be_verified: HashMap::<String, String>::new()
         }
-    }
-
-    pub fn cur_join_round(&self) -> usize {
-        self.joined.len()        
     }
 }
 
@@ -126,42 +135,12 @@ impl Recursion {
         segments: Vec<Segment>,
     ) -> Recursion {
         Recursion {
-            stage: Stage::Upload,
+            stage: Stage::Prove,
             prove_and_lift: ProveAndLift {
                 segments: segments,
             },
             join: Join::new(),
             snark: None,
         }
-    }
-
-    // prepare for the next join round(starting at 0)
-    pub fn prepare_next_join_round(&mut self) {
-        if self.join.cur_join_round() == 0 {
-            self.join.joined.push(
-                self.prove_and_lift.segments.iter()
-                .map(|seg| seg.id.clone()).collect()
-            );
-        }
-        let mut join_candidates: Vec<String> = self.join.joined.last().unwrap().to_vec();
-        if let Some(lucky) = &self.join.lucky {
-            join_candidates.push(lucky.to_string());
-            self.join.lucky = None;
-        }
-        for i in (0..join_candidates.len()).step_by(2) {
-            if i == join_candidates.len() - 1 {
-                // the lucky segment advances to the next round automatically
-                self.join.lucky = Some(join_candidates[i].clone());
-                break;
-            }
-            self.join.to_be_joined.push(
-                (join_candidates[i].clone(), join_candidates[i + 1].clone())
-            );
-        }
-        // join is complete
-        if true == self.join.to_be_joined.is_empty() {
-            self.join.joined.push(vec![self.join.lucky.clone().unwrap()]);            
-            self.stage = Stage::Stark;
-        }
-    }
+    }    
 }
