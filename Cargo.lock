@@ -1134,6 +1134,7 @@ dependencies = [
  "comms",
  "dstorage",
  "futures",
+ "hex",
  "home",
  "jocker",
  "libp2p",

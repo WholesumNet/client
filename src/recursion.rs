@@ -34,10 +34,10 @@ pub enum Stage {
     // proving(and lifting) segments
     Prove,
 
-    // joining segments
+    // prove & lift is complete, now joining segments
     Join,
 
-    // join completed
+    // join is completed, the receipt is now a stark receipt
     Stark,
 
     // extracting the final snark

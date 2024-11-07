@@ -48,8 +48,12 @@ use comms::{
 use uuid::Uuid;
 
 use risc0_zkvm::{
-    SuccinctReceipt, ReceiptClaim
+    Receipt, InnerReceipt, SuccinctReceipt, ReceiptClaim,
+    Journal,
+    sha::Digest,
 };
+
+use hex::FromHex;
 
 use dstorage::lighthouse;
 use benchmark;
@@ -119,6 +123,9 @@ async fn main() -> anyhow::Result<()> {
 
     // future for local verification of succinct receipts
     let mut succinct_receipt_verification_futures = FuturesUnordered::new();
+
+    // future for local verification of receipts
+    let mut receipt_verification_futures = FuturesUnordered::new();
 
     // futures for segments' uploads
     // let mut segments_upload_futures = FuturesUnordered::new();   
@@ -400,7 +407,9 @@ async fn main() -> anyhow::Result<()> {
                             notice::Request::ComputeJob(compute::ComputeDetails {
                                 job_id: prove_job_id,
                                 compute_type: compute::ComputeType::ProveAndLift,
-                                input: vec![cid.clone()],
+                                input_type: compute::ComputeJobInputType::Prove(
+                                    cid.to_string()
+                                ),
                             })
                         );                     
                     },
@@ -437,7 +446,10 @@ async fn main() -> anyhow::Result<()> {
                             notice::Request::ComputeJob(compute::ComputeDetails {
                                 job_id: format!("{}@{}", job.id, job.recursion.join.index),
                                 compute_type: compute::ComputeType::Join,
-                                input: vec![left_cid.to_string(), right_cid.to_string()],
+                                input_type: compute::ComputeJobInputType::Join(
+                                    left_cid.to_string(),
+                                    right_cid.to_string()
+                                ),
                             })
                         );                                             
                     },
@@ -445,84 +457,40 @@ async fn main() -> anyhow::Result<()> {
                     compute::ComputeType::Snark => {
                         if job.recursion.stage != Stage::Stark {
                             continue;
-                        }
-                        // let cmd = format!("/home/prince/reprove snark \
-                        //                   -i /home/prince/residue/in.sr \
-                        //                   -o /home/prince/residue/out.snark \
-                        //                   1 > /home/prince/residue/stdout \
-                        //                   2 > /home/prince/residue/stderr");                            
-                        // let cid = job.recursion.join.joined.last().unwrap().first().unwrap();
-                        // let prove_job_id = format!("{}-stark", job.id);
-                        // let _req_id = swarm.behaviour_mut()
-                        // .req_resp
-                        // .send_request(
-                        //     &server_peer_id,
-                        //     notice::Request::ComputeJob(compute::ComputeDetails {
-                        //         job_id: prove_job_id,
-                        //         //@ job details
-                        //         docker_image: String::from("rezahsnz/r0-zoo:1.0.5"),
-                        //         command: cmd,
-                        //         compute_type: compute::ComputeType::Snark,
-                        //         input: vec![cid.clone()],
-                        //     })
-                        // );                     
-
+                        }                                         
                     },
                 }                             
             },
 
-            // segments upload is finished
-            // ur = segments_upload_futures.select_next_some() => {
-                // let upload_res = ur?;
-                // let seg_id = upload_res.id;
-                
-                // if job.recursion.stage != recursion::Stage::Upload {
-                //     continue;
-                // }
-                // let segment = job.recursion.prove_and_lift.segments.iter_mut()
-                // .find(|x| x.id == seg_id);
-                // if false == segment.is_some() {
-                //     eprintln!("[warn] Uploaded segment `{seg_id}`'s data is missing.");
-                //     continue;
-                // }
-                // segment.unwrap().status = SegmentStatus::ProveReady(upload_res.cid);
-                // println!("segment `{seg_id}`'s status changed to ProveReady");
-                // // check if recursion can go to prove&lift stage
-                // if false == job.recursion.prove_and_lift.segments.is_empty() &&
-                //    true == job.recursion.prove_and_lift.segments.iter().all(|s| 
-                //        if let SegmentStatus::ProveReady(_) = s.status { true } else { false }
-                //    ) {
-                //    // recursion is ready for prove and lift 
-                //    println!("[info] all segments of the job are uploaded to dstorage and it is ready for the `prove and lift` stage.");
-                //    job.recursion.stage = recursion::Stage::Prove;
-                // } 
-            // },
-
             // succinct receipt's verification has been finished
-            verification_res = succinct_receipt_verification_futures.select_next_some() => {                
-                let (prover_id, receipt_cid, item_id): (String, String, String) = match verification_res {
+            v_res = succinct_receipt_verification_futures.select_next_some() => {                
+                let  verification_res: VerificationResult = match v_res {
                     Err(failed) => {
-                        //@ which segment? 
+                        //@ which segment/join/...? 
                         eprintln!("[warn] Proved receipt's verification has failed. error: `{:#?}`", failed);
                         continue;                        
                     },
 
-                    Ok(res) => res
+                    Ok(r) => r
                 };
                 match job.recursion.stage {
                     Stage::Prove => {
                         println!(
                             "[info] Segment's proof is verified! \
                             segment: `{}`, receipt_cid: `{}`, prover: `{}`",
-                            item_id, receipt_cid, prover_id
+                            verification_res.item_id,
+                            verification_res.receipt_cid,
+                            verification_res.prover_id
                         );
                         let segment = job.recursion.prove_and_lift.segments.iter_mut()
-                            .find(|x| x.id == item_id);
+                            .find(|x| x.id == verification_res.item_id);
                         if false == segment.is_some() {
-                            eprintln!("[warn] Segment `{item_id}` is missing.");
+                            eprintln!("[warn] Segment `{}` is missing.", verification_res.item_id);
                             continue;
                         }                
-                        segment.unwrap().status = SegmentStatus::ProvedAndLifted(receipt_cid.clone());
+                        segment.unwrap().status = SegmentStatus::ProvedAndLifted(
+                            verification_res.receipt_cid.clone()
+                        );
                         // if all segments are verified, prepare for join
                         if true == job.recursion.prove_and_lift.segments.iter().all(|some_seg| {
                             match some_seg.status {
@@ -540,9 +508,9 @@ async fn main() -> anyhow::Result<()> {
                         println!(
                             "[info] Join's proof is verified! \
                             index: `{}`, receipt_cid: `{}`, prover: `{}`",
-                            item_id, receipt_cid, prover_id
+                            verification_res.item_id, verification_res.receipt_cid, verification_res.prover_id
                         );
-                        if false == job.recursion.join.to_be_verified.contains_key(&prover_id) {
+                        if false == job.recursion.join.to_be_verified.contains_key(&verification_res.prover_id) {
                             eprintln!("[warn] Missing join data.");
                         }
                         job.recursion.join.index += 1;
@@ -550,12 +518,35 @@ async fn main() -> anyhow::Result<()> {
                             // begin snark extraction
                             println!("[info] Join is complete! stark receipt is here!");
                             job.recursion.stage = Stage::Stark;
-                            //@ verify the receipt 
+                            //@ verify the receipt
+                            receipt_verification_futures.push(
+                                verify_stark_receipt(
+                                    verification_res.receipt_file_path,
+                                    job.schema.verification.journal_file_path.clone(),
+                                    job.schema.verification.image_id.clone()
+                                )
+                            );
+
                         } 
                     },
 
                     _ => {},
                 }
+            },
+
+            v_res = receipt_verification_futures.select_next_some() => {
+                let receipt: Receipt = match v_res {
+                    Err(failed) => {
+                        //@ which segment/join/...? 
+                        eprintln!("[warn] Stark receipt's verification has failed. error: `{:#?}`", failed);
+                        continue;                        
+                    },
+
+                    Ok(r) => r
+                };
+                // ...
+                println!("stark receipt is verified: `{receipt:#?}`");
+                panic!("aloha!");
             },
 
             event = swarm.select_next_some() => match event {
@@ -804,7 +795,6 @@ async fn _download_benchmark(
 //  - receipt verification
 //  - timestamp expiry checks
 //  - score/duration checks
-
 async fn evaluate_compute_offer(
     _docker_con: &Docker,
     _ds_client: &reqwest::Client,
@@ -1059,6 +1049,14 @@ fn update_jobs(
     to_be_locally_verified    
 }
 
+#[derive(Debug, Clone)]
+struct VerificationResult {
+    pub prover_id: String,
+    pub receipt_cid: String,
+    pub item_id: String,
+    pub receipt_file_path: String
+}
+
 // verify proved and lifted receipt 
 async fn verify_succinct_receipt(
     ds_client: &reqwest::Client,
@@ -1067,7 +1065,7 @@ async fn verify_succinct_receipt(
     prover_id: String,
     receipt_cid: String,
     item_id: String
-) -> anyhow::Result<(String, String, String)> {
+) -> anyhow::Result<VerificationResult> {
     // save the benchmark to the docker volume
     let residue_path = format!(
         "{}/verification/{}",
@@ -1082,10 +1080,38 @@ async fn verify_succinct_receipt(
         blob_file_path.clone()
     ).await?;
     let succinct_receipt: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(
-        &fs::read(blob_file_path)?
+        &fs::read(blob_file_path.clone())?
     )?;
     match succinct_receipt.verify_integrity() {
         Err(e) => Err(e.into()),
-        Ok(_) => Ok((prover_id, receipt_cid, item_id))
+        Ok(_) => Ok(VerificationResult {
+            prover_id: prover_id,
+            receipt_cid: receipt_cid,
+            item_id: item_id,
+            receipt_file_path: blob_file_path
+        })
     }
+}
+
+// verify the stark receipt obtained from a joined succinct receipt
+async fn verify_stark_receipt(
+    succint_receipt_file_path: String,
+    journal_file_path: String,
+    image_id: String,
+) -> anyhow::Result<Receipt> {
+    let sr: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(
+        &std::fs::read(succint_receipt_file_path)?
+    )?;
+    let journal: Journal = bincode::deserialize(
+        &std::fs::read(journal_file_path)?
+    )?;
+    let stark_receipt = Receipt::new(
+        InnerReceipt::Succinct(sr),
+        journal.bytes
+    );    
+    // let image_id = [1736214515, 1657631480, 64416037, 4034550666, 1597713630, 4146540347, 3792276330, 1548683811];
+    stark_receipt.verify(
+        <[u8; 32]>::from_hex(&image_id)?
+    )?;
+    Ok(stark_receipt)
 }
