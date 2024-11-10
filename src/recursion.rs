@@ -68,7 +68,7 @@ pub struct Segment {
     // per segment status
     pub status: SegmentStatus,
 
-    // proved(and lifted) segments awaiting verification: <prover_peer_id, receipt_cid>
+    // proved(and lifted) segments awaiting verification: <receipt_cid, prover_peer_id>
     pub to_be_verified: HashMap<String, String>,
 }
 
@@ -101,7 +101,7 @@ pub struct Join {
     // the latest joined and verifier receipt_cid
     pub agg: String,
 
-    // joined segments awaiting verification: <prover_peer_id, receipt_cid>
+    // joined segments awaiting verification: <receipt_cid, prover_peer_id>
     pub to_be_verified: HashMap<String, String>,
 }
 
