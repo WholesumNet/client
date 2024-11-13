@@ -14,7 +14,7 @@ development stages of a job:
     a. prove and lift
         - N iterations -> N SuccinctReceipts
     b. join
-        - Log2(N) + 1 steps of join to obtain the final SuccinctReceipt aka stark receip
+        - N - 1 steps of join to obtain the final SuccinctReceipt aka stark receip
           e.g. starting with N = 5 and segments labeled 1-5:
           1: (1, 2) -> 12
           2: (12, 3) -> 123

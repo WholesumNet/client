@@ -52,8 +52,17 @@ use risc0_zkvm::{
     Journal,
     sha::Digest,
 };
-
 use hex::FromHex;
+
+use mongodb::{
+    bson::doc, 
+    options::{
+        ClientOptions,
+        ServerApi,
+        ServerApiVersion
+    },
+    Client
+};
 
 use dstorage::lighthouse;
 use benchmark;
@@ -65,6 +74,8 @@ mod recursion;
 use recursion::{
     Recursion, Stage, SegmentStatus, Segment
 };
+
+mod db;
 
 // CLI
 #[derive(Parser, Debug)]
@@ -112,11 +123,13 @@ async fn main() -> anyhow::Result<()> {
         .timeout(Duration::from_secs(60)) //@ how much timeout is enough?
         .build()?;
 
-    println!("Connecting to docker daemon...");
+    // setup docker
+    println!("[info] Connecting to the Docker daemon...");
     let docker_con = Docker::connect_with_socket_defaults()?;
+    println!("[info] Docker daemon handle is up and ready.");
 
-    // execution traces: (receipt_cid => exec_trace)
-    // let mut execution_trace: HashMap<String, ExecutionTrace> = HashMap::new();
+    // setup mongodb
+    let db_client = mongodb_setup("mongodb://localhost:27017").await?;
 
     // future for offer evaluation
     let mut offer_evaluation_futures = FuturesUnordered::new();
@@ -126,9 +139,6 @@ async fn main() -> anyhow::Result<()> {
 
     // future for local verification of receipts
     let mut receipt_verification_futures = FuturesUnordered::new();
-
-    // futures for segments' uploads
-    // let mut segments_upload_futures = FuturesUnordered::new();   
     
     // local libp2p key 
     let local_key = {
@@ -146,48 +156,17 @@ async fn main() -> anyhow::Result<()> {
     };    
     println!("my peer id: `{:?}`", PeerId::from_public_key(&local_key.public()));  
 
-    // job
+    // the job
     let job_schema: job::Schema = toml::from_str(
         &fs::read_to_string(cli.job.unwrap())?
     )?;
     let job_rec = {
-        let mut segments = Vec::<Segment>::new();        
-        // read segments off disk
-        // let mut segment_files: Vec<PathBuf> = vec![];
-        // for entry in fs::read_dir(&job_schema.compute.segments_path)? {
-        //     let path = entry?.path();
-        //     if path.extension().and_then(|s| s.to_str().map(|s| s.to_ascii_lowercase())) == Some(String::from("seg")) {
-        //         segment_files.push(path);
-        //     }
-        // }
-        // segment_files.sort();
-        // println!("read {} segments in total.", segment_files.len());
-        // for seg_file in segment_files {
-        //     let seg_name = seg_file.file_stem()
-        //             .ok_or_else(|| anyhow::Error::msg("<0>"))?
-        //             .to_str().ok_or_else(|| anyhow::Error::msg("<0>"))?;
-        //     let seg_path = String::from(seg_file.to_string_lossy());
-        //     segments_upload_futures.push(
-        //         lighthouse::upload_file(
-        //             &ds_client,
-        //             &ds_key,
-        //             seg_path.clone(),
-        //             seg_name.to_string(),
-        //         )
-        //     );
-        //     segments.push(
-        //         Segment {
-        //             id: seg_name.to_string(),
-        //             num_prove_deals: 0,
-        //             status: SegmentStatus::Local(seg_path)
-        //         }
-        //     );
-        // }
-        for index in 0..job_schema.compute.num_segments {
+        let mut segments = Vec::<Segment>::new();                
+        for index in 0..job_schema.prove.num_segments {
             segments.push(
                 Segment::new(
                     &format!("segment-{index}"),
-                    &job_schema.compute.segments_cid
+                    &job_schema.prove.segments_cid
                 )
             );
         }
@@ -200,16 +179,40 @@ async fn main() -> anyhow::Result<()> {
         id: Uuid::new_v4().simple().to_string()[..4].to_string(),
         schema: job_schema,
         recursion: job_rec,
-    };  
+    };
+
+    let db_jobs_coll = db_client
+        .database("wholesum_jobs")
+        .collection::<db::Job>("jobs");
+    let db_job_id = db_jobs_coll
+        .insert_one(db::Job {
+            id: job.id.clone(),
+            po2: job.schema.prove.po2,
+            segments_cid: job.schema.prove.segments_cid.clone(),
+            num_segments: job.schema.prove.num_segments,
+            verification: db::Verification {
+                image_id: job.schema.verification.image_id.clone(),
+                journal_blob: Vec::new(),                 
+            },
+            segments: Vec::new(),
+            join_rounds: Vec::new(),
+            stark_receipt: Vec::new(),
+            snark_receipt: db::VerifiedBlob {
+                cid: String::new(),
+                blob: Vec::new(),
+            },
+        })
+        .await?
+        .inserted_id;
+    println!("[info] Job's progress will be recorded to the local db, id: `{db_job_id}`");    
 
     // swarm 
     let mut swarm = comms::p2p::setup_swarm(&local_key).await?;
     let topic = gossipsub::IdentTopic::new("<-- p2p compute bazaar -->");
-    let _ = 
-        swarm
-            .behaviour_mut()
-            .gossipsub
-            .subscribe(&topic); 
+    let _ = swarm
+        .behaviour_mut()
+        .gossipsub
+        .subscribe(&topic); 
 
     // bootstrap 
     if false == cli.dev {
@@ -531,6 +534,18 @@ async fn main() -> anyhow::Result<()> {
                             println!("[info] All segments are proved and lifted. so, the join stage begins.");
                             job.recursion.stage = Stage::Join;                   
                         }
+                        // record progress on db
+                        let update_doc = doc! {
+                            "$push": doc! {
+                                ""
+                            }
+                        }
+                        db_futures.update_one(
+                            db_jobs_coll(doc! {
+                                "_id": db_job_id.clone()
+                            })
+                        );
+
                     },
 
                     Stage::Join => {
@@ -805,6 +820,26 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+async fn mongodb_setup(
+    uri: &str,
+) -> anyhow::Result<mongodb::Client> {
+    println!("[info] Connecting to the MongoDB daemon...");
+    let mut client_options = ClientOptions::parse(
+        uri
+    ).await?;
+    let server_api = ServerApi::builder().version(
+        ServerApiVersion::V1
+    ).build();
+    client_options.server_api = Some(server_api);
+    let client = mongodb::Client::with_options(client_options)?;
+    // Send a ping to confirm a successful connection
+    client
+        .database("admin")
+        .run_command(doc! { "ping": 1 })
+        .await?;
+    println!("[info] Successfully connected to the MongoDB instance!");
+    Ok(client)
+}
 
 // download benchmark from dstorage and put it into the docker volume
 async fn _download_benchmark(

@@ -34,3 +34,4 @@ comms = {path = "../comms"}
 dstorage = { path = "../dstorage" }
 jocker = {path = "../jocker" }
 benchmark = { path = "../benchmark" }
+mongodb = "3.1.0"

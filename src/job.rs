@@ -15,9 +15,13 @@ pub struct CriteriaConfig {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ComputeConfig {
+pub struct ProveConfig {    
+    // the po2 limit
+    pub po2: u32,
+
     pub num_segments: u32,
-    // cid of the segments folder
+
+    // the cid of the segments folder
     pub segments_cid: String,
 }
 
@@ -38,7 +42,7 @@ pub struct Schema {
     // criteria for matching
     pub criteria: CriteriaConfig, 
 
-    pub compute: ComputeConfig,
+    pub prove: ProveConfig,
     
     pub verification: VerificationConfig,
 }
