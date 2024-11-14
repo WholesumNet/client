@@ -1,3 +1,4 @@
+use mongodb::bson::Bson;
 use serde::{
     Serialize, Deserialize
 };
@@ -16,11 +17,16 @@ pub struct VerifiedBlob {
 
     // in memory blob
     pub blob: Vec<u8>,
+
+    // the prover
+    pub prover: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Segment {
     pub id: String,
+
+    pub job_id: Bson,
 
     // proved, lifted, and verified succinct receipt
     pub verified_blob: VerifiedBlob,
@@ -34,6 +40,9 @@ pub struct JoinRound {
     // round 2: (agg, 2) -> agg
     // round 3: (agg, 3) -> agg
     // round 4: (agg, 4) -> agg
+    
+    pub job_id: Bson,
+
     pub index: u32,
 
     pub verified_blob: VerifiedBlob,
@@ -49,11 +58,5 @@ pub struct Job {
 
     pub verification: Verification,
 
-    pub segments: Vec<Segment>,
-
-    pub join_rounds: Vec<JoinRound>,
-
-    pub stark_receipt: Vec<u8>,
-
-    pub snark_receipt: VerifiedBlob,
+    pub snark_receipt: Option<VerifiedBlob>,
 }

@@ -55,6 +55,7 @@ use risc0_zkvm::{
 use hex::FromHex;
 
 use mongodb::{
+    bson,
     bson::doc, 
     options::{
         ClientOptions,
@@ -150,11 +151,11 @@ async fn main() -> anyhow::Result<()> {
             let new_key = identity::Keypair::generate_ed25519();
             let bytes = new_key.to_protobuf_encoding().unwrap();
             let _bw = fs::write("./key.secret", bytes);
-            println!("No keys were supplied, so one has been generated for you and saved to `./key.secret` file.");
+            println!("[warn] No keys were supplied, so one has been generated for you and saved to `./key.secret` file.");
             new_key
         }
     };    
-    println!("my peer id: `{:?}`", PeerId::from_public_key(&local_key.public()));  
+    println!("[info] Peer id: `{:?}`", PeerId::from_public_key(&local_key.public()));  
 
     // the job
     let job_schema: job::Schema = toml::from_str(
@@ -181,10 +182,9 @@ async fn main() -> anyhow::Result<()> {
         recursion: job_rec,
     };
 
-    let db_jobs_coll = db_client
-        .database("wholesum_jobs")
-        .collection::<db::Job>("jobs");
-    let db_job_id = db_jobs_coll
+    let db_job_id = db_client
+        .database("wholesum")
+        .collection::<db::Job>("jobs")
         .insert_one(db::Job {
             id: job.id.clone(),
             po2: job.schema.prove.po2,
@@ -194,13 +194,7 @@ async fn main() -> anyhow::Result<()> {
                 image_id: job.schema.verification.image_id.clone(),
                 journal_blob: Vec::new(),                 
             },
-            segments: Vec::new(),
-            join_rounds: Vec::new(),
-            stark_receipt: Vec::new(),
-            snark_receipt: db::VerifiedBlob {
-                cid: String::new(),
-                blob: Vec::new(),
-            },
+            snark_receipt: None,
         })
         .await?
         .inserted_id;
@@ -534,18 +528,21 @@ async fn main() -> anyhow::Result<()> {
                             println!("[info] All segments are proved and lifted. so, the join stage begins.");
                             job.recursion.stage = Stage::Join;                   
                         }
-                        // record progress on db
-                        let update_doc = doc! {
-                            "$push": doc! {
-                                ""
-                            }
-                        }
-                        db_futures.update_one(
-                            db_jobs_coll(doc! {
-                                "_id": db_job_id.clone()
+                        // record progress to db                         
+                        db_client
+                            .database("wholesum")
+                            .collection::<db::Segment>("segments")
+                            .insert_one(
+                                db::Segment {
+                                    id: verification_res.item_id,
+                                    job_id: db_job_id.clone(),
+                                    verified_blob: db::VerifiedBlob {
+                                        cid: verification_res.receipt_cid,
+                                        blob: verification_res.receipt_blob,
+                                        prover: verification_res.prover_id
+                                    }
                             })
-                        );
-
+                            .await?;
                     },
 
                     Stage::Join => {
@@ -556,9 +553,27 @@ async fn main() -> anyhow::Result<()> {
                         );
                         if false == job.recursion.join.to_be_verified.contains_key(&verification_res.receipt_cid) {
                             eprintln!("[warn] Missing join data.");
+                            continue;
                         }
-                        job.recursion.join.agg = verification_res.receipt_cid;
+                        job.recursion.join.agg = verification_res.receipt_cid.clone();
                         job.recursion.join.index += 1;
+                        // record progress to db
+                        let db_join_round = 
+                        db_client
+                            .database("wholesum")
+                            .collection::<db::JoinRound>("join_rounds")
+                            .insert_one(
+                                db::JoinRound {
+                                    job_id: db_job_id.clone(),
+                                    index: verification_res.item_id.parse::<u32>()?,
+                                    verified_blob: db::VerifiedBlob {
+                                        cid: verification_res.receipt_cid,
+                                        blob: verification_res.receipt_blob,
+                                        prover: verification_res.prover_id
+                                    }
+                            })
+                            .await?;
+                        // stark is here, aim for a snark
                         if job.recursion.join.index == job.recursion.prove_and_lift.segments.len() {
                             // begin snark extraction
                             println!("[info] Join is complete! stark receipt is here!");
@@ -774,7 +789,6 @@ async fn main() -> anyhow::Result<()> {
                                 succinct_receipt_verification_futures.push(                                    
                                     verify_succinct_receipt(
                                         &ds_client,
-                                        &ds_key,
                                         residue_path.clone(),
                                         v_server_id,
                                         v_receipt_cid,
@@ -1130,7 +1144,8 @@ struct VerificationResult {
     pub prover_id: String,
     pub receipt_cid: String,
     pub item_id: String,
-    pub receipt_file_path: String
+    pub receipt_file_path: String,
+    pub receipt_blob: Vec<u8>
 }
 
 #[derive(Debug, Clone)]
@@ -1143,7 +1158,6 @@ struct VerificationError {
 // verify proved and lifted receipt 
 async fn verify_succinct_receipt(
     ds_client: &reqwest::Client,
-    ds_key: &str,
     residue_path: String,
     prover_id: String,
     receipt_cid: String,
@@ -1160,13 +1174,14 @@ async fn verify_succinct_receipt(
         item_id: item_id.clone(),
         err_msg: format!("Receipt download error: `{}`",  e.to_string())
     })?;
-    let succinct_receipt: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(
-        &fs::read(blob_file_path.clone())
+    let blob = fs::read(blob_file_path.clone())
         .map_err(|e| VerificationError {
             receipt_cid: receipt_cid.clone(),
             item_id: item_id.clone(),
             err_msg: format!("Receipt read error: `{}`",  e.to_string())
-        })?
+        })?;
+    let succinct_receipt: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(
+        &blob        
     )
     .map_err(|e| VerificationError {
         receipt_cid: receipt_cid.clone(),
@@ -1184,7 +1199,8 @@ async fn verify_succinct_receipt(
             prover_id: prover_id,
             receipt_cid: receipt_cid,
             item_id: item_id,
-            receipt_file_path: blob_file_path
+            receipt_file_path: blob_file_path,
+            receipt_blob: blob,
         })
     }
 }
