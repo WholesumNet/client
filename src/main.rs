@@ -557,7 +557,10 @@ async fn main() -> anyhow::Result<()> {
                             continue;
                         }
                         let joined_pair = job.recursion.join.pairs.swap_remove(joined_pair_index.unwrap());
-                        job.recursion.join.joined[joined_pair.position] = verification_res.receipt_cid.clone();
+                        job.recursion.join.joined.insert(
+                            joined_pair.position,
+                            verification_res.receipt_cid.clone()
+                        );
                         // record progress to db
                         // let db_join_round = 
                         // db_client
@@ -605,8 +608,8 @@ async fn main() -> anyhow::Result<()> {
 
                     Ok(r) => r
                 };
-                println!("[info] Stark receipt has been verified.");
                 job.recursion.stage = Stage::Stark;
+                println!("[info] Stark receipt has been verified, recursion is complete!");
             },
 
             event = swarm.select_next_some() => match event {

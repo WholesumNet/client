@@ -1,7 +1,10 @@
 use std::{    
     cmp::max,
     vec::Vec,
-    collections::HashMap
+    collections::{
+        HashMap,
+        BTreeMap
+    },
 };
 
 /*
@@ -114,10 +117,10 @@ pub struct Join {
     pub pairs: Vec<JoinPair>,
 
     // receipts of the previous round
-    pub joined: Vec<String>,
+    pub joined: BTreeMap<usize, String>,
 
     // the left over: eg receipts: [0..4] -> pair 1: (0, 1), ..., leftover: (5)
-    pub leftover: String,
+    pub leftover: Option<String>,
 
     // map of verification pool: <receipt_cid, prover>
     pub to_be_verified: HashMap<String, String>,
@@ -130,8 +133,8 @@ impl Join {
         Join {
             round: 0,
             pairs: Vec::<JoinPair>::with_capacity(num_segments),
-            joined: Vec::<String>::with_capacity(num_segments),
-            leftover: String::new(),
+            joined: BTreeMap::<usize, String>::new(),
+            leftover: None,
             to_be_verified: HashMap::<String, String>::new(),
         }
     }
@@ -170,37 +173,48 @@ impl Recursion {
         if self.stage != Stage::Join {
             eprintln!("[warn] Stage must be Join.");
             return;
-        }
+        }        
         let mut to_be_joined: Vec<String> = {
-            if self.join.round == 0 {
+            if self.join.round == 0 {                
                 self.prove_and_lift.segments.iter().map(|some_seg| 
                     if let SegmentStatus::ProvedAndLifted(receipt) = &some_seg.status { 
-                        receipt.clone() 
+                        receipt.clone()
                     } else {
                         eprintln!("[warn] `{}`'s status is not proved and lifted.", some_seg.id);
                         String::new()
-                    }
+                    }                    
                 ).collect()
             } else {
-                self.join.joined.clone()
+                self.join.joined.values().cloned().collect()
             }
         };
-        to_be_joined.push(self.join.leftover.clone());
+        if let Some(leftover) = &self.join.leftover {
+            to_be_joined.push(leftover.clone());
+        }        
         // make pairs
+        self.join.pairs.clear();
+        self.join.leftover = None;
         for i in (0..to_be_joined.len()).step_by(2) {
             if i == to_be_joined.len() - 1 {
-                self.join.leftover = to_be_joined[i].clone();
+                self.join.leftover = Some(to_be_joined[i].clone());
             } else {
+                let pos = if i > 0 { i - 1 } else { i }; 
                 self.join.pairs.push(
                     JoinPair {
-                        position: max(0, i - 1),
+                        position: pos,
                         left: to_be_joined[i].clone(),
                         right: to_be_joined[i + 1].clone(),
                         num_prove_deals: 0,
                     }
                 );
             }
-        }
-        self.join.round += 1;
+        }             
+        println!("[info] Starting join round `{}`\n pairs: {:#?}\n leftover: `{:?}`",
+            self.join.round,
+            self.join.pairs,
+            self.join.leftover
+        );
+        self.join.joined.clear();
+        self.join.round += 1;   
     }
 }
