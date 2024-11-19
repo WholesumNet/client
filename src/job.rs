@@ -51,6 +51,8 @@ pub struct Schema {
 #[derive(Debug)]
 pub struct Job {
     pub id: String,
+
+    pub working_dir: String,
    
     pub schema: Schema,
 
@@ -58,11 +60,11 @@ pub struct Job {
 }
 
 // get base residue path of the host
-pub fn get_residue_path() -> anyhow::Result<String> {
+pub fn get_home_dir() -> anyhow::Result<String> {
     let err_msg = "Home dir is not available";
     let binding = home::home_dir()
         .ok_or_else(|| anyhow::Error::msg(err_msg))?;
     let home_dir = binding.to_str()
         .ok_or_else(|| anyhow::Error::msg(err_msg))?;
-    Ok(format!("{home_dir}/.wholesum/jobs/client"))
+    Ok(home_dir.to_string())
 }

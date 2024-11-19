@@ -176,11 +176,23 @@ async fn main() -> anyhow::Result<()> {
         )
     };
 
-    let mut job = Job {
-        id: Uuid::new_v4().simple().to_string()[..4].to_string(),
-        schema: job_schema,
-        recursion: job_rec,
+    let generated_job_id = Uuid::new_v4().simple().to_string()[..4].to_string();
+    let mut job = {           
+        Job {
+            id: generated_job_id.clone(),
+            working_dir: format!("{}/.wholesum/jobs/client/{}",
+                job::get_home_dir()?,
+                generated_job_id
+            ),
+            schema: job_schema,
+            recursion: job_rec,
+        }
     };
+    for action in ["prove", "join", "stark", "snark"] {
+        fs::create_dir_all(
+            format!("{}/{action}", &job.working_dir)
+        )?;
+    }    
 
     let db_job_id = db_client
         .database("wholesum")
@@ -511,8 +523,22 @@ async fn main() -> anyhow::Result<()> {
                         }) {
                             // begin join
                             println!("[info] All segments are proved and lifted. so, the join stage begins.");
-                            job.recursion.stage = Stage::Join;
-                            job.recursion.begin_next_join_round();
+                            job.recursion.begin_join();                            
+                            if true == job.recursion.join.begin_next_round() {
+                                // single segmented job is already starked
+                                job.recursion.stage = Stage::Stark;
+                                println!("[info] Join is already complete. Stark receipt is here, let's verify it!");                                
+                                receipt_verification_futures.push(
+                                    verify_stark_receipt(
+                                        format!("{}/prove/{}",
+                                            job.working_dir,
+                                            verification_res.receipt_cid
+                                        ),
+                                        job.schema.verification.journal_file_path.clone(),
+                                        job.schema.verification.image_id.clone()
+                                    )
+                                );                                
+                            }
                         }
                         // record progress to db                         
                         db_client
@@ -577,11 +603,10 @@ async fn main() -> anyhow::Result<()> {
                         //             }
                         //     })
                         //     .await?;
-                        if job.recursion.join.pairs.len() == 0 {
-                            job.recursion.begin_next_join_round();
-                            if job.recursion.join.pairs.len() == 0 {
+                        if true == job.recursion.join.is_round_finished() {
+                            if true == job.recursion.join.begin_next_round() {
                                 // begin snark extraction
-                                println!("[info] Join is complete, stark receipt is here!");
+                                println!("[info] Join is complete. Stark receipt is here, let's verify it.");
                                 job.recursion.stage = Stage::Stark;
                                 receipt_verification_futures.push(
                                     verify_stark_receipt(
@@ -591,7 +616,7 @@ async fn main() -> anyhow::Result<()> {
                                     )
                                 );
                             }
-                        }
+                        }                        
                     },
 
                     _ => {},
@@ -609,7 +634,7 @@ async fn main() -> anyhow::Result<()> {
                     Ok(r) => r
                 };
                 job.recursion.stage = Stage::Stark;
-                println!("[info] Stark receipt has been verified, recursion is complete!");
+                println!("[info] Stark receipt has been verified, join aggregation is complete.");
             },
 
             event = swarm.select_next_some() => match event {
@@ -781,23 +806,27 @@ async fn main() -> anyhow::Result<()> {
                                 server_peer_id,
                                 new_updates
                             );
-                            let residue_path = format!(
-                                "{}/verification/{}",
-                                job::get_residue_path()?,
-                                job.id
-                            );
-                            if false == fs::exists(&residue_path)? {
-                                fs::create_dir_all(residue_path.clone())?;
-                            }
-                            for v in to_be_locally_verified {
-                                let (v_server_id, v_receipt_cid, v_item_id) = v;
+                            let stage_str = match job.recursion.stage {
+                                Stage::Prove => String::from("prove"),
+
+                                Stage::Join  => {
+                                    let join_path = format!("join/r{}", job.recursion.join.round);
+                                    fs::create_dir_all(format!("{}/{}", job.working_dir, &join_path))?;
+                                    join_path
+                                },
+
+                                Stage::Stark => String::from("stark"),
+
+                                Stage::Snark => String::from("snark"),
+                            };
+                            for verification_item in to_be_locally_verified {
                                 succinct_receipt_verification_futures.push(                                    
                                     verify_succinct_receipt(
                                         &ds_client,
-                                        residue_path.clone(),
-                                        v_server_id,
-                                        v_receipt_cid,
-                                        v_item_id
+                                        format!("{}/{stage_str}", job.working_dir),
+                                        verification_item.prover_id,
+                                        verification_item.receipt_cid,
+                                        verification_item.item_id
                                     )
                                 );
                             }                            
@@ -866,18 +895,19 @@ async fn _download_benchmark(
     server_benchmark: &compute::ServerBenchmark,
 ) -> anyhow::Result<String> {
     // save the benchmark to the docker volume
-    let residue_path = format!(
-        "{}/benchmark/{}/residue",
-        job::get_residue_path()?,
-        server_benchmark.cid,
-    );
-    fs::create_dir_all(residue_path.clone())?;
-    lighthouse::download_file(
-        ds_client,
-        &server_benchmark.cid,
-        format!("{residue_path}/benchmark")
-    ).await?;
-    Ok(residue_path)
+    // let residue_path = format!(
+    //     "{}/benchmark/{}/residue",
+    //     job::get_residue_path()?,
+    //     server_benchmark.cid,
+    // );
+    // fs::create_dir_all(residue_path.clone())?;
+    // lighthouse::download_file(
+    //     ds_client,
+    //     &server_benchmark.cid,
+    //     format!("{residue_path}/benchmark")
+    // ).await?;
+    // Ok(residue_path)
+    Ok(String::new())
 }
 
 // evaluate the offer:
@@ -991,12 +1021,19 @@ async fn evaluate_compute_offer(
     // )
 }
 
+#[derive(Debug, Clone)]
+struct VerificationItem {
+    pub receipt_cid: String,
+    pub prover_id: String,
+    pub item_id: String,
+}
+
 // process bulk status updates
 fn update_jobs(
     job: &mut Job,
     prover_peer_id: PeerId,
     new_updates: Vec<compute::JobUpdate>,
-) -> Vec<(String, String, String)> {
+) -> Vec<VerificationItem> {
     let mut to_be_locally_verified = vec![];
     for new_update in new_updates {
         let prover_id = prover_peer_id.to_string();
@@ -1052,11 +1089,11 @@ fn update_jobs(
                                         prover_id.clone()
                                     );
                                     to_be_locally_verified.push(
-                                        (
-                                            prover_id.clone(),
-                                            receipt_cid.to_string(),
-                                            proved_segment.id.clone()
-                                        )
+                                        VerificationItem {
+                                            receipt_cid: receipt_cid.to_string(),
+                                            prover_id: prover_id.clone(),
+                                            item_id: proved_segment.id.clone()
+                                        }
                                     );
                                 }
                             } else {
@@ -1086,11 +1123,11 @@ fn update_jobs(
                                 prover_id.clone()
                             );
                             to_be_locally_verified.push(
-                                (
-                                    prover_id.clone(),
-                                    receipt_cid.to_string(),
-                                    join_id
-                                )
+                                VerificationItem {
+                                    receipt_cid: receipt_cid.to_string(),
+                                    prover_id: prover_id.clone(),
+                                    item_id: join_id.clone()
+                                }
                             );
                         }
                         
@@ -1173,7 +1210,7 @@ async fn verify_succinct_receipt(
     receipt_cid: String,
     item_id: String
 ) -> Result<VerificationResult, VerificationError> {    
-    let blob_file_path = format!("{residue_path}/receipt-{item_id}");
+    let blob_file_path = format!("{residue_path}/{receipt_cid}");
     lighthouse::download_file(
         ds_client,
         &receipt_cid,

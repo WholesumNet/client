@@ -111,7 +111,7 @@ pub struct JoinPair {
 #[derive(Debug)]
 pub struct Join {
     // current round
-    pub round: u32,
+    pub round: i32,
 
     // to be joined pairs for the current round
     pub pairs: Vec<JoinPair>,
@@ -120,7 +120,7 @@ pub struct Join {
     pub joined: BTreeMap<usize, String>,
 
     // the left over: eg receipts: [0..4] -> pair 1: (0, 1), ..., leftover: (5)
-    pub leftover: Option<String>,
+    pub agg: Option<String>,
 
     // map of verification pool: <receipt_cid, prover>
     pub to_be_verified: HashMap<String, String>,
@@ -131,12 +131,61 @@ impl Join {
         num_segments: usize
     ) -> Self {
         Join {
-            round: 0,
+            round: -1,
             pairs: Vec::<JoinPair>::with_capacity(num_segments),
             joined: BTreeMap::<usize, String>::new(),
-            leftover: None,
+            agg: None,
             to_be_verified: HashMap::<String, String>::new(),
         }
+    }
+
+    pub fn initiate(
+        &mut self,
+        receipts: Vec<String>,
+    ) {
+        for i in 0..receipts.len() {
+            self.joined.insert(i, receipts[i].clone());
+        }
+    }
+
+    pub fn begin_next_round(&mut self) -> bool {
+        let mut to_be_joined: Vec<String> = self.joined.values().cloned().collect();
+        if to_be_joined.len() == 0 {
+            eprintln!("[warn] Nothing is left to join.");
+        }
+        if let Some(leftover) = &self.agg {
+            to_be_joined.push(leftover.clone());
+        }    
+        self.round += 1;    
+        self.agg = None;
+        self.joined.clear();
+        self.pairs.clear();
+        for i in (0..to_be_joined.len()).step_by(2) {
+            if i == to_be_joined.len() - 1 {
+                self.agg = Some(to_be_joined[i].clone());
+            } else {
+                let pos = if i > 0 { i - 1 } else { i }; 
+                self.pairs.push(
+                    JoinPair {
+                        position: pos,
+                        left: to_be_joined[i].clone(),
+                        right: to_be_joined[i + 1].clone(),
+                        num_prove_deals: 0,
+                    }
+                );
+            }
+        }             
+        println!("[info] Starting join round `{}`\n pairs: {:#?}\n leftover: `{:?}`",
+            self.round,
+            self.pairs,
+            self.agg
+        );
+
+        self.is_round_finished()
+    }
+
+    pub fn is_round_finished(&self) -> bool {
+        0 == self.pairs.len()
     }
 }
 
@@ -169,52 +218,22 @@ impl Recursion {
         }
     }
 
-    pub fn begin_next_join_round(&mut self) {
-        if self.stage != Stage::Join {
-            eprintln!("[warn] Stage must be Join.");
+    pub fn begin_join(
+        &mut self
+    ) {
+        if self.stage != Stage::Prove {
+            eprintln!("[warn] Prove stage must be finished before join begins.");
             return;
         }        
-        let mut to_be_joined: Vec<String> = {
-            if self.join.round == 0 {                
-                self.prove_and_lift.segments.iter().map(|some_seg| 
-                    if let SegmentStatus::ProvedAndLifted(receipt) = &some_seg.status { 
-                        receipt.clone()
-                    } else {
-                        eprintln!("[warn] `{}`'s status is not proved and lifted.", some_seg.id);
-                        String::new()
-                    }                    
-                ).collect()
+        let receipts = self.prove_and_lift.segments.iter().map(|some_seg| 
+            if let SegmentStatus::ProvedAndLifted(receipt) = &some_seg.status { 
+                receipt.clone()
             } else {
-                self.join.joined.values().cloned().collect()
-            }
-        };
-        if let Some(leftover) = &self.join.leftover {
-            to_be_joined.push(leftover.clone());
-        }        
-        // make pairs
-        self.join.pairs.clear();
-        self.join.leftover = None;
-        for i in (0..to_be_joined.len()).step_by(2) {
-            if i == to_be_joined.len() - 1 {
-                self.join.leftover = Some(to_be_joined[i].clone());
-            } else {
-                let pos = if i > 0 { i - 1 } else { i }; 
-                self.join.pairs.push(
-                    JoinPair {
-                        position: pos,
-                        left: to_be_joined[i].clone(),
-                        right: to_be_joined[i + 1].clone(),
-                        num_prove_deals: 0,
-                    }
-                );
-            }
-        }             
-        println!("[info] Starting join round `{}`\n pairs: {:#?}\n leftover: `{:?}`",
-            self.join.round,
-            self.join.pairs,
-            self.join.leftover
-        );
-        self.join.joined.clear();
-        self.join.round += 1;   
-    }
+                eprintln!("[warn] `{}`'s status is not proved and lifted.", some_seg.id);
+                String::new()
+            }                    
+        ).collect();
+        self.join.initiate(receipts);
+        self.stage = Stage::Join;
+    }    
 }
