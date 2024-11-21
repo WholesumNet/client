@@ -8,6 +8,7 @@ use serde::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Verification {
     pub image_id: String,
+
     pub journal_blob: Vec<u8>,
 }
 
@@ -33,19 +34,28 @@ pub struct Segment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JoinRound {
-    // e.g.
-    // segments: [0, 1, 2, 3, 4]
-    // round 1: (0, 1) -> agg
-    // round 2: (agg, 2) -> agg
-    // round 3: (agg, 3) -> agg
-    // round 4: (agg, 4) -> agg
+pub struct VerifiedBlobForJoin {        
+    pub input_cid_left: String,
+    pub input_cid_right: String,
+
+    // cid of the succint receipt
+    pub cid: String,
+
+    // in memory blob
+    pub blob: Vec<u8>,
+
+    // the prover
+    pub prover: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Join {
     
     pub job_id: Bson,
 
-    pub index: u32,
+    pub round: u32,
 
-    pub verified_blob: VerifiedBlob,
+    pub verified_blob: VerifiedBlobForJoin,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +65,8 @@ pub struct Job {
     pub po2: u32,
     pub segments_cid: String,
     pub num_segments: u32,
+
+    pub stage: Bson,
 
     pub verification: Verification,
 

@@ -1,10 +1,12 @@
 use std::{    
-    cmp::max,
     vec::Vec,
     collections::{
         HashMap,
         BTreeMap
     },
+};
+use serde::{
+    Serialize, Deserialize
 };
 
 /*
@@ -33,7 +35,7 @@ development stages of a job:
 */
 
 // stages of the recursion process
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Stage {
     // proving(and lifting) segments
     Prove,
@@ -95,6 +97,19 @@ impl Segment {
 #[derive(Debug)]
 pub struct ProveAndLift {
     pub segments: Vec<Segment>,
+}
+
+impl ProveAndLift {
+    pub fn is_finished(
+        &self
+    ) -> bool {
+        self.segments.iter().all(|some_seg| {
+            match some_seg.status {
+                SegmentStatus::ProvedAndLifted(_) => true,
+                _ => false,            
+            }        
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -174,12 +189,17 @@ impl Join {
                     }
                 );
             }
-        }             
-        println!("[info] Starting join round `{}`\n pairs: {:#?}\n leftover: `{:?}`",
-            self.round,
-            self.pairs,
-            self.agg
-        );
+        }
+        if false == self.is_round_finished() {
+            println!("[info] Starting join round `{}`\n pairs: {:#?}\n leftover: `{:?}`",
+                self.round,
+                self.pairs,
+                self.agg
+            );
+        }
+        if self.pairs.len() == 1 && true == self.agg.is_none() {
+            println!("[info] This is going to be the last round.");
+        }
 
         self.is_round_finished()
     }

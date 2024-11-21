@@ -38,7 +38,10 @@ use jocker::exec::{
     run_docker_job,
 };
 
-use clap::Parser;
+use clap::{
+    Parser, Subcommand
+};
+
 use comms::{
     p2p::{MyBehaviourEvent},
     notice,
@@ -91,14 +94,32 @@ struct Cli {
     #[arg(short, long)]
     dstorage_key_file: Option<String>,
 
-    #[arg(short, long)]
-    job: Option<String>,
 
     #[arg(long, action)]
     dev: bool,
 
     #[arg(short, long)]
     key_file: Option<String>,
+    
+    #[command(subcommand)]
+    job: Option<Commands>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Start a new job
+    New {
+        /// The job file on disk
+        #[arg(short, long)]
+        job_file: String,
+    },
+
+    /// Resume the job
+    Resume {
+        /// The job id
+        #[arg(short, long)]
+        job_id: String,        
+    }
 }
 
 #[async_std::main]
@@ -158,41 +179,21 @@ async fn main() -> anyhow::Result<()> {
     println!("[info] Peer id: `{:?}`", PeerId::from_public_key(&local_key.public()));  
 
     // the job
-    let job_schema: job::Schema = toml::from_str(
-        &fs::read_to_string(cli.job.unwrap())?
-    )?;
-    let job_rec = {
-        let mut segments = Vec::<Segment>::new();                
-        for index in 0..job_schema.prove.num_segments {
-            segments.push(
-                Segment::new(
-                    &format!("segment-{index}"),
-                    &job_schema.prove.segments_cid
-                )
-            );
-        }
-        Recursion::new(        
-            segments
-        )
-    };
+    let mut job = match &cli.job {
+        Some(Commands::New{ job_file }) => new_job(job_file)?,
 
-    let generated_job_id = Uuid::new_v4().simple().to_string()[..4].to_string();
-    let mut job = {           
-        Job {
-            id: generated_job_id.clone(),
-            working_dir: format!("{}/.wholesum/jobs/client/{}",
-                job::get_home_dir()?,
-                generated_job_id
-            ),
-            schema: job_schema,
-            recursion: job_rec,
-        }
+        Some(Commands::Resume{ job_id }) => resume_job(job_id)?,
+
+        _ => {
+            panic!("[warn] Missing command, not sure what to do.");
+        },
     };
+    // create folders for residues
     for action in ["prove", "join", "stark", "snark"] {
         fs::create_dir_all(
             format!("{}/{action}", &job.working_dir)
         )?;
-    }    
+    }
 
     let db_job_id = db_client
         .database("wholesum")
@@ -202,6 +203,7 @@ async fn main() -> anyhow::Result<()> {
             po2: job.schema.prove.po2,
             segments_cid: job.schema.prove.segments_cid.clone(),
             num_segments: job.schema.prove.num_segments,
+            stage: bson::to_bson(&Stage::Prove)?,
             verification: db::Verification {
                 image_id: job.schema.verification.image_id.clone(),
                 journal_blob: Vec::new(),                 
@@ -210,7 +212,7 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?
         .inserted_id;
-    println!("[info] Job's progress will be recorded to the local db, id: `{db_job_id}`");    
+    println!("[info] Job's progress will be recorded to the local db, id: `{db_job_id:?}`");    
 
     // swarm 
     let mut swarm = comms::p2p::setup_swarm(&local_key).await?;
@@ -514,20 +516,44 @@ async fn main() -> anyhow::Result<()> {
                         segment.unwrap().status = SegmentStatus::ProvedAndLifted(
                             verification_res.receipt_cid.clone()
                         );
+                        // push the verified segment to the db
+                        db_client
+                            .database("wholesum")
+                            .collection::<db::Segment>("segments")
+                            .insert_one(
+                                db::Segment {
+                                    id: verification_res.item_id,
+                                    job_id: db_job_id.clone(),
+                                    verified_blob: db::VerifiedBlob {
+                                        cid: verification_res.receipt_cid.clone(),
+                                        blob: verification_res.receipt_blob,
+                                        prover: verification_res.prover_id
+                                    }
+                                }
+                            )
+                            .await?;                            
                         // if all segments are verified, prepare for join
-                        if true == job.recursion.prove_and_lift.segments.iter().all(|some_seg| {
-                            match some_seg.status {
-                                SegmentStatus::ProvedAndLifted(_) => true,
-                                _ => false,
-                            }                        
-                        }) {
+                        if true == job.recursion.prove_and_lift.is_finished() {
                             // begin join
                             println!("[info] All segments are proved and lifted. so, the join stage begins.");
-                            job.recursion.begin_join();                            
+                            job.recursion.begin_join();
+                            // update stage to Join on db
+                            db_client
+                                .database("wholesum")
+                                .collection::<db::Job>("jobs")
+                                .update_one(
+                                    doc! {
+                                        "_id": db_job_id.clone()
+                                    },
+                                    doc! {
+                                        "$set!": doc! {
+                                            "stage": bson::to_bson(&Stage::Join)?,
+                                        }
+                                    }
+                                )
+                            .await?;                              
                             if true == job.recursion.join.begin_next_round() {
-                                // single segmented job is already starked
-                                job.recursion.stage = Stage::Stark;
-                                println!("[info] Join is already complete. Stark receipt is here, let's verify it!");                                
+                                //@ a single segmented job does not need joins
                                 receipt_verification_futures.push(
                                     verify_stark_receipt(
                                         format!("{}/prove/{}",
@@ -537,24 +563,10 @@ async fn main() -> anyhow::Result<()> {
                                         job.schema.verification.journal_file_path.clone(),
                                         job.schema.verification.image_id.clone()
                                     )
-                                );                                
+                                );
                             }
                         }
-                        // record progress to db                         
-                        db_client
-                            .database("wholesum")
-                            .collection::<db::Segment>("segments")
-                            .insert_one(
-                                db::Segment {
-                                    id: verification_res.item_id,
-                                    job_id: db_job_id.clone(),
-                                    verified_blob: db::VerifiedBlob {
-                                        cid: verification_res.receipt_cid,
-                                        blob: verification_res.receipt_blob,
-                                        prover: verification_res.prover_id
-                                    }
-                            })
-                            .await?;
+                        
                     },
 
                     Stage::Join => {
@@ -587,25 +599,27 @@ async fn main() -> anyhow::Result<()> {
                             joined_pair.position,
                             verification_res.receipt_cid.clone()
                         );
-                        // record progress to db
-                        // let db_join_round = 
-                        // db_client
-                        //     .database("wholesum")
-                        //     .collection::<db::JoinRound>("join_rounds")
-                        //     .insert_one(
-                        //         db::JoinRound {
-                        //             job_id: db_job_id.clone(),
-                        //             index: verification_res.item_id.parse::<u32>()?,
-                        //             verified_blob: db::VerifiedBlob {
-                        //                 cid: verification_res.receipt_cid,
-                        //                 blob: verification_res.receipt_blob,
-                        //                 prover: verification_res.prover_id
-                        //             }
-                        //     })
-                        //     .await?;
+                        // record join to db
+                        let db_join_round = 
+                        db_client
+                            .database("wholesum")
+                            .collection::<db::Join>("joins")
+                            .insert_one(
+                                db::Join {
+                                    job_id: db_job_id.clone(),
+                                    round: job.recursion.join.round.try_into().unwrap_or_else(|_| 0u32),
+                                    verified_blob: db::VerifiedBlobForJoin {
+                                        input_cid_left: left_cid,
+                                        input_cid_right: right_cid,
+                                        cid: verification_res.receipt_cid,
+                                        blob: verification_res.receipt_blob,
+                                        prover: verification_res.prover_id
+                                    }
+                            })
+                            .await?;
                         if true == job.recursion.join.is_round_finished() {
                             if true == job.recursion.join.begin_next_round() {
-                                // begin snark extraction
+                                // begin snark extraction?
                                 println!("[info] Join is complete. Stark receipt is here, let's verify it.");
                                 job.recursion.stage = Stage::Stark;
                                 receipt_verification_futures.push(
@@ -635,6 +649,20 @@ async fn main() -> anyhow::Result<()> {
                 };
                 job.recursion.stage = Stage::Stark;
                 println!("[info] Stark receipt has been verified, join aggregation is complete.");
+                // db_client
+                //     .database("wholesum")
+                //     .collection::<db::Job>("jobs")
+                //     .update_one(
+                //         doc! {
+                //             "_id": db_job_id
+                //         },
+                //         doc! {
+                //             "$set!": doc! {
+                //                 "stage": bson::to_bson(&db::Stage::Stark)?,
+                //             }
+                //         }
+                //     )
+                // .await?;  
             },
 
             event = swarm.select_next_some() => match event {
@@ -866,6 +894,86 @@ async fn main() -> anyhow::Result<()> {
             },
         }
     }
+}
+
+pub fn get_home_dir() -> anyhow::Result<String> {
+    let err_msg = "Home dir is not available";
+    let binding = home::home_dir()
+        .ok_or_else(|| anyhow::Error::msg(err_msg))?;
+    let home_dir = binding.to_str()
+        .ok_or_else(|| anyhow::Error::msg(err_msg))?;
+    Ok(home_dir.to_string())
+}
+
+pub fn new_job(
+    job_file: &str
+) -> anyhow::Result<job::Job> {
+    let job_schema: job::Schema = toml::from_str(
+        &fs::read_to_string(job_file)?
+    )?;
+
+    let generated_job_id = Uuid::new_v4().simple().to_string()[..4].to_string();
+    let job_rec = {
+        let mut segments = Vec::<Segment>::new();                
+        for index in 0..job_schema.prove.num_segments {
+            segments.push(
+                Segment::new(
+                    &format!("segment-{index}"),
+                    &job_schema.prove.segments_cid
+                )
+            );
+        }
+        Recursion::new(        
+            segments
+        )
+    };
+    Ok(Job {
+        id: generated_job_id.clone(),
+        working_dir: format!("{}/.wholesum/jobs/client/{}",
+            get_home_dir()?,
+            generated_job_id
+        ),
+        schema: job_schema,
+        recursion: job_rec,
+    })
+}
+
+fn resume_job(
+    job_id: &str
+) -> anyhow::Result<job::Job> {
+    Ok(
+        Job {
+            id: String::from("aloha"),
+            working_dir: String::new(),
+            schema: job::Schema {
+                title: None,
+                timeout: None, 
+                criteria: job::CriteriaConfig {
+                    memory_capacity: None,                        
+                    benchmark_expiry_secs: None,
+                    benchmark_duration_msecs: None,
+                }, 
+                prove: job:: ProveConfig {
+                    po2: 0,
+                    num_segments: 0,
+                    segments_cid: String::new(),
+                },
+                verification: job::VerificationConfig {
+                    journal_file_path: String::new(),
+                    image_id: String::new(),
+                },
+            },
+
+            recursion: recursion::Recursion {
+                stage: Stage::Prove,    
+                prove_and_lift: recursion::ProveAndLift {
+                    segments: vec![],
+                },    
+                join: recursion::Join::new(0),
+                snark: None,
+            } 
+        }
+    )
 }
 
 async fn mongodb_setup(
