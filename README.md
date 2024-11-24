@@ -40,21 +40,6 @@ You would need a job file to engage with the network. Here's a sample job file f
 <pre>
 # schema of a tyipcal job
 
-title = "yet another job"
-timeout = 30
-
-# matching criteria
-[criteria]
-
-# min memory capacity(in gb)
-memory_capacity = 8
-
-# benchmark score/duration(secs)
-benchmark_duration_secs = 10000
-
-# benchmark expiry from now(secs)
-benchmark_expiry_secs = 864000
-
 [prove]
 
 # segments' cid

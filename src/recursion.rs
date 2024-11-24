@@ -100,6 +100,21 @@ pub struct ProveAndLift {
 }
 
 impl ProveAndLift {
+    pub fn new(
+        base_segment_cid: &str,
+        num_segments: usize
+    ) -> Self {
+        ProveAndLift {
+            segments: (0..num_segments).map(
+                |index| 
+                Segment::new(
+                    &format!("segment-{index}"),
+                    base_segment_cid
+                )
+            ).collect()
+        }        
+    }
+    
     pub fn is_finished(
         &self
     ) -> bool {

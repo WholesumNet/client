@@ -1,18 +1,7 @@
 
 use serde::Deserialize;
-use anyhow;
 
 use crate::recursion;
-
-#[derive(Debug, Deserialize)]
-pub struct CriteriaConfig {    
-    // minimum ram capacity(in GB) for an offer to be accepted
-    pub memory_capacity: Option<u32>,
-    
-    pub benchmark_expiry_secs: Option<i64>,
-
-    pub benchmark_duration_msecs: Option<u128>,
-}
 
 #[derive(Debug, Deserialize)]
 pub struct ProveConfig {    
@@ -34,14 +23,7 @@ pub struct VerificationConfig {
 
 // job template as read in(e.g. from disk)
 #[derive(Debug, Deserialize)]
-pub struct Schema {
-    pub title: Option<String>,
-    // in seconds
-    pub timeout: Option<u32>, 
-    
-    // criteria for matching
-    pub criteria: CriteriaConfig, 
-
+pub struct Schema {    
     pub prove: ProveConfig,
     
     pub verification: VerificationConfig,

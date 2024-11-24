@@ -27,6 +27,7 @@ pub struct VerifiedBlob {
 pub struct Segment {
     pub id: String,
 
+    //@ rename to job_oid: ObjectId
     pub job_id: Bson,
 
     // proved, lifted, and verified succinct receipt
@@ -50,7 +51,7 @@ pub struct VerifiedBlobForJoin {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Join {
-    
+    //@ rename and convert to: (job_oid: ObjectId)
     pub job_id: Bson,
 
     pub round: u32,
