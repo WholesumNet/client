@@ -17,7 +17,8 @@ use libp2p::{
     PeerId,
 };
 use std::collections::{
-    HashMap
+    HashMap,
+    BTreeMap,
 };
 use std::{
     fs,
@@ -625,7 +626,6 @@ async fn main() -> anyhow::Result<()> {
                             if true == job.recursion.join.begin_next_round() {
                                 // begin snark extraction?
                                 println!("[info] Join is complete. Stark receipt is here, let's verify it.");
-                                job.recursion.stage = Stage::Stark;
                                 receipt_verification_futures.push(
                                     verify_stark_receipt(
                                         verification_res.receipt_file_path,
@@ -948,20 +948,6 @@ pub fn new_job(
     )?;
 
     let generated_job_id = Uuid::new_v4().simple().to_string()[..4].to_string();
-    let job_rec = {
-        let mut segments = Vec::<Segment>::new();                
-        for index in 0..schema.prove.num_segments {
-            segments.push(
-                Segment::new(
-                    &format!("segment-{index}"),
-                    &schema.prove.segments_cid
-                )
-            );
-        }
-        Recursion::new(        
-            segments
-        )
-    };
     let working_dir = format!(
         "{}/.wholesum/jobs/client/{}",
         get_home_dir()?,
@@ -981,13 +967,17 @@ pub fn new_job(
         fs::create_dir_all(
             format!("{working_dir}/join/r{round}")
         )?;
-    }     
+    } 
+    let rec = recursion::Recursion::new(
+        &schema.prove.segments_cid,
+        schema.prove.num_segments as usize
+    );    
     Ok(
         Job {
             id: generated_job_id.clone(),
             working_dir: working_dir,
             schema: schema,
-            recursion: job_rec,
+            recursion: rec,
         }
     )
         
@@ -1028,14 +1018,14 @@ async fn resume_job(
             format!("{working_dir}/join/r{round}")
         )?;
     }
-    let job = Job {
+    let mut job = Job {
         id: job_id.to_string(),            
         working_dir: working_dir.clone(),
         schema: job::Schema { 
             prove: job:: ProveConfig {
                 po2: db_job.po2,
                 num_segments: db_job.num_segments,
-                segments_cid: db_job.segments_cid,
+                segments_cid: db_job.segments_cid.clone(),
             },
             verification: job::VerificationConfig {
                 journal_file_path: {
@@ -1052,43 +1042,91 @@ async fn resume_job(
 
         recursion: recursion::Recursion {
             stage: Stage::Prove,    
-            prove_and_lift: recursion::ProveAndLift {
-                segments: vec![],
-            },    
+            prove_and_lift: recursion::ProveAndLift::new(
+                &db_job.segments_cid,
+                db_job.num_segments as usize
+            ),    
             join: recursion::Join::new(0),
             snark: None,
         } 
     };
-
+    // prove and lift
     let verified_segments = retrieve_verified_segments_from_db(
-        &col_segments,
+        col_segments,
         db_job_oid,
         &job.working_dir
     ).await?;
-    
-    // let verified_joins = retrieve_verified_joins_from_db(
-    //     job_id.to_string()
-    // ).await?;
-    // let claimed_stage: recursion::Stage = bson::from_bson(db_job.stage)?;
-    // match claimed_stage {
-    //     Stage::Prove => {
-    //         job.recursion.prove_and_lift = verified_segments;
-    //     },
-
-    //     Stage::Join => {
-    //         job.recursion.prove_and_lift = proved_segments;
-    //         job.recursion.join = 
-    //     },
-
-    //     Stage::Stark => {
-
-    //     },
-
-    //     Stage::Snark => {
-
-    //     }
-    // }
-    Ok(job)
+    if verified_segments.len() == 0 {
+        println!("[warn] No verified segments to sync with.");
+        return Ok(job);
+    }
+    // sync segments with the db
+    for db_segment in verified_segments.iter() {
+        if let Some(found_segment) = job
+            .recursion
+            .prove_and_lift
+            .segments
+            .iter_mut()
+            .find(|some_seg| some_seg.id == db_segment.id)
+        {
+            found_segment.status = db_segment.status.clone();
+             println!(
+                "[info] Segment `{}` is synced, status: `{:?}`.",
+                db_segment.id,
+                db_segment.status                    
+            );
+        } else {
+            eprintln!("[warn] Segment with id `{}` from the db is not found.", db_segment.id);
+        }
+    }
+    if true == job.recursion.prove_and_lift.is_finished() {
+        println!("[info] The prove and lift stage is set to finished according to the data from the local db.");
+    }
+    // join
+    let join_btree = retrieve_verified_joins_from_db(
+        col_joins,
+        &verified_segments,
+        db_job_oid,
+        &job.working_dir
+    ).await?;
+    if join_btree.len() == 0 {
+        eprintln!("[warn] No verified joins to sync with.");
+        return Ok(job)
+    }
+    let db_cur_round = join_btree.keys().last().unwrap();
+    // emulate a full join and sync with
+    job.recursion.begin_join();
+    while false == job.recursion.join.begin_next_round() {
+        let round_joins = join_btree
+            .get(&(job.recursion.join.round as u32))
+            .unwrap()
+            .to_owned();
+        for db_join in round_joins {
+            let joined_pair_index = job
+                .recursion
+                .join
+                .pairs
+                .iter()
+                .position(|p| 
+                    p.left == db_join.verified_blob.input_cid_left &&
+                    p.right == db_join.verified_blob.input_cid_right
+                );
+            if true == joined_pair_index.is_none() {
+                eprintln!("[warn] Missing join pair, sync failed.");
+                break;
+            }
+            let joined_pair = job.recursion.join.pairs.swap_remove(joined_pair_index.unwrap());
+            job.recursion.join.joined.insert(
+                joined_pair.position,
+                db_join.verified_blob.cid
+            );            
+        }
+        if job.recursion.join.round as u32 == *db_cur_round {
+            println!("[info] Join is synced with the db.");
+            break;
+        }
+    }
+    Ok(job)    
 }
 
 async fn retrieve_verified_segments_from_db(
@@ -1098,19 +1136,14 @@ async fn retrieve_verified_segments_from_db(
 ) -> anyhow::Result<Vec<recursion::Segment>> {
     let mut segments = Vec::<recursion::Segment>::new();
     // retrieve all proved segments
-    println!("[info] Retrieving proved segments from the db...");
+    println!("[info] Retrieving verified segments from the db...");
     let mut cursor = col_segments.find(
         doc! {
-            "job_id": Bson::ObjectId(job_oid)
+            "job_id": job_oid
         }
     )
     .await?;
-    while let Some(db_segment) = cursor.try_next().await? {
-        println!(
-            "[info] Found segment `{}` with receipt cid of `{}`",
-             db_segment.id,
-             db_segment.verified_blob.cid
-        );
+    while let Some(db_segment) = cursor.try_next().await? {        
         segments.push(
             recursion::Segment {
                 id: db_segment.id.clone(),
@@ -1141,10 +1174,38 @@ async fn retrieve_verified_segments_from_db(
     Ok(segments)
 }
 
-// async fn retrieve_verified_joins_from_db(
-//     job_id: String,
-// ) -> anyhow::Result<Vec<recursion::Segment>> {
-// }
+async fn retrieve_verified_joins_from_db(
+    col_joins: &mongodb::Collection<db::Join>,
+    verified_segments: &Vec<recursion::Segment>,
+    job_oid: ObjectId,
+    working_dir: &str,
+) -> anyhow::Result<BTreeMap<u32, Vec<db::Join>>> {
+    println!("[info] Retrieving proved joins from the db...");
+    let mut cursor = col_joins.find(
+        doc! {
+            "job_id": job_oid
+        }
+    )
+    // .projection(
+    //     doc! {
+    //         "verified_blob": 0
+    //     }
+    // )
+    .sort(
+        doc! {
+            "round": 1 // start from the most recent round
+        }
+    )
+    .await?;
+    let mut join_btree = BTreeMap::<u32, Vec<db::Join>>::new();
+    while let Some(db_join) = cursor.try_next().await? {        
+        join_btree.entry(db_join.round as u32)
+            .and_modify(|j| j.push(db_join.clone()))
+            .or_insert(vec![db_join]);
+    }
+    // emulate
+    Ok(join_btree)
+}
 
 // evaluate the offer:
 //  - sybil, ... checks

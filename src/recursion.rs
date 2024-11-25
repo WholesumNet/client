@@ -62,7 +62,7 @@ pub enum SegmentStatus {
     ProvedAndLifted(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Segment {
     // eg segment-0
     pub id: String,
@@ -240,14 +240,15 @@ pub struct Recursion {
 
 impl Recursion {
     pub fn new(
-        segments: Vec<Segment>,
-    ) -> Recursion {
-        let num_segments = segments.len();
+        base_segment_cid: &str,
+        num_segments: usize
+    ) -> Self {
         Recursion {
             stage: Stage::Prove,
-            prove_and_lift: ProveAndLift {
-                segments: segments,
-            },
+            prove_and_lift: ProveAndLift::new(
+                base_segment_cid,
+                num_segments
+            ),
             join: Join::new(num_segments),
             snark: None,
         }
