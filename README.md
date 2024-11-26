@@ -9,11 +9,11 @@ Wholesum network is a p2p verifiable computing network `tailored for ETH L2 sequ
 
 You would need to get certain environments ready for the client to function properly.
 
-#### 1- Docker
+#### Docker
 
 Docker runtime is needed as it is used to run `Risc0` containers. This awesome [guide](https://www.digitalocean.com/community/tutorials/how-to-install-and-use-docker-on-ubuntu-20-04) from DigitalOcean is helpful in this regard.
 
-### 2- Lighthouse@Filecoin/Swarmy@Swarm
+### Lighthouse@Filecoin/Swarmy@Swarm
 
 - Lighthouse:  
   You would need a subscription plan from [Lighthouse](https://docs.lighthouse.storage/lighthouse-1/quick-start) to run the client. Please obtain an api key and specify it with `-d` flag when running the client.
@@ -21,8 +21,11 @@ Docker runtime is needed as it is used to run `Risc0` containers. This awesome [
 - Swarmy:
   Still under development.
   
+### MongoDB
 
-### 3- Dependencies
+Install the MongoDB from [here](https://www.mongodb.com/docs/manual/tutorial/install-mongodb-community-with-docker/) and make sure a Docker container runs and is listenning on `localhost:27017`
+
+### Library dependencies
 
 To run a client agent, you would first need to fork the following libraries and put them in the parent("..") directory of the client:
 
@@ -32,45 +35,28 @@ To run a client agent, you would first need to fork the following libraries and 
 - [benchmark](https://github.com/WholesumNet/benchmark)
 
 ### The job file
+
 You would need a job file to engage with the network. Here's a sample job file for the SHA example:
 <pre>
 # schema of a tyipcal job
 
-title = "yet another job"
-timeout = 30
+[prove]
 
-# matching criteria
-[criteria]
+# segments' cid
+segments_cid = "bafybeigzlwqexnsbr2euhpgcivtx3ak7dejud6tg7dyiyja522qscdsovi"
 
-# min memory capacity(in gb)
-memory_capacity = 4
+#po2 limit
+po2 = 19
 
-# benchmark score/duration(secs)
-benchmark_duration_secs = 10000
-
-# benchmark expiry from now(secs)
-benchmark_expiry_secs = 864000
-
-[compute]
-
-# docker image run by the server
-docker_image = "rezahsnz/r0-sha:1.0.1"
-
-# command to run, will run as: "sh -c command"
-command = "/home/prince/sha 1>/home/prince/residue/stdout 2>/home/prince/residue/stderr"
+# number of segments
+num_segments = 5
 
 [verification]
 
+journal_file_path = "/foo/journal"
+
 # Risc0 image_id of the "sha example"
-image_id = "BgXFTkDBZcx8VYUJJvRcU1jQDsW9SZddNgFQEdSUwGXihuhhd" 
-
-# minimum number of independent successful verifications
-min_required = 1
-
-[harvest]
-
-# minimum number of verified traces to make the whole job verified and done
-min_verified_traces = 1
+image_id = "f3877c67f872cd6225e9d6038a5b7af0de2c3b5f3b2f27f76a8b09e2230a4f5c"
 </pre>
 
 Save the above content to a file named `simple_job.toml`, and feed it to the CLI with the `-j` flag.
@@ -80,14 +66,17 @@ Save the above content to a file named `simple_job.toml`, and feed it to the CLI
 <pre>
 Wholesum is a P2P verifiable computing marketplace and this program is a CLI for client nodes.
 
-Usage: client [OPTIONS]
+Usage: client [OPTIONS] [COMMAND]
+
+Commands:
+  new     Start a new job
+  resume  Resume the job
+  help    Print this message or the help of the given subcommand(s)
 
 Options:
   -d, --dstorage-key-file <DSTORAGE_KEY_FILE>  
-  -j, --job <JOB>                              
       --dev                                    
   -k, --key-file <KEY_FILE>                    
   -h, --help                                   Print help
   -V, --version                                Print version
-
 </pre>
