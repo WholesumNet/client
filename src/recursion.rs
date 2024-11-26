@@ -178,10 +178,16 @@ impl Join {
         }
     }
 
+    // return value of "true" means join is complete
     pub fn begin_next_round(&mut self) -> bool {
+        if self.pairs.len() > 0 {
+            eprintln!("[warn] Attempting to begin the next join round while the current one is not finished yet.");
+            return false;
+        }
         let mut to_be_joined: Vec<String> = self.joined.values().cloned().collect();
         if to_be_joined.len() == 0 {
             eprintln!("[warn] Nothing is left to join.");
+            return true;
         }
         if let Some(leftover) = &self.agg {
             to_be_joined.push(leftover.clone());
@@ -205,7 +211,7 @@ impl Join {
                 );
             }
         }
-        if false == self.is_round_finished() {
+        if self.pairs.len() > 0 {
             println!("[info] Starting join round `{}`\n pairs: {:#?}\n leftover: `{:?}`",
                 self.round,
                 self.pairs,
@@ -216,10 +222,6 @@ impl Join {
             println!("[info] This is going to be the last round.");
         }
 
-        self.is_round_finished()
-    }
-
-    pub fn is_round_finished(&self) -> bool {
         0 == self.pairs.len()
     }
 }

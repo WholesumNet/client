@@ -197,11 +197,11 @@ async fn main() -> anyhow::Result<()> {
         .collection::<db::Join>("joins");
 
     // the job
-    let mut db_job_id = bson::Bson::Null;
+    let mut db_job_oid = bson::Bson::Null;
     let mut job = match &cli.job {
         Some(Commands::New{ job_file }) => {
             let job = new_job(job_file)?;
-            db_job_id = col_jobs.insert_one(
+            db_job_oid = col_jobs.insert_one(
                 db::Job {
                     id: job.id.clone(),
                     po2: job.schema.prove.po2,
@@ -220,25 +220,26 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?
             .inserted_id;
-            println!("[info] Job's progress will be recorded to the db, id: `{db_job_id:?}`");
+            println!("[info] Job's progress will be recorded to the db, id: `{db_job_oid:?}`");
             job
         },
 
         Some(Commands::Resume{ job_id }) => {
-            resume_job(
+            let (synced_job, joid) = resume_job(
                 &db_client.database("wholesum").collection("jobs"),
                 &col_segments,
                 &col_joins,
                 job_id
             )
-            .await?
+            .await?;
+            db_job_oid = joid;
+            synced_job
         },
 
         _ => {
             panic!("[warn] Missing command, not sure what to do.");
         },
     };     
-
     // futures for mongodb progress saving 
     let mut db_insert_futures = FuturesUnordered::new();
     let mut db_job_update_futures = FuturesUnordered::new();
@@ -285,10 +286,6 @@ async fn main() -> anyhow::Result<()> {
     swarm.listen_on("/ip4/0.0.0.0/tcp/20201".parse()?)?;
     swarm.listen_on("/ip6/::/tcp/20201".parse()?)?;
     swarm.listen_on("/ip6/::/udp/20201/quic-v1".parse()?)?;
-
-
-    // read full lines from stdin
-    // let mut input = io::BufReader::new(io::stdin()).lines().fuse();
 
     let mut timer_peer_discovery = stream::interval(Duration::from_secs(5 * 60)).fuse();
 
@@ -440,8 +437,10 @@ async fn main() -> anyhow::Result<()> {
                     compute::ComputeType::Join => {
                         if job.recursion.stage != Stage::Join {
                             continue;
-                        }
-                        let chosen_pair = job.recursion.join
+                        }                        
+                        let chosen_pair = job
+                            .recursion
+                            .join
                             .pairs
                             .iter_mut()
                             .min_by(|x, y| x.num_prove_deals.cmp(&y.num_prove_deals))
@@ -530,7 +529,7 @@ async fn main() -> anyhow::Result<()> {
                             col_segments.insert_one(
                                 db::Segment {
                                     id: verification_res.item_id,
-                                    job_id: db_job_id.clone(),
+                                    job_id: db_job_oid.clone(),
                                     verified_blob: db::VerifiedBlob {
                                         cid: verification_res.receipt_cid.clone(),
                                         blob: verification_res.receipt_blob,
@@ -549,7 +548,7 @@ async fn main() -> anyhow::Result<()> {
                             db_job_update_futures.push(
                                 col_jobs.update_one(
                                     doc! {
-                                        "_id": db_job_id.clone()
+                                        "_id": db_job_oid.clone()
                                     },
                                     doc! {
                                         "$set": doc! {
@@ -607,10 +606,11 @@ async fn main() -> anyhow::Result<()> {
                             verification_res.receipt_cid.clone()
                         );
                         // record join to db
+                        println!("join round for insert {}", job.recursion.join.round);
                         db_insert_futures.push(
                             col_joins.insert_one(
                                 db::Join {
-                                    job_id: db_job_id.clone(),
+                                    job_id: db_job_oid.clone(),
                                     round: job.recursion.join.round.try_into().unwrap_or_else(|_| 0u32),
                                     verified_blob: db::VerifiedBlobForJoin {
                                         input_cid_left: left_cid,
@@ -622,18 +622,16 @@ async fn main() -> anyhow::Result<()> {
                             })
                             .into_future()
                         );
-                        if true == job.recursion.join.is_round_finished() {
-                            if true == job.recursion.join.begin_next_round() {
-                                // begin snark extraction?
-                                println!("[info] Join is complete. Stark receipt is here, let's verify it.");
-                                receipt_verification_futures.push(
-                                    verify_stark_receipt(
-                                        verification_res.receipt_file_path,
-                                        job.schema.verification.journal_file_path.clone(),
-                                        job.schema.verification.image_id.clone()
-                                    )
-                                );
-                            }
+                        if true == job.recursion.join.begin_next_round() {
+                            // begin snark extraction?
+                            println!("[info] Join is complete. Stark receipt is here, let's verify it.");
+                            receipt_verification_futures.push(
+                                verify_stark_receipt(
+                                    verification_res.receipt_file_path,
+                                    job.schema.verification.journal_file_path.clone(),
+                                    job.schema.verification.image_id.clone()
+                                )
+                            );
                         }                        
                     },
 
@@ -656,7 +654,7 @@ async fn main() -> anyhow::Result<()> {
                 db_job_update_futures.push(
                     col_jobs.update_one(
                         doc! {
-                            "_id": db_job_id.clone()
+                            "_id": db_job_oid.clone()
                         },
                         doc! {
                             "$set": doc! {
@@ -727,7 +725,7 @@ async fn main() -> anyhow::Result<()> {
                     info,
                     ..
                 })) => {
-                    println!("Inbound identify event `{:#?}`", info);
+                    // println!("Inbound identify event `{:#?}`", info);
                     if false == cli.dev {
                         for addr in info.listen_addrs {
                             // if false == addr.iter().any(|item| item == &"127.0.0.1" || item == &"::1"){
@@ -963,7 +961,7 @@ pub fn new_job(
         eprintln!("[warn] Number of segments is 0.");
     }
     let num_rounds = (schema.prove.num_segments as f32).log2().ceil() as u32;
-    for round in 0..(num_rounds - 1) {
+    for round in 0..num_rounds {
         fs::create_dir_all(
             format!("{working_dir}/join/r{round}")
         )?;
@@ -988,7 +986,7 @@ async fn resume_job(
     col_segments: &mongodb::Collection<db::Segment>,
     col_joins: &mongodb::Collection<db::Join>,
     job_id: &str,
-) -> anyhow::Result<job::Job> {
+) -> anyhow::Result<(job::Job, Bson)> {
     println!("[info] Resuming job `{job_id}`");
     let doc = col_jobs_generic
         .find_one(doc! {
@@ -998,8 +996,8 @@ async fn resume_job(
         .ok_or_else(|| anyhow::anyhow!("No such job in db."))?;        
     let db_job_oid = 
         doc.get("_id")
-        .and_then(Bson::as_object_id)
-        .ok_or_else(|| anyhow::anyhow!("`_id` is not available"))?;
+        .ok_or_else(|| anyhow::anyhow!("`_id` is not available"))?
+        .clone();
     println!("[info] Job is found, oid: `{db_job_oid:?}`");
     let db_job: db::Job = bson::from_document(doc)?;
     let working_dir = format!("{}/.wholesum/jobs/client/{}",
@@ -1013,7 +1011,7 @@ async fn resume_job(
         )?;
     }
     let num_rounds = (db_job.num_segments as f32).log2().ceil() as u32;
-    for round in 0..(num_rounds - 1) {
+    for round in 0..num_rounds {
         fs::create_dir_all(
             format!("{working_dir}/join/r{round}")
         )?;
@@ -1053,12 +1051,17 @@ async fn resume_job(
     // prove and lift
     let verified_segments = retrieve_verified_segments_from_db(
         col_segments,
-        db_job_oid,
+        &db_job_oid,
         &job.working_dir
     ).await?;
     if verified_segments.len() == 0 {
         println!("[warn] No verified segments to sync with.");
-        return Ok(job);
+        return Ok(
+            (
+                job,
+                db_job_oid
+            )
+        )
     }
     // sync segments with the db
     for db_segment in verified_segments.iter() {
@@ -1081,26 +1084,48 @@ async fn resume_job(
     }
     if true == job.recursion.prove_and_lift.is_finished() {
         println!("[info] The prove and lift stage is set to finished according to the data from the local db.");
+        job.recursion.begin_join();
+        if true == job.recursion.join.begin_next_round() {
+            println!("[info] Join is already finished.");
+            return Ok(
+                (
+                    job,
+                    db_job_oid
+                )
+            )            
+        }
     }
     // join
     let join_btree = retrieve_verified_joins_from_db(
         col_joins,
         &verified_segments,
-        db_job_oid,
+        &db_job_oid,
         &job.working_dir
     ).await?;
     if join_btree.len() == 0 {
         eprintln!("[warn] No verified joins to sync with.");
-        return Ok(job)
+        return Ok(
+            (
+                job,
+                db_job_oid
+            )
+        )
     }
     let db_cur_round = join_btree.keys().last().unwrap();
-    // emulate a full join and sync with
-    job.recursion.begin_join();
-    while false == job.recursion.join.begin_next_round() {
-        let round_joins = join_btree
+    // println!("db round: {db_cur_round}");    
+    // println!("db rounds: {:?}", join_btree.keys());
+    // emulate a full join and sync with    
+    loop {
+        let round_joins = match join_btree
             .get(&(job.recursion.join.round as u32))
-            .unwrap()
-            .to_owned();
+        {
+            Some(v) => v,
+            None => {
+                println!("no more joins is possible.");
+                break;
+            }
+        };            
+        // println!("r: {}, len: {}", job.recursion.join.round, round_joins.len());
         for db_join in round_joins {
             let joined_pair_index = job
                 .recursion
@@ -1112,26 +1137,35 @@ async fn resume_job(
                     p.right == db_join.verified_blob.input_cid_right
                 );
             if true == joined_pair_index.is_none() {
-                eprintln!("[warn] Missing join pair, sync failed.");
-                break;
+                eprintln!("[warn] Missing join pair, sync may be incomplete.");
+                continue;
             }
+            // println!("removing pair {}-{}", db_join.verified_blob.input_cid_left,db_join.verified_blob.input_cid_right);
             let joined_pair = job.recursion.join.pairs.swap_remove(joined_pair_index.unwrap());
             job.recursion.join.joined.insert(
                 joined_pair.position,
-                db_join.verified_blob.cid
+                db_join.verified_blob.cid.clone()
             );            
         }
-        if job.recursion.join.round as u32 == *db_cur_round {
-            println!("[info] Join is synced with the db.");
+        if true == job.recursion.join.begin_next_round() ||
+           job.recursion.join.round as u32 == *db_cur_round
+        {            
             break;
         }
     }
-    Ok(job)    
+    // println!("{:#?}", job.recursion.join);
+    println!("[info] Join is synced with the db.");
+    Ok(
+        (
+            job,
+            db_job_oid
+        )
+    )    
 }
 
 async fn retrieve_verified_segments_from_db(
     col_segments: &mongodb::Collection<db::Segment>,
-    job_oid: ObjectId,
+    db_job_oid: &Bson,
     working_dir: &str,
 ) -> anyhow::Result<Vec<recursion::Segment>> {
     let mut segments = Vec::<recursion::Segment>::new();
@@ -1139,7 +1173,7 @@ async fn retrieve_verified_segments_from_db(
     println!("[info] Retrieving verified segments from the db...");
     let mut cursor = col_segments.find(
         doc! {
-            "job_id": job_oid
+            "job_id": db_job_oid
         }
     )
     .await?;
@@ -1177,13 +1211,14 @@ async fn retrieve_verified_segments_from_db(
 async fn retrieve_verified_joins_from_db(
     col_joins: &mongodb::Collection<db::Join>,
     verified_segments: &Vec<recursion::Segment>,
-    job_oid: ObjectId,
+    db_job_oid: &Bson,
     working_dir: &str,
 ) -> anyhow::Result<BTreeMap<u32, Vec<db::Join>>> {
-    println!("[info] Retrieving proved joins from the db...");
+    println!("[info] Retrieving verified joins from the db...");
+    // println!("{db_job_oid:?}");
     let mut cursor = col_joins.find(
         doc! {
-            "job_id": job_oid
+            "job_id": db_job_oid
         }
     )
     // .projection(
@@ -1193,12 +1228,13 @@ async fn retrieve_verified_joins_from_db(
     // )
     .sort(
         doc! {
-            "round": 1 // start from the most recent round
+            "round": 1 
         }
     )
     .await?;
     let mut join_btree = BTreeMap::<u32, Vec<db::Join>>::new();
-    while let Some(db_join) = cursor.try_next().await? {        
+    while let Some(db_join) = cursor.try_next().await? {  
+        // println!("{}, {}", db_join.round, db_join.verified_blob.cid);      
         join_btree.entry(db_join.round as u32)
             .and_modify(|j| j.push(db_join.clone()))
             .or_insert(vec![db_join]);
@@ -1413,6 +1449,7 @@ async fn verify_succinct_receipt(
     item_id: String
 ) -> Result<VerificationResult, VerificationError> {    
     let blob_file_path = format!("{residue_path}/{receipt_cid}");
+    println!("dl: {blob_file_path}");
     lighthouse::download_file(
         ds_client,
         &receipt_cid,
