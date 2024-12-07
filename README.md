@@ -19,7 +19,7 @@ Docker runtime is needed as it is used to run `Risc0` containers. This awesome [
 
 #### MongoDB
 
-Install the MongoDB from [here](https://www.mongodb.com/docs/manual/tutorial/install-mongodb-community-with-docker/) and make sure a Docker container runs and is listenning on `localhost:27017`
+Install the MongoDB from [here](https://www.mongodb.com/docs/manual/tutorial/install-mongodb-community-with-docker/). Make sure a Docker container runs and is listenning on `localhost:27017`
 
 #### Decentralized storage
 
