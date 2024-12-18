@@ -27,6 +27,7 @@ bs58 = { version = "0.5.1", features = ["check"]}
 chrono = { version = "0.4.38", features = ["serde"] }
 anyhow = "1.0.86"
 hex = "0.4.3"
+bit-vec = { version = "0.8.0", features = ["serde"] }
 
 risc0-zkvm = { version = "1.1.2", features = ["prove"] }
 

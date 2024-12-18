@@ -8,6 +8,7 @@ use std::{
 use serde::{
     Serialize, Deserialize
 };
+use bit_vec::BitVec;
 
 /*
 verifiable computing is resource hungry, with at least 10x more compute steps
@@ -34,69 +35,13 @@ development stages of a job:
  4. harvest ready
 */
 
-// stages of the recursion process
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Stage {
-    // proving(and lifting) segments
-    Prove,
-
-    // prove & lift is complete, now joining segments
-    Join,
-
-    // join is completed, the receipt is now a stark receipt
-    Stark,
-
-    // extracting the final snark
-    Snark,
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum SegmentStatus {
-    // r0 segment blob is uploaded to dstorage and awaits proving
-    // or is proved but awaits verification, args:
-    //   - cid of the segment on dstorage
-    ProveReady(String),
-
-    // proved(and lifted), and verified blob, args:
-    //   - cid of the succinct receipt on dstorage
-    ProvedAndLifted(String),
-}
-
-#[derive(Debug, Clone)]
-pub struct Segment {
-    // eg segment-0
-    pub id: String,
-
-    // the number of times this segment has been sent for proving. 
-    // used when we need to choose the next prove job in response to a new offer.
-    pub num_prove_deals: u32,
-
-    // per segment status
-    pub status: SegmentStatus,
-
-    // proved(and lifted) segments awaiting verification: <receipt_cid, prover_peer_id>
-    pub to_be_verified: HashMap<String, String>,
-}
-
-impl Segment {
-    pub fn new(
-        id: &str,
-        base_segment_cid: &str,
-    ) -> Self {
-        Segment {
-            id: id.to_string(),
-            num_prove_deals: 0,
-            status: SegmentStatus::ProveReady(
-                format!("{base_segment_cid}/{id}")
-            ),
-            to_be_verified: HashMap::<String, String>::new(),
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct ProveAndLift {
-    pub segments: Vec<Segment>,
+    
+    // <segment-id, <cid, prover>>
+    pub segments: HashMap<u32, HashMap<String, String>>,
+    
+    pub proved_map: BitVec,
 }
 
 impl ProveAndLift {
@@ -105,25 +50,15 @@ impl ProveAndLift {
         num_segments: usize
     ) -> Self {
         ProveAndLift {
-            segments: (0..num_segments).map(
-                |index| 
-                Segment::new(
-                    &format!("segment-{index}"),
-                    base_segment_cid
-                )
-            ).collect()
+            segments: HashMap::<u32, HashMap<String, String>>::new(),
+            proved_map: BitVec::from_elem(num_segments, false)
         }        
     }
     
     pub fn is_finished(
         &self
     ) -> bool {
-        self.segments.iter().all(|some_seg| {
-            match some_seg.status {
-                SegmentStatus::ProvedAndLifted(_) => true,
-                _ => false,            
-            }        
-        })
+       false
     }
 }
 
@@ -226,6 +161,23 @@ impl Join {
     }
 }
 
+// stages of the recursion process
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Stage {
+    
+    // proving(and lifting) segments
+    Prove,
+
+    // prove & lift is complete, now joining segments
+    Join,
+
+    // join is completed, the receipt is now a stark receipt
+    Stark,
+
+    // extracting the final snark
+    Snark,
+}
+
 #[derive(Debug)]
 pub struct Recursion {
     pub stage: Stage,
@@ -263,14 +215,14 @@ impl Recursion {
             eprintln!("[warn] Prove stage must be finished before join begins.");
             return;
         }        
-        let receipts = self.prove_and_lift.segments.iter().map(|some_seg| 
-            if let SegmentStatus::ProvedAndLifted(receipt) = &some_seg.status { 
-                receipt.clone()
-            } else {
-                eprintln!("[warn] `{}`'s status is not proved and lifted.", some_seg.id);
-                String::new()
-            }                    
-        ).collect();
+        let receipts = vec![];//self.prove_and_lift.segments.iter().map(|some_seg| 
+        //     if let SegmentStatus::ProvedAndLifted(receipt) = &some_seg.status { 
+        //         receipt.clone()
+        //     } else {
+        //         eprintln!("[warn] `{}`'s status is not proved and lifted.", some_seg.id);
+        //         String::new()
+        //     }                    
+        // ).collect();
         self.join.initiate(receipts);
         self.stage = Stage::Join;
     }    
