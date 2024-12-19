@@ -46,7 +46,6 @@ pub struct ProveAndLift {
 
 impl ProveAndLift {
     pub fn new(
-        base_segment_cid: &str,
         num_segments: usize
     ) -> Self {
         ProveAndLift {
@@ -194,13 +193,11 @@ pub struct Recursion {
 
 impl Recursion {
     pub fn new(
-        base_segment_cid: &str,
         num_segments: usize
     ) -> Self {
         Recursion {
             stage: Stage::Prove,
             prove_and_lift: ProveAndLift::new(
-                base_segment_cid,
                 num_segments
             ),
             join: Join::new(num_segments),

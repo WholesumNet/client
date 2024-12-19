@@ -1,6 +1,5 @@
 
 use serde::Deserialize;
-use bit_vec::BitVec;
 use crate::recursion;
 
 #[derive(Debug, Deserialize)]
@@ -37,8 +36,6 @@ pub struct Job {
     pub working_dir: String,
    
     pub schema: Schema,
-
-    pub proved_map: BitVec,
 
     pub recursion: recursion::Recursion,
 }

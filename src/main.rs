@@ -63,9 +63,6 @@ use risc0_zkvm::{
 };
 use hex::FromHex;
 
-use bit_vec::BitVec;
-
-
 use mongodb::{
     bson,
     bson::{
@@ -88,7 +85,8 @@ use job::Job;
 
 mod recursion;
 use recursion::{
-    Recursion, Stage, SegmentStatus, Segment
+    Recursion,
+    Stage,
 };
 
 mod db;
@@ -166,13 +164,13 @@ async fn main() -> anyhow::Result<()> {
     let db_client = mongodb_setup("mongodb://localhost:27017").await?;
 
     // future for offer evaluation
-    let mut offer_evaluation_futures = FuturesUnordered::new();
+    // let mut offer_evaluation_futures = FuturesUnordered::new();
 
     // future for local verification of succinct receipts
-    let mut succinct_receipt_verification_futures = FuturesUnordered::new();
+    // let mut succinct_receipt_verification_futures = FuturesUnordered::new();
 
     // future for local verification of receipts
-    let mut receipt_verification_futures = FuturesUnordered::new();
+    // let mut stark_receipt_verification_futures = FuturesUnordered::new();
     
     // local libp2p key 
     let local_key = {
@@ -230,17 +228,17 @@ async fn main() -> anyhow::Result<()> {
             job
         },
 
-        Some(Commands::Resume{ job_id }) => {
-            let (synced_job, joid) = resume_job(
-                &db_client.database("wholesum").collection("jobs"),
-                &col_segments,
-                &col_joins,
-                job_id
-            )
-            .await?;
-            db_job_oid = joid;
-            synced_job
-        },
+        // Some(Commands::Resume{ job_id }) => {
+        //     let (synced_job, joid) = resume_job(
+        //         &db_client.database("wholesum").collection("jobs"),
+        //         &col_segments,
+        //         &col_joins,
+        //         job_id
+        //     )
+        //     .await?;
+        //     db_job_oid = joid;
+        //     synced_job
+        // },
 
         _ => {
             panic!("[warn] Missing command, not sure what to do.");
@@ -248,7 +246,7 @@ async fn main() -> anyhow::Result<()> {
     };     
     // futures for mongodb progress saving 
     let mut db_insert_futures = FuturesUnordered::new();
-    let mut db_job_update_futures = FuturesUnordered::new();
+    // let mut db_job_update_futures = FuturesUnordered::new();
 
     // swarm 
     let mut swarm = comms::p2p::setup_swarm(&local_key).await?;
@@ -347,20 +345,19 @@ async fn main() -> anyhow::Result<()> {
 
                     Stage::Stark | Stage::Snark => continue,    
                 };
-                let notice_need_compute = notice::Notice::Compute(need_compute);                
                 let gossip = &mut swarm.behaviour_mut().gossipsub;
                 // println!("known peers: {:#?}", gossip.all_peers().collect::<Vec<_>>());
                 if let Err(e) = gossip
                 .publish(
                     topic.clone(),
-                    bincode::serialize(&notice_need_compute)?
+                    bincode::serialize(&notice::Notice::Compute(need_compute))?
                 ) {            
                     eprintln!("(gossip) `need compute` publish error: {e:?}");
                 }
                 
-                // need status updates?
+                // need status updates?                
                 let nonce: u8 = rng.gen();
-                let status_update = notice::Notice::StatusUpdate(nonce);
+                let status_update = notice::Notice::UpdateMe(nonce);
                 let gossip = &mut swarm.behaviour_mut().gossipsub;
                 let topic = gossip.topics().nth(0).unwrap(); 
                 if let Err(e) = gossip
@@ -372,293 +369,43 @@ async fn main() -> anyhow::Result<()> {
                 }                
             },
 
-            // offer has been evaluated 
-            eval_res = offer_evaluation_futures.select_next_some() => {
-                let (server_peer_id, offer): (PeerId, compute::Offer) = match eval_res { 
-                    Err(failed) => {
-                        eprintln!("[warn] Evaluation error: {:#?}", failed);
-                        // offer timeouts in server side and evaluation must be requested again
-                        continue;
-                    },
-
-                    Ok(opt) => {
-                        if let None = opt {
-                            println!("[warn] Evaluation not passed.");
-                            continue;
-                        }
-                        opt.unwrap()
-                    },
-                };  
-                println!(
-                    "[info] We have a deal! server `{}` has successfully passed all evaluation checks.",
-                    server_peer_id.to_string()
-                );
-                match offer.compute_type {
-                    compute::ComputeType::ProveAndLift => {
-                        if job.recursion.stage != Stage::Prove {
-                            continue;
-                        }
-                        // segment with the lowest prove deals has the highest priority
-                        let chosen_segment = job.recursion.prove_and_lift
-                            .segments
-                            .iter_mut()
-                            .filter(|some_seg|
-                                if let SegmentStatus::ProveReady(_) = some_seg.status { true } else { false } 
-                            )
-                            .min_by(|x, y| x.num_prove_deals.cmp(&y.num_prove_deals))
-                            .unwrap();                        
-                        let cid = if let SegmentStatus::ProveReady(cid) = &chosen_segment.status { 
-                            cid 
-                        } else { 
-                            eprintln!("[warn] `{}`'s cid is missing.", chosen_segment.id);
-                            continue
-                        };
-                        chosen_segment.num_prove_deals += 1;                           
-                        let _req_id = swarm.behaviour_mut()
-                        .req_resp
-                        .send_request(
-                            &server_peer_id,
-                            notice::Request::ComputeJob(compute::ComputeDetails {
-                                job_id: format!("{}@{}", job.id, chosen_segment.id),
-                                compute_type: compute::ComputeType::ProveAndLift,
-                                input_type: compute::ComputeJobInputType::Prove(
-                                    cid.to_string()
-                                ),
-                            })
-                        );                     
-                    },
-
-                    compute::ComputeType::Join => {
-                        if job.recursion.stage != Stage::Join {
-                            continue;
-                        }                        
-                        let chosen_pair = job
-                            .recursion
-                            .join
-                            .pairs
-                            .iter_mut()
-                            .min_by(|x, y| x.num_prove_deals.cmp(&y.num_prove_deals))
-                            .unwrap();
-                        //@ inc once ensured the req has been sent
-                        chosen_pair.num_prove_deals += 1;                             
-                        let _req_id = swarm.behaviour_mut()
-                        .req_resp
-                        .send_request(
-                            &server_peer_id,
-                            notice::Request::ComputeJob(compute::ComputeDetails {
-                                job_id: format!("{}@{}-{}", job.id, chosen_pair.left, chosen_pair.right),
-                                compute_type: compute::ComputeType::Join,
-                                input_type: compute::ComputeJobInputType::Join(
-                                    chosen_pair.left.clone(),
-                                    chosen_pair.right.clone(),
-                                ),
-                            })
-                        );                                             
-                    },
-
-                    compute::ComputeType::Snark => {
-                        if job.recursion.stage != Stage::Stark {
-                            continue;
-                        }                                         
-                    },
-                }                             
-            },
-
             // succinct receipt's verification has been finished
-            v_res = succinct_receipt_verification_futures.select_next_some() => {                
-                let  verification_res: VerificationResult = match v_res {
-                    Err(failed) => {
-                        let failed: VerificationError = failed;
-                        match job.recursion.stage {
-                            Stage::Prove => {
-                                eprintln!("[warn] Proved receipt(`{}`)'s verification has failed. error: `{}`", 
-                                  failed.item_id,
-                                  failed.err_msg
-                                );                                
-                                if let Some(unverified_segment) = job.recursion.prove_and_lift
-                                .segments.iter_mut()
-                                .find(|some_seg| some_seg.id == failed.item_id) {
-                                    unverified_segment.to_be_verified.remove(&failed.receipt_cid);
-                                } else {
-                                    eprintln!("[warn] Missing unverified segment's data.")
-                                }
-                            },
+            // v_res = succinct_receipt_verification_futures.select_next_some() => {                
+            //     if let Err(failed) = v_res {
+            //         let failed: VerificationError = failed;
+            //         eprintln!("[warn] Proved receipt(`{}`)'s verification has failed. error: `{}`", 
+            //             failed.item_id,
+            //             failed.err_msg
+            //         );
+            //     }
+            // },
 
-                            Stage::Join => {
-                                eprintln!("[warn] Joined receipt(`{}`)'s verification has failed. error: `{:#?}`", 
-                                  failed.item_id,
-                                  failed.err_msg
-                                );
-                                job.recursion.join.to_be_verified.remove(&failed.receipt_cid);
-                            },
+            // v_res = stark_receipt_verification_futures.select_next_some() => {
+            //     let receipt: Receipt = match v_res {
+            //         Err(failed) => {
+            //             //@ which segment/join/...? 
+            //             eprintln!("[warn] Stark receipt's verification has failed. error: `{:#?}`", failed);
+            //             continue;                        
+            //         },
 
-                            _ => {}
-                        }                        
-
-                        continue;                        
-                    },
-
-                    Ok(r) => r
-                };
-                match job.recursion.stage {
-                    Stage::Prove => {
-                        println!(
-                            "[info] Segment's proof is verified! \
-                            segment: `{}`, receipt_cid: `{}`, prover: `{}`",
-                            verification_res.item_id,
-                            verification_res.receipt_cid,
-                            verification_res.prover_id
-                        );
-                        let segment = job.recursion.prove_and_lift.segments.iter_mut()
-                            .find(|x| x.id == verification_res.item_id);
-                        if false == segment.is_some() {
-                            eprintln!("[warn] Segment `{}` is missing.", verification_res.item_id);
-                            continue;
-                        }                
-                        segment.unwrap().status = SegmentStatus::ProvedAndLifted(
-                            verification_res.receipt_cid.clone()
-                        );
-                        // push the verified segment to the db
-                        db_insert_futures.push(
-                            col_segments.insert_one(
-                                db::Segment {
-                                    id: verification_res.item_id,
-                                    job_id: db_job_oid.clone(),
-                                    verified_blob: db::VerifiedBlob {
-                                        cid: verification_res.receipt_cid.clone(),
-                                        blob: verification_res.receipt_blob,
-                                        prover: verification_res.prover_id
-                                    }
-                                }
-                            )
-                            .into_future()
-                        );
-                        // if all segments are verified, prepare for join
-                        if true == job.recursion.prove_and_lift.is_finished() {
-                            // begin join
-                            println!("[info] All segments are proved and lifted. so, the join stage begins.");
-                            job.recursion.begin_join();
-                            // update stage to Join on db
-                            db_job_update_futures.push(
-                                col_jobs.update_one(
-                                    doc! {
-                                        "_id": db_job_oid.clone()
-                                    },
-                                    doc! {
-                                        "$set": doc! {
-                                            "stage": bson::to_bson(&Stage::Join)?,
-                                        }
-                                    }
-                                )
-                                .into_future()
-                            );
-                            if true == job.recursion.join.begin_next_round() {
-                                //@ a single segmented job does not need joins
-                                receipt_verification_futures.push(
-                                    verify_stark_receipt(
-                                        format!("{}/prove/{}",
-                                            job.working_dir,
-                                            verification_res.receipt_cid
-                                        ),
-                                        job.schema.verification.journal_file_path.clone(),
-                                        job.schema.verification.image_id.clone()
-                                    )
-                                );
-                            }
-                        }
-                        
-                    },
-
-                    Stage::Join => {
-                        println!(
-                            "[info] Join's proof is verified! \
-                            pair: `{}`, receipt_cid: `{}`, prover: `{}`",
-                            verification_res.item_id, verification_res.receipt_cid, verification_res.prover_id
-                        );
-                        if false == job.recursion.join.to_be_verified.contains_key(&verification_res.receipt_cid) {
-                            eprintln!("[warn] Missing join receipt.");
-                            continue;
-                        }
-                        let (left_cid, right_cid) = {
-                            let tokens: Vec<&str> = verification_res.item_id.split("-").collect();                               
-                            (
-                                String::from(tokens[0]),
-                                String::from(tokens[1])
-                            )
-                        };
-
-                        let joined_pair_index = job.recursion.join.pairs
-                            .iter()
-                            .position(|p| p.left == left_cid && p.right == right_cid);
-                        if true == joined_pair_index.is_none() {
-                            eprintln!("[warn] Missing join pair.");
-                            continue;
-                        }
-                        let joined_pair = job.recursion.join.pairs.swap_remove(joined_pair_index.unwrap());
-                        job.recursion.join.joined.insert(
-                            joined_pair.position,
-                            verification_res.receipt_cid.clone()
-                        );
-                        // record join to db
-                        println!("join round for insert {}", job.recursion.join.round);
-                        db_insert_futures.push(
-                            col_joins.insert_one(
-                                db::Join {
-                                    job_id: db_job_oid.clone(),
-                                    round: job.recursion.join.round.try_into().unwrap_or_else(|_| 0u32),
-                                    verified_blob: db::VerifiedBlobForJoin {
-                                        input_cid_left: left_cid,
-                                        input_cid_right: right_cid,
-                                        cid: verification_res.receipt_cid,
-                                        blob: verification_res.receipt_blob,
-                                        prover: verification_res.prover_id
-                                    }
-                            })
-                            .into_future()
-                        );
-                        if true == job.recursion.join.begin_next_round() {
-                            // begin snark extraction?
-                            println!("[info] Join is complete. Stark receipt is here, let's verify it.");
-                            receipt_verification_futures.push(
-                                verify_stark_receipt(
-                                    verification_res.receipt_file_path,
-                                    job.schema.verification.journal_file_path.clone(),
-                                    job.schema.verification.image_id.clone()
-                                )
-                            );
-                        }                        
-                    },
-
-                    _ => {},
-                }
-            },
-
-            v_res = receipt_verification_futures.select_next_some() => {
-                let receipt: Receipt = match v_res {
-                    Err(failed) => {
-                        //@ which segment/join/...? 
-                        eprintln!("[warn] Stark receipt's verification has failed. error: `{:#?}`", failed);
-                        continue;                        
-                    },
-
-                    Ok(r) => r
-                };
-                job.recursion.stage = Stage::Stark;
-                println!("[info] Stark receipt has been verified, join aggregation is complete.");
-                db_job_update_futures.push(
-                    col_jobs.update_one(
-                        doc! {
-                            "_id": db_job_oid.clone()
-                        },
-                        doc! {
-                            "$set": doc! {
-                                "stage": bson::to_bson(&Stage::Stark)?,
-                            }
-                        }
-                    )
-                    .into_future()
-                );                
-            },
+            //         Ok(r) => r
+            //     };
+            //     job.recursion.stage = Stage::Stark;
+            //     println!("[info] Stark receipt has been verified, join aggregation is complete.");
+            //     db_job_update_futures.push(
+            //         col_jobs.update_one(
+            //             doc! {
+            //                 "_id": db_job_oid.clone()
+            //             },
+            //             doc! {
+            //                 "$set": doc! {
+            //                     "stage": bson::to_bson(&Stage::Stark)?,
+            //                 }
+            //             }
+            //         )
+            //         .into_future()
+            //     );                
+            // },
 
             res = db_insert_futures.select_next_some() => {
                 match res {
@@ -668,13 +415,13 @@ async fn main() -> anyhow::Result<()> {
                 }                
             },
 
-            res = db_job_update_futures.select_next_some() => {
-                match res {
-                    Err(e) => eprintln!("[warn] Failed to record progress(update) to the db: `{:#?}`", e), 
+            // res = db_job_update_futures.select_next_some() => {
+            //     match res {
+            //         Err(e) => eprintln!("[warn] Failed to record progress(update) to the db: `{:#?}`", e), 
 
-                    Ok(oid) => println!("[info] Progress recorded(update) to the db: `{:?}`", oid)
-                } 
-            },
+            //         Ok(oid) => println!("[info] Progress recorded(update) to the db: `{:?}`", oid)
+            //     } 
+            // },
 
             // libp2p events
             event = swarm.select_next_some() => match event {
@@ -827,70 +574,24 @@ async fn main() -> anyhow::Result<()> {
                     }
                 })) => {                
                     match request {
-                        notice::Request::ComputeOffer(compute_offer) => {
-                            println!("received `compute offer` from server: `{}`, offer: {:#?}", 
-                                server_peer_id, compute_offer);       
-                            offer_evaluation_futures.push(
-                                evaluate_compute_offer(
-                                    &docker_con,
-                                    &ds_client,
-                                    compute_offer,
-                                    server_peer_id
-                                )
-                            );                            
-                        },      
-
-                        notice::Request::UpdateForJobs(new_updates) => {
-                            update_jobs(
+                        notice::Request::Update(new_updates) => {
+                            let mut segment_inserts = update_jobs(
                                 &mut job,
                                 server_peer_id,
                                 new_updates
-                            );
-                            // let stage_str = match job.recursion.stage {
-                            //     Stage::Prove => String::from("prove"),
-                            //     Stage::Join  => format!("join/r{}", job.recursion.join.round),
-                            //     Stage::Stark => String::from("stark"),
-                            //     Stage::Snark => String::from("snark"),
-                            // };
-                            // for verification_item in to_be_locally_verified {
-                            //     succinct_receipt_verification_futures.push(                                    
-                            //         verify_succinct_receipt(
-                            //             &ds_client,
-                            //             format!("{}/{stage_str}", job.working_dir),
-                            //             verification_item.prover_id,
-                            //             verification_item.receipt_cid,
-                            //             verification_item.item_id
-                            //         )
-                            //     );
-                            // }                            
+                            )?;
+                            for db_seg in segment_inserts.iter_mut() {
+                                db_seg.job_id = db_job_oid.clone();
+                                db_insert_futures.push(
+                                    col_segments.insert_one(
+                                        db_seg
+                                    )
+                                    .into_future()
+                                );
+                            }                           
                         },
-
-                        _ => {},
                     }
                 },
-
-                // responses
-                // SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
-                //     peer: server_peer_id,
-                //     message: request_response::Message::Response {
-                //         response,
-                //         ..
-                //     }
-                // })) => {                
-                //     match response {
-                //         // job status update 
-                //         notice::Response::UpdateForJobs(updates) => {
-                //             update_jobs(
-                //                 &jobs,
-                //                 &mut jobs_execution_traces,
-                //                 server_peer_id,
-                //                 &updates,
-                //             );                            
-                //         },
-
-                //         _ => {}
-                //     }
-                // },
 
                 _ => {
                     // println!("{:#?}", event)
@@ -960,7 +661,6 @@ pub fn new_job(
         )?;
     } 
     let rec = recursion::Recursion::new(
-        &schema.prove.segments_cid,
         schema.prove.num_segments as usize
     );    
     Ok(
@@ -974,297 +674,282 @@ pub fn new_job(
         
 }
 
-async fn resume_job(
-    col_jobs_generic: &mongodb::Collection<bson::Document>,
-    col_segments: &mongodb::Collection<db::Segment>,
-    col_joins: &mongodb::Collection<db::Join>,
-    job_id: &str,
-) -> anyhow::Result<(job::Job, Bson)> {
-    println!("[info] Resuming job `{job_id}`");
-    let doc = col_jobs_generic
-        .find_one(doc! {
-            "id": job_id.to_string()
-        })
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("No such job in db."))?;        
-    let db_job_oid = 
-        doc.get("_id")
-        .ok_or_else(|| anyhow::anyhow!("`_id` is not available"))?
-        .clone();
-    println!("[info] Job is found, oid: `{db_job_oid:?}`");
-    let db_job: db::Job = bson::from_document(doc)?;
-    let working_dir = format!("{}/.wholesum/jobs/client/{}",
-        get_home_dir()?,
-        job_id
-    );
-    // create folders for residues
-    for action in ["prove", "stark", "snark"] {
-        fs::create_dir_all(
-            format!("{working_dir}/{action}")
-        )?;
-    }
-    let num_rounds = (db_job.num_segments as f32).log2().ceil() as u32;
-    for round in 0..num_rounds {
-        fs::create_dir_all(
-            format!("{working_dir}/join/r{round}")
-        )?;
-    }
-    let mut job = Job {
-        id: job_id.to_string(),            
-        working_dir: working_dir.clone(),
-        schema: job::Schema { 
-            prove: job:: ProveConfig {
-                po2: db_job.po2,
-                num_segments: db_job.num_segments,
-                segments_cid: db_job.segments_cid.clone(),
-            },
-            verification: job::VerificationConfig {
-                journal_file_path: {
-                    let journal_file_path = format!("{working_dir}/journal");
-                    fs::write(
-                        journal_file_path.clone(),
-                        &db_job.verification.journal_blob
-                    )?;
-                    journal_file_path
-                },
-                image_id: db_job.verification.image_id,
-            },
-        },
+// async fn resume_job(
+//     col_jobs_generic: &mongodb::Collection<bson::Document>,
+//     col_segments: &mongodb::Collection<db::Segment>,
+//     col_joins: &mongodb::Collection<db::Join>,
+//     job_id: &str,
+// ) -> anyhow::Result<(job::Job, Bson)> {
+    // println!("[info] Resuming job `{job_id}`");
+    // let doc = col_jobs_generic
+    //     .find_one(doc! {
+    //         "id": job_id.to_string()
+    //     })
+    //     .await?
+    //     .ok_or_else(|| anyhow::anyhow!("No such job in db."))?;        
+    // let db_job_oid = 
+    //     doc.get("_id")
+    //     .ok_or_else(|| anyhow::anyhow!("`_id` is not available"))?
+    //     .clone();
+    // println!("[info] Job is found, oid: `{db_job_oid:?}`");
+    // let db_job: db::Job = bson::from_document(doc)?;
+    // let working_dir = format!("{}/.wholesum/jobs/client/{}",
+    //     get_home_dir()?,
+    //     job_id
+    // );
+    // // create folders for residues
+    // for action in ["prove", "stark", "snark"] {
+    //     fs::create_dir_all(
+    //         format!("{working_dir}/{action}")
+    //     )?;
+    // }
+    // let num_rounds = (db_job.num_segments as f32).log2().ceil() as u32;
+    // for round in 0..num_rounds {
+    //     fs::create_dir_all(
+    //         format!("{working_dir}/join/r{round}")
+    //     )?;
+    // }
+    // let mut job = Job {
+    //     id: job_id.to_string(),            
+    //     working_dir: working_dir.clone(),
+    //     schema: job::Schema { 
+    //         prove: job:: ProveConfig {
+    //             po2: db_job.po2,
+    //             num_segments: db_job.num_segments,
+    //             segments_cid: db_job.segments_cid.clone(),
+    //         },
+    //         verification: job::VerificationConfig {
+    //             journal_file_path: {
+    //                 let journal_file_path = format!("{working_dir}/journal");
+    //                 fs::write(
+    //                     journal_file_path.clone(),
+    //                     &db_job.verification.journal_blob
+    //                 )?;
+    //                 journal_file_path
+    //             },
+    //             image_id: db_job.verification.image_id,
+    //         },
+    //     },
 
-        recursion: recursion::Recursion {
-            stage: Stage::Prove,    
-            prove_and_lift: recursion::ProveAndLift::new(
-                &db_job.segments_cid,
-                db_job.num_segments as usize
-            ),    
-            join: recursion::Join::new(0),
-            snark: None,
-        } 
-    };
-    // prove and lift
-    let verified_segments = retrieve_verified_segments_from_db(
-        col_segments,
-        &db_job_oid,
-        &job.working_dir
-    ).await?;
-    if verified_segments.len() == 0 {
-        println!("[warn] No verified segments to sync with.");
-        return Ok(
-            (
-                job,
-                db_job_oid
-            )
-        )
-    }
-    // sync segments with the db
-    for db_segment in verified_segments.iter() {
-        if let Some(found_segment) = job
-            .recursion
-            .prove_and_lift
-            .segments
-            .iter_mut()
-            .find(|some_seg| some_seg.id == db_segment.id)
-        {
-            found_segment.status = db_segment.status.clone();
-             println!(
-                "[info] Segment `{}` is synced, status: `{:?}`.",
-                db_segment.id,
-                db_segment.status                    
-            );
-        } else {
-            eprintln!("[warn] Segment with id `{}` from the db is not found.", db_segment.id);
-        }
-    }
-    if true == job.recursion.prove_and_lift.is_finished() {
-        println!("[info] The prove and lift stage is set to finished according to the data from the local db.");
-        job.recursion.begin_join();
-        if true == job.recursion.join.begin_next_round() {
-            println!("[info] Join is already finished.");
-            return Ok(
-                (
-                    job,
-                    db_job_oid
-                )
-            )            
-        }
-    }
-    // join
-    let join_btree = retrieve_verified_joins_from_db(
-        col_joins,
-        &verified_segments,
-        &db_job_oid,
-        &job.working_dir
-    ).await?;
-    if join_btree.len() == 0 {
-        eprintln!("[warn] No verified joins to sync with.");
-        return Ok(
-            (
-                job,
-                db_job_oid
-            )
-        )
-    }
-    let db_cur_round = join_btree.keys().last().unwrap();
-    // println!("db round: {db_cur_round}");    
-    // println!("db rounds: {:?}", join_btree.keys());
-    // emulate a full join and sync with    
-    loop {
-        let round_joins = match join_btree
-            .get(&(job.recursion.join.round as u32))
-        {
-            Some(v) => v,
-            None => {
-                println!("no more joins is possible.");
-                break;
-            }
-        };            
-        // println!("r: {}, len: {}", job.recursion.join.round, round_joins.len());
-        for db_join in round_joins {
-            let joined_pair_index = job
-                .recursion
-                .join
-                .pairs
-                .iter()
-                .position(|p| 
-                    p.left == db_join.verified_blob.input_cid_left &&
-                    p.right == db_join.verified_blob.input_cid_right
-                );
-            if true == joined_pair_index.is_none() {
-                eprintln!("[warn] Missing join pair, sync may be incomplete.");
-                continue;
-            }
-            // println!("removing pair {}-{}", db_join.verified_blob.input_cid_left,db_join.verified_blob.input_cid_right);
-            let joined_pair = job.recursion.join.pairs.swap_remove(joined_pair_index.unwrap());
-            job.recursion.join.joined.insert(
-                joined_pair.position,
-                db_join.verified_blob.cid.clone()
-            );            
-        }
-        if true == job.recursion.join.begin_next_round() ||
-           job.recursion.join.round as u32 == *db_cur_round
-        {            
-            break;
-        }
-    }
-    // println!("{:#?}", job.recursion.join);
-    println!("[info] Join is synced with the db.");
-    Ok(
-        (
-            job,
-            db_job_oid
-        )
-    )    
-}
-
-async fn retrieve_verified_segments_from_db(
-    col_segments: &mongodb::Collection<db::Segment>,
-    db_job_oid: &Bson,
-    working_dir: &str,
-) -> anyhow::Result<Vec<recursion::Segment>> {
-    let mut segments = Vec::<recursion::Segment>::new();
-    // retrieve all proved segments
-    println!("[info] Retrieving verified segments from the db...");
-    let mut cursor = col_segments.find(
-        doc! {
-            "job_id": db_job_oid
-        }
-    )
-    .await?;
-    while let Some(db_segment) = cursor.try_next().await? {        
-        segments.push(
-            recursion::Segment {
-                id: db_segment.id.clone(),
-                num_prove_deals: 0,
-                //@ assume that segments are proved and "verified"
-                status: recursion::SegmentStatus::ProvedAndLifted(
-                    db_segment.verified_blob.cid.clone()
-                ),
-                to_be_verified: {
-                    let mut to_be_verified = HashMap::new();
-                    to_be_verified.insert(
-                        db_segment.verified_blob.cid.clone(),
-                        db_segment.verified_blob.prover
-                    );
-                    to_be_verified
-                },            
-            }
-        );
-        fs::write(
-            format!(
-                "{}/prove/{}",
-                working_dir,
-                db_segment.verified_blob.cid
-            ),
-            &db_segment.verified_blob.blob
-        )?;                
-    }
-    Ok(segments)
-}
-
-async fn retrieve_verified_joins_from_db(
-    col_joins: &mongodb::Collection<db::Join>,
-    verified_segments: &Vec<recursion::Segment>,
-    db_job_oid: &Bson,
-    working_dir: &str,
-) -> anyhow::Result<BTreeMap<u32, Vec<db::Join>>> {
-    println!("[info] Retrieving verified joins from the db...");
-    // println!("{db_job_oid:?}");
-    let mut cursor = col_joins.find(
-        doc! {
-            "job_id": db_job_oid
-        }
-    )
-    // .projection(
-    //     doc! {
-    //         "verified_blob": 0
+    //     recursion: recursion::Recursion {
+    //         stage: Stage::Prove,    
+    //         prove_and_lift: recursion::ProveAndLift::new(
+    //             &db_job.segments_cid,
+    //             db_job.num_segments as usize
+    //         ),    
+    //         join: recursion::Join::new(0),
+    //         snark: None,
+    //     } 
+    // };
+    // // prove and lift
+    // let verified_segments = retrieve_verified_segments_from_db(
+    //     col_segments,
+    //     &db_job_oid,
+    //     &job.working_dir
+    // ).await?;
+    // if verified_segments.len() == 0 {
+    //     println!("[warn] No verified segments to sync with.");
+    //     return Ok(
+    //         (
+    //             job,
+    //             db_job_oid
+    //         )
+    //     )
+    // }
+    // // sync segments with the db
+    // for db_segment in verified_segments.iter() {
+    //     if let Some(found_segment) = job
+    //         .recursion
+    //         .prove_and_lift
+    //         .segments
+    //         .iter_mut()
+    //         .find(|some_seg| some_seg.id == db_segment.id)
+    //     {
+    //         found_segment.status = db_segment.status.clone();
+    //          println!(
+    //             "[info] Segment `{}` is synced, status: `{:?}`.",
+    //             db_segment.id,
+    //             db_segment.status                    
+    //         );
+    //     } else {
+    //         eprintln!("[warn] Segment with id `{}` from the db is not found.", db_segment.id);
     //     }
-    // )
-    .sort(
-        doc! {
-            "round": 1 
-        }
-    )
-    .await?;
-    let mut join_btree = BTreeMap::<u32, Vec<db::Join>>::new();
-    while let Some(db_join) = cursor.try_next().await? {  
-        // println!("{}, {}", db_join.round, db_join.verified_blob.cid);      
-        join_btree.entry(db_join.round as u32)
-            .and_modify(|j| j.push(db_join.clone()))
-            .or_insert(vec![db_join]);
-    }
-    // emulate
-    Ok(join_btree)
-}
+    // }
+    // if true == job.recursion.prove_and_lift.is_finished() {
+    //     println!("[info] The prove and lift stage is set to finished according to the data from the local db.");
+    //     job.recursion.begin_join();
+    //     if true == job.recursion.join.begin_next_round() {
+    //         println!("[info] Join is already finished.");
+    //         return Ok(
+    //             (
+    //                 job,
+    //                 db_job_oid
+    //             )
+    //         )            
+    //     }
+    // }
+    // // join
+    // let join_btree = retrieve_verified_joins_from_db(
+    //     col_joins,
+    //     &verified_segments,
+    //     &db_job_oid,
+    //     &job.working_dir
+    // ).await?;
+    // if join_btree.len() == 0 {
+    //     eprintln!("[warn] No verified joins to sync with.");
+    //     return Ok(
+    //         (
+    //             job,
+    //             db_job_oid
+    //         )
+    //     )
+    // }
+    // let db_cur_round = join_btree.keys().last().unwrap();
+    // // println!("db round: {db_cur_round}");    
+    // // println!("db rounds: {:?}", join_btree.keys());
+    // // emulate a full join and sync with    
+    // loop {
+    //     let round_joins = match join_btree
+    //         .get(&(job.recursion.join.round as u32))
+    //     {
+    //         Some(v) => v,
+    //         None => {
+    //             println!("no more joins is possible.");
+    //             break;
+    //         }
+    //     };            
+    //     // println!("r: {}, len: {}", job.recursion.join.round, round_joins.len());
+    //     for db_join in round_joins {
+    //         let joined_pair_index = job
+    //             .recursion
+    //             .join
+    //             .pairs
+    //             .iter()
+    //             .position(|p| 
+    //                 p.left == db_join.verified_blob.input_cid_left &&
+    //                 p.right == db_join.verified_blob.input_cid_right
+    //             );
+    //         if true == joined_pair_index.is_none() {
+    //             eprintln!("[warn] Missing join pair, sync may be incomplete.");
+    //             continue;
+    //         }
+    //         // println!("removing pair {}-{}", db_join.verified_blob.input_cid_left,db_join.verified_blob.input_cid_right);
+    //         let joined_pair = job.recursion.join.pairs.swap_remove(joined_pair_index.unwrap());
+    //         job.recursion.join.joined.insert(
+    //             joined_pair.position,
+    //             db_join.verified_blob.cid.clone()
+    //         );            
+    //     }
+    //     if true == job.recursion.join.begin_next_round() ||
+    //        job.recursion.join.round as u32 == *db_cur_round
+    //     {            
+    //         break;
+    //     }
+    // }
+    // // println!("{:#?}", job.recursion.join);
+    // println!("[info] Join is synced with the db.");
+    // Ok(
+    //     (
+    //         job,
+    //         db_job_oid
+    //     )
+    // )    
+// }
 
-// evaluate the offer:
-//  - sybil, ... checks
-//  - receipt verification
-//  - timestamp expiry checks
-//  - score/duration checks
-async fn evaluate_compute_offer(
-    _docker_con: &Docker,
-    _ds_client: &reqwest::Client,
-    compute_offer: compute::Offer,
-    server_peer_id: PeerId,
-) -> anyhow::Result<Option<(PeerId, compute::Offer)>> {
-    //@ test for sybils, ... 
-    println!("let's evaluate `{:?}`'s offer.", server_peer_id.to_string());
-    Ok(Some((server_peer_id, compute_offer)))
-}
+// async fn retrieve_verified_segments_from_db(
+//     col_segments: &mongodb::Collection<db::Segment>,
+//     db_job_oid: &Bson,
+//     working_dir: &str,
+// ) -> anyhow::Result<Vec<recursion::Segment>> {
+//     let mut segments = Vec::<recursion::Segment>::new();
+//     // retrieve all proved segments
+//     println!("[info] Retrieving verified segments from the db...");
+//     let mut cursor = col_segments.find(
+//         doc! {
+//             "job_id": db_job_oid
+//         }
+//     )
+//     .await?;
+//     while let Some(db_segment) = cursor.try_next().await? {        
+//         segments.push(
+//             recursion::Segment {
+//                 id: db_segment.id.clone(),
+//                 num_prove_deals: 0,
+//                 //@ assume that segments are proved and "verified"
+//                 status: recursion::SegmentStatus::ProvedAndLifted(
+//                     db_segment.verified_blob.cid.clone()
+//                 ),
+//                 to_be_verified: {
+//                     let mut to_be_verified = HashMap::new();
+//                     to_be_verified.insert(
+//                         db_segment.verified_blob.cid.clone(),
+//                         db_segment.verified_blob.prover
+//                     );
+//                     to_be_verified
+//                 },            
+//             }
+//         );
+//         fs::write(
+//             format!(
+//                 "{}/prove/{}",
+//                 working_dir,
+//                 db_segment.verified_blob.cid
+//             ),
+//             &db_segment.verified_blob.blob
+//         )?;                
+//     }
+//     Ok(segments)
+// }
+
+// async fn retrieve_verified_joins_from_db(
+//     col_joins: &mongodb::Collection<db::Join>,
+//     verified_segments: &Vec<recursion::Segment>,
+//     db_job_oid: &Bson,
+//     working_dir: &str,
+// ) -> anyhow::Result<BTreeMap<u32, Vec<db::Join>>> {
+//     println!("[info] Retrieving verified joins from the db...");
+//     // println!("{db_job_oid:?}");
+//     let mut cursor = col_joins.find(
+//         doc! {
+//             "job_id": db_job_oid
+//         }
+//     )
+//     // .projection(
+//     //     doc! {
+//     //         "verified_blob": 0
+//     //     }
+//     // )
+//     .sort(
+//         doc! {
+//             "round": 1 
+//         }
+//     )
+//     .await?;
+//     let mut join_btree = BTreeMap::<u32, Vec<db::Join>>::new();
+//     while let Some(db_join) = cursor.try_next().await? {  
+//         // println!("{}, {}", db_join.round, db_join.verified_blob.cid);      
+//         join_btree.entry(db_join.round as u32)
+//             .and_modify(|j| j.push(db_join.clone()))
+//             .or_insert(vec![db_join]);
+//     }
+//     // emulate
+//     Ok(join_btree)
+// }
 
 // process bulk status updates
 fn update_jobs(
     job: &mut Job,
     prover_peer_id: PeerId,
     new_updates: Vec<compute::JobUpdate>,
-) {
+) -> anyhow::Result<Vec<db::Segment>> {
+    let mut segment_inserts = vec![];
     for new_update in new_updates {
         let prover_id = prover_peer_id.to_string();
         // println!("[info] Status update for job from `{}`: `{:#?}`",
         //     prover_id, new_update
         // );
 
-        if job.id != job_id {
+        if job.id != new_update.id {
             println!("[warn] Status update for an unknown job `{new_update:?}`, ignored.");
             continue;
         }
@@ -1296,18 +981,27 @@ fn update_jobs(
                             );
                             continue;
                         }
-                        job.recursion.prove_and_lift.proved_map.set(seg_id, true);
+                        job.recursion.prove_and_lift.proved_map.set(seg_id.try_into()?, true);
                         job.recursion.prove_and_lift.segments
                         .entry(seg_id)
                         .and_modify(|seg|{
-                            seg.entry(receipt_cid.to_string())
-                            .and_modify(|u| *u = prover_id.clone())
-                            .or_insert(prover_id.clone());                            
+                            seg.insert(receipt_cid.to_string(), prover_id.clone());
                         })
                         .or_insert(
                             HashMap::from([
                                 (receipt_cid.to_string(), prover_id.clone())
                             ])
+                        );
+                        // db
+                        segment_inserts.push(
+                            db::Segment {
+                                id: seg_id,
+                                job_id: bson::Bson::Null,
+                                proof: db::Proof {
+                                    cid: receipt_cid.to_string(),
+                                    prover: prover_id.clone()
+                                }
+                            }                            
                         );
                     },
 
@@ -1352,7 +1046,8 @@ fn update_jobs(
                 };
             },            
         };
-    }   
+    } 
+    Ok(segment_inserts)  
 }
 
 #[derive(Debug, Clone)]
