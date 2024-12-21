@@ -250,7 +250,7 @@ async fn main() -> anyhow::Result<()> {
 
     // swarm 
     let mut swarm = comms::p2p::setup_swarm(&local_key).await?;
-    let topic = gossipsub::IdentTopic::new("<-- p2p compute bazaar -->");
+    let topic = gossipsub::IdentTopic::new("<-- Wholesum p2p prover bazaar -->");
     let _ = swarm
         .behaviour_mut()
         .gossipsub
@@ -260,12 +260,12 @@ async fn main() -> anyhow::Result<()> {
     if false == cli.dev {
         // get to know bootnodes
         const BOOTNODES: [&str; 1] = [
-            "12D3KooWLVDsEUT8YKMbZf3zTihL3iBGoSyZnewWgpdv9B7if7Sn",
+            "TBD",
         ];
         for peer in &BOOTNODES {
             swarm.behaviour_mut()
                 .kademlia
-                .add_address(&peer.parse()?, "/ip4/80.209.226.9/tcp/20201".parse()?);
+                .add_address(&peer.parse()?, "/ip4/W.X.Y.Z/tcp/20201".parse()?);
         }
         // find myself
         if let Err(e) = 
@@ -273,15 +273,15 @@ async fn main() -> anyhow::Result<()> {
                 .behaviour_mut()
                 .kademlia
                 .bootstrap() {
-            eprintln!("bootstrap failed to initiate: `{:?}`", e);
+            eprintln!("[warn] Failed to bootstrap Kademlia: `{:?}`", e);
 
         } else {
-            println!("self-bootstrap is initiated.");
+            println!("[info] Self-bootstraping is initiated.");
         }
     }
 
     // if let Err(e) = swarm.behaviour_mut().kademlia.bootstrap() {
-    //     eprintln!("failed to initiate bootstrapping: {:#?}", e);
+    //     eprintln!("[warn] Failed to bootstrap Kademlia: `{:?}`", e);
     // }
     
     // listen on all interfaces and whatever port the os assigns
@@ -314,9 +314,9 @@ async fn main() -> anyhow::Result<()> {
 
             // post need compute, and status updates
             () = timer_post_job.select_next_some() => { 
-                let need_compute = match job.recursion.stage {
+                match job.recursion.stage {
                     Stage::Prove => {
-                        compute::NeedCompute {
+                        let need_prove = compute::NeedCompute {
                             job_id: job.id.clone(),
                             budget: 0,
                             compute_type: compute::ComputeType::ProveAndLift(
@@ -328,11 +328,23 @@ async fn main() -> anyhow::Result<()> {
                                     proved_map: job.recursion.prove_and_lift.proved_map.clone(),
                                 }
                             )
+                        };
+                        let gossip = &mut swarm.behaviour_mut().gossipsub;
+                        if let Err(e) = gossip
+                        .publish(
+                            topic.clone(),
+                            bincode::serialize(&notice::Notice::Compute(need_prove))?
+                        ) {            
+                            eprintln!("[warn] Need compute gossip for prove error: `{e:?}`");
                         }
                     },
 
+                    Stage::ProveVerification => {
+
+                    },
+
                     Stage::Join => {
-                        compute::NeedCompute {
+                        let need_join = compute::NeedCompute {
                             job_id: job.id.clone(),
                             budget: 0,
                             compute_type: compute::ComputeType::Join(
@@ -340,21 +352,20 @@ async fn main() -> anyhow::Result<()> {
                                     pairs: vec![],
                                 }
                             )
+                        };
+                        let gossip = &mut swarm.behaviour_mut().gossipsub;
+                        if let Err(e) = gossip
+                        .publish(
+                            topic.clone(),
+                            bincode::serialize(&notice::Notice::Compute(need_join))?
+                        ) {            
+                            eprintln!("[warn] Need compute gossip for `join` error: `{e:?}`");
                         }
                     },
 
                     Stage::Stark | Stage::Snark => continue,    
                 };
-                let gossip = &mut swarm.behaviour_mut().gossipsub;
-                // println!("known peers: {:#?}", gossip.all_peers().collect::<Vec<_>>());
-                if let Err(e) = gossip
-                .publish(
-                    topic.clone(),
-                    bincode::serialize(&notice::Notice::Compute(need_compute))?
-                ) {            
-                    eprintln!("(gossip) `need compute` publish error: {e:?}");
-                }
-                
+                                
                 // need status updates?                
                 let nonce: u8 = rng.gen();
                 let status_update = notice::Notice::UpdateMe(nonce);
@@ -575,7 +586,7 @@ async fn main() -> anyhow::Result<()> {
                 })) => {                
                     match request {
                         notice::Request::Update(new_updates) => {
-                            let mut segment_inserts = update_jobs(
+                            let mut segment_inserts = process_updates(
                                 &mut job,
                                 server_peer_id,
                                 new_updates
@@ -661,7 +672,7 @@ pub fn new_job(
         )?;
     } 
     let rec = recursion::Recursion::new(
-        schema.prove.num_segments as usize
+        schema.prove.num_segments
     );    
     Ok(
         Job {
@@ -735,7 +746,7 @@ pub fn new_job(
     //         stage: Stage::Prove,    
     //         prove_and_lift: recursion::ProveAndLift::new(
     //             &db_job.segments_cid,
-    //             db_job.num_segments as usize
+    //             db_job.num_segments
     //         ),    
     //         join: recursion::Join::new(0),
     //         snark: None,
@@ -936,8 +947,8 @@ pub fn new_job(
 //     Ok(join_btree)
 // }
 
-// process bulk status updates
-fn update_jobs(
+// process status updates
+fn process_updates(
     job: &mut Job,
     prover_peer_id: PeerId,
     new_updates: Vec<compute::JobUpdate>,
@@ -981,7 +992,7 @@ fn update_jobs(
                             );
                             continue;
                         }
-                        job.recursion.prove_and_lift.proved_map.set(seg_id.try_into()?, true);
+                        job.recursion.prove_and_lift.proved_map.set(seg_id.try_into().unwrap(), true);
                         job.recursion.prove_and_lift.segments
                         .entry(seg_id)
                         .and_modify(|seg|{
@@ -992,6 +1003,9 @@ fn update_jobs(
                                 (receipt_cid.to_string(), prover_id.clone())
                             ])
                         );
+                        if true == job.recursion.prove_and_lift.is_proving_finished() {
+                            job.recursion.stage = Stage::ProveVerification;
+                        }
                         // db
                         segment_inserts.push(
                             db::Segment {

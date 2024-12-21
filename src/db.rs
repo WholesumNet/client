@@ -15,7 +15,8 @@ pub struct Verification {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Proof {    
-    
+    //@ how about decoding cids into vec<u8> binary using multibase(cid)
+
     pub cid: String,
 
     // the prover

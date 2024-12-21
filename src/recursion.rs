@@ -38,6 +38,8 @@ development stages of a job:
 #[derive(Debug)]
 pub struct ProveAndLift {
     
+    pub num_segments: u32,
+
     // <segment-id, <cid, prover>>
     pub segments: HashMap<u32, HashMap<String, String>>,
     
@@ -45,26 +47,28 @@ pub struct ProveAndLift {
 }
 
 impl ProveAndLift {
+
     pub fn new(
-        num_segments: usize
+        num_segments: u32
     ) -> Self {
         ProveAndLift {
+            num_segments: num_segments,
             segments: HashMap::<u32, HashMap<String, String>>::new(),
-            proved_map: BitVec::from_elem(num_segments, false)
+            proved_map: BitVec::from_elem(num_segments as usize, false)
         }        
     }
     
-    pub fn is_finished(
+    pub fn is_proving_finished(
         &self
     ) -> bool {
-       false
+       self.num_segments == self.proved_map.len() as u32
     }
 }
 
 #[derive(Debug)]
 pub struct JoinPair {
     // joins are ordered, so use this to preserve consistency
-    pub position: usize,
+    pub position: u32,
 
     pub left: String,
     pub right: String,
@@ -81,9 +85,9 @@ pub struct Join {
     pub pairs: Vec<JoinPair>,
 
     // receipts of the previous round
-    pub joined: BTreeMap<usize, String>,
+    pub joined: BTreeMap<u32, String>,
 
-    // the left over: eg receipts: [0..4] -> pair 1: (0, 1), ..., leftover: (5)
+    // the result and also the left over(in non-final rounds): eg receipts(round1): [0..4] -> pair 1: (0, 1), ..., leftover: (5)
     pub agg: Option<String>,
 
     // map of verification pool: <receipt_cid, prover>
@@ -92,12 +96,12 @@ pub struct Join {
 
 impl Join {
     pub fn new(
-        num_segments: usize
+        num_segments: u32
     ) -> Self {
         Join {
             round: -1,
-            pairs: Vec::<JoinPair>::with_capacity(num_segments),
-            joined: BTreeMap::<usize, String>::new(),
+            pairs: Vec::<JoinPair>::with_capacity(num_segments as usize),
+            joined: BTreeMap::<u32, String>::new(),
             agg: None,
             to_be_verified: HashMap::<String, String>::new(),
         }
@@ -108,7 +112,7 @@ impl Join {
         receipts: Vec<String>,
     ) {
         for i in 0..receipts.len() {
-            self.joined.insert(i, receipts[i].clone());
+            self.joined.insert(i as u32, receipts[i].clone());
         }
     }
 
@@ -137,7 +141,7 @@ impl Join {
                 let pos = if i > 0 { i - 1 } else { i }; 
                 self.pairs.push(
                     JoinPair {
-                        position: pos,
+                        position: pos as u32,
                         left: to_be_joined[i].clone(),
                         right: to_be_joined[i + 1].clone(),
                         num_prove_deals: 0,
@@ -167,6 +171,9 @@ pub enum Stage {
     // proving(and lifting) segments
     Prove,
 
+    // verifying proved(and lifted) segments
+    ProveVerification,
+
     // prove & lift is complete, now joining segments
     Join,
 
@@ -193,7 +200,7 @@ pub struct Recursion {
 
 impl Recursion {
     pub fn new(
-        num_segments: usize
+        num_segments: u32
     ) -> Self {
         Recursion {
             stage: Stage::Prove,
