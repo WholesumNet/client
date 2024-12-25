@@ -1191,7 +1191,6 @@ dependencies = [
  "anyhow",
  "async-std",
  "async-trait",
- "bit-vec",
  "env_logger",
  "futures",
  "libp2p",

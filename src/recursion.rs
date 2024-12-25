@@ -19,16 +19,16 @@ development stages of a job:
  1. segmented(into N items according to r0 po2_limit)
  2. parallel proving aka recursion
     a. prove and lift
-        - N iterations -> N SuccinctReceipts
+        - N iterations -> N proofs(SuccinctReceipt)
     b. join
         btree fashion
-        log2(n) + 1 rounds of join to obtain the final SuccinctReceipt aka stark receip
+        log2(n) + 1 rounds of join to obtain the final proof(SuccinctReceipt) aka the stark proof
         e.g. starting with N = 5 and segments labeled 1-5:
           1: (1, 2) -> 12, (3, 4) -> 34, 5 -> 5
           2: (12, 34) -> 1234, 5 -> 5
-          3: (1234, 5) -> the final stark receipt
+          3: (1234, 5) -> the final stark proof
     c. snark extraction
-        - apply identity_p254 and then compress -> ~300 bytes snark(Receipt)
+        - apply identity_p254 and then compress -> ~300 bytes snark proof
  3. verification
     a. succeeded => harvest ready(verified)
     b. failed => harvest ready(unverified)

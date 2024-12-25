@@ -191,13 +191,13 @@ async fn main() -> anyhow::Result<()> {
 
 
     let col_jobs = db_client
-        .database("wholesum")
+        .database("wholesum_client")
         .collection::<db::Job>("jobs");
     let col_segments = db_client
-        .database("wholesum")
+        .database("wholesum_client")
         .collection::<db::Segment>("segments");
     let col_joins = db_client
-        .database("wholesum")
+        .database("wholesum_client")
         .collection::<db::Join>("joins");
 
     // the job
@@ -228,20 +228,20 @@ async fn main() -> anyhow::Result<()> {
             job
         },
 
-        // Some(Commands::Resume{ job_id }) => {
-        //     let (synced_job, joid) = resume_job(
-        //         &db_client.database("wholesum").collection("jobs"),
-        //         &col_segments,
-        //         &col_joins,
-        //         job_id
-        //     )
-        //     .await?;
-        //     db_job_oid = joid;
-        //     synced_job
-        // },
+        Some(Commands::Resume{ job_id }) => {
+            let (synced_job, joid) = resume_job(
+                &db_client.database("wholesum_client").collection("jobs"),
+                &col_segments,
+                &col_joins,
+                job_id
+            )
+            .await?;
+            db_job_oid = joid;
+            synced_job
+        },
 
         _ => {
-            panic!("[warn] Missing command, not sure what to do.");
+            panic!("[warn] Missing command, not sure what you meant.");
         },
     };     
     // futures for mongodb progress saving 
@@ -325,7 +325,7 @@ async fn main() -> anyhow::Result<()> {
                                     segment_prefix_str: String::from("segment-"),
                                     po2: job.schema.prove.po2 as u8,
                                     num_segments: job.schema.prove.num_segments,
-                                    proved_map: job.recursion.prove_and_lift.proved_map.clone(),
+                                    proved_map: job.recursion.prove_and_lift.proved_map.to_bytes(),
                                 }
                             )
                         };
@@ -685,121 +685,96 @@ pub fn new_job(
         
 }
 
-// async fn resume_job(
-//     col_jobs_generic: &mongodb::Collection<bson::Document>,
-//     col_segments: &mongodb::Collection<db::Segment>,
-//     col_joins: &mongodb::Collection<db::Join>,
-//     job_id: &str,
-// ) -> anyhow::Result<(job::Job, Bson)> {
-    // println!("[info] Resuming job `{job_id}`");
-    // let doc = col_jobs_generic
-    //     .find_one(doc! {
-    //         "id": job_id.to_string()
-    //     })
-    //     .await?
-    //     .ok_or_else(|| anyhow::anyhow!("No such job in db."))?;        
-    // let db_job_oid = 
-    //     doc.get("_id")
-    //     .ok_or_else(|| anyhow::anyhow!("`_id` is not available"))?
-    //     .clone();
-    // println!("[info] Job is found, oid: `{db_job_oid:?}`");
-    // let db_job: db::Job = bson::from_document(doc)?;
-    // let working_dir = format!("{}/.wholesum/jobs/client/{}",
-    //     get_home_dir()?,
-    //     job_id
-    // );
-    // // create folders for residues
-    // for action in ["prove", "stark", "snark"] {
-    //     fs::create_dir_all(
-    //         format!("{working_dir}/{action}")
-    //     )?;
-    // }
-    // let num_rounds = (db_job.num_segments as f32).log2().ceil() as u32;
-    // for round in 0..num_rounds {
-    //     fs::create_dir_all(
-    //         format!("{working_dir}/join/r{round}")
-    //     )?;
-    // }
-    // let mut job = Job {
-    //     id: job_id.to_string(),            
-    //     working_dir: working_dir.clone(),
-    //     schema: job::Schema { 
-    //         prove: job:: ProveConfig {
-    //             po2: db_job.po2,
-    //             num_segments: db_job.num_segments,
-    //             segments_cid: db_job.segments_cid.clone(),
-    //         },
-    //         verification: job::VerificationConfig {
-    //             journal_file_path: {
-    //                 let journal_file_path = format!("{working_dir}/journal");
-    //                 fs::write(
-    //                     journal_file_path.clone(),
-    //                     &db_job.verification.journal_blob
-    //                 )?;
-    //                 journal_file_path
-    //             },
-    //             image_id: db_job.verification.image_id,
-    //         },
-    //     },
+async fn resume_job(
+    col_jobs_generic: &mongodb::Collection<bson::Document>,
+    col_segments: &mongodb::Collection<db::Segment>,
+    col_joins: &mongodb::Collection<db::Join>,
+    job_id: &str,
+) -> anyhow::Result<(job::Job, Bson)> {
+    println!("[info] Resuming job `{job_id}`");
+    let doc = col_jobs_generic
+        .find_one(doc! {
+            "id": job_id.to_string()
+        })
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("No such job in db."))?;        
+    let db_job_oid = 
+        doc.get("_id")
+        .ok_or_else(|| anyhow::anyhow!("`_id` is not available"))?
+        .clone();
+    println!("[info] Job is found, oid: `{db_job_oid:?}`");
+    let db_job: db::Job = bson::from_document(doc)?;
+    let working_dir = format!("{}/.wholesum/jobs/client/{}",
+        get_home_dir()?,
+        job_id
+    );
+    // create folders for residues
+    for action in ["prove", "stark", "snark"] {
+        fs::create_dir_all(
+            format!("{working_dir}/{action}")
+        )?;
+    }
+    let num_rounds = (db_job.num_segments as f32).log2().ceil() as u32;
+    for round in 0..num_rounds {
+        fs::create_dir_all(
+            format!("{working_dir}/join/r{round}")
+        )?;
+    }
+    let mut job = Job {
+        id: job_id.to_string(),            
+        working_dir: working_dir.clone(),
+        schema: job::Schema { 
+            prove: job:: ProveConfig {
+                po2: db_job.po2,
+                num_segments: db_job.num_segments,
+                segments_cid: db_job.segments_cid.clone(),
+            },
+            verification: job::VerificationConfig {
+                journal_file_path: {
+                    let journal_file_path = format!("{working_dir}/journal");
+                    fs::write(
+                        journal_file_path.clone(),
+                        &db_job.verification.journal_blob
+                    )?;
+                    journal_file_path
+                },
+                image_id: db_job.verification.image_id,
+            },
+        },
 
-    //     recursion: recursion::Recursion {
-    //         stage: Stage::Prove,    
-    //         prove_and_lift: recursion::ProveAndLift::new(
-    //             &db_job.segments_cid,
-    //             db_job.num_segments
-    //         ),    
-    //         join: recursion::Join::new(0),
-    //         snark: None,
-    //     } 
-    // };
-    // // prove and lift
-    // let verified_segments = retrieve_verified_segments_from_db(
-    //     col_segments,
-    //     &db_job_oid,
-    //     &job.working_dir
-    // ).await?;
-    // if verified_segments.len() == 0 {
-    //     println!("[warn] No verified segments to sync with.");
-    //     return Ok(
-    //         (
-    //             job,
-    //             db_job_oid
-    //         )
-    //     )
-    // }
-    // // sync segments with the db
-    // for db_segment in verified_segments.iter() {
-    //     if let Some(found_segment) = job
-    //         .recursion
-    //         .prove_and_lift
-    //         .segments
-    //         .iter_mut()
-    //         .find(|some_seg| some_seg.id == db_segment.id)
-    //     {
-    //         found_segment.status = db_segment.status.clone();
-    //          println!(
-    //             "[info] Segment `{}` is synced, status: `{:?}`.",
-    //             db_segment.id,
-    //             db_segment.status                    
-    //         );
-    //     } else {
-    //         eprintln!("[warn] Segment with id `{}` from the db is not found.", db_segment.id);
-    //     }
-    // }
-    // if true == job.recursion.prove_and_lift.is_finished() {
-    //     println!("[info] The prove and lift stage is set to finished according to the data from the local db.");
-    //     job.recursion.begin_join();
-    //     if true == job.recursion.join.begin_next_round() {
-    //         println!("[info] Join is already finished.");
-    //         return Ok(
-    //             (
-    //                 job,
-    //                 db_job_oid
-    //             )
-    //         )            
-    //     }
-    // }
-    // // join
+        recursion: recursion::Recursion::new(db_job.num_segments)
+    };
+    // prove stage(segments)
+    let segments = retrieve_segments_from_db(
+        col_segments,
+        &db_job_oid,
+    ).await?;
+    if segments.len() == 0 {
+        println!("[warn] No segments to sync with.");
+        return Ok(
+            (
+                job,
+                db_job_oid
+            )
+        )
+    }
+    for seg_id in segments.keys() {
+        job.recursion.prove_and_lift.proved_map.set(*seg_id as usize, true);
+    }
+    if true == job.recursion.prove_and_lift.is_proving_finished() {
+        job.recursion.stage = Stage::ProveVerification;                
+        // job.recursion.begin_join();
+        // if true == job.recursion.join.begin_next_round() {
+        //     println!("[info] Join is already finished.");
+        //     return Ok(
+        //         (
+        //             job,
+        //             db_job_oid
+        //         )
+        //     )            
+        // }
+    }
+    // join
     // let join_btree = retrieve_verified_joins_from_db(
     //     col_joins,
     //     &verified_segments,
@@ -857,60 +832,42 @@ pub fn new_job(
     //         break;
     //     }
     // }
-    // // println!("{:#?}", job.recursion.join);
+    // println!("{:#?}", job.recursion.join);
     // println!("[info] Join is synced with the db.");
-    // Ok(
-    //     (
-    //         job,
-    //         db_job_oid
-    //     )
-    // )    
-// }
+    Ok(
+        (
+            job,
+            db_job_oid
+        )
+    )    
+}
 
-// async fn retrieve_verified_segments_from_db(
-//     col_segments: &mongodb::Collection<db::Segment>,
-//     db_job_oid: &Bson,
-//     working_dir: &str,
-// ) -> anyhow::Result<Vec<recursion::Segment>> {
-//     let mut segments = Vec::<recursion::Segment>::new();
-//     // retrieve all proved segments
-//     println!("[info] Retrieving verified segments from the db...");
-//     let mut cursor = col_segments.find(
-//         doc! {
-//             "job_id": db_job_oid
-//         }
-//     )
-//     .await?;
-//     while let Some(db_segment) = cursor.try_next().await? {        
-//         segments.push(
-//             recursion::Segment {
-//                 id: db_segment.id.clone(),
-//                 num_prove_deals: 0,
-//                 //@ assume that segments are proved and "verified"
-//                 status: recursion::SegmentStatus::ProvedAndLifted(
-//                     db_segment.verified_blob.cid.clone()
-//                 ),
-//                 to_be_verified: {
-//                     let mut to_be_verified = HashMap::new();
-//                     to_be_verified.insert(
-//                         db_segment.verified_blob.cid.clone(),
-//                         db_segment.verified_blob.prover
-//                     );
-//                     to_be_verified
-//                 },            
-//             }
-//         );
-//         fs::write(
-//             format!(
-//                 "{}/prove/{}",
-//                 working_dir,
-//                 db_segment.verified_blob.cid
-//             ),
-//             &db_segment.verified_blob.blob
-//         )?;                
-//     }
-//     Ok(segments)
-// }
+async fn retrieve_segments_from_db(
+    col_segments: &mongodb::Collection<db::Segment>,
+    db_job_oid: &Bson,
+) -> anyhow::Result<HashMap<u32, HashMap<String, String>>> {
+    // retrieve all proved segments
+    println!("[info] Retrieving segments from the db...");
+    let mut cursor = col_segments.find(
+        doc! {
+            "job_id": db_job_oid
+        }
+    )
+    .await?;
+    let mut segments = HashMap::<u32, HashMap<String, String>>::new();
+    while let Some(db_segment) = cursor.try_next().await? {        
+        segments.entry(db_segment.id)
+        .and_modify(|v| {
+            v.insert(db_segment.proof.cid.clone(), db_segment.proof.prover.clone());
+        })
+        .or_insert_with(|| {
+            HashMap::from([
+                (db_segment.proof.cid, db_segment.proof.prover)
+            ])
+        });
+    }
+    Ok(segments)
+}
 
 // async fn retrieve_verified_joins_from_db(
 //     col_joins: &mongodb::Collection<db::Join>,
@@ -956,9 +913,6 @@ fn process_updates(
     let mut segment_inserts = vec![];
     for new_update in new_updates {
         let prover_id = prover_peer_id.to_string();
-        // println!("[info] Status update for job from `{}`: `{:#?}`",
-        //     prover_id, new_update
-        // );
 
         if job.id != new_update.id {
             println!("[warn] Status update for an unknown job `{new_update:?}`, ignored.");
@@ -986,13 +940,14 @@ fn process_updates(
                             continue;
                         }
                         if seg_id >= job.schema.prove.num_segments {
-                            eprintln!("[warn] Invalid id `{}` for segment prove, valid range: `0 - {}`",
+                            eprintln!(
+                                "[warn] Invalid segment id `{}`, valid range: `0 - {}`",
                                 seg_id,
                                 job.schema.prove.num_segments
                             );
                             continue;
                         }
-                        job.recursion.prove_and_lift.proved_map.set(seg_id.try_into().unwrap(), true);
+                        job.recursion.prove_and_lift.proved_map.set(seg_id as usize, true);
                         job.recursion.prove_and_lift.segments
                         .entry(seg_id)
                         .and_modify(|seg|{
@@ -1019,7 +974,7 @@ fn process_updates(
                         );
                     },
 
-                    compute::Item::Join => {
+                    compute::Item::Join(_left, _right) => {
                         // if job.recursion.stage != Stage::Join { 
                         //     continue;
                         // }                        
