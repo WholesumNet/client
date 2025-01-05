@@ -17,9 +17,9 @@ proving.
 development stages of a job:
  0. created 
  1. segmented(into N items according to r0 po2_limit)
- 2. parallel proving aka recursion
+ 2. parallel proving via recursion
     a. prove and lift
-        - N iterations -> N proofs(SuccinctReceipt)
+        - N segments -> N proofs(SuccinctReceipt)
     b. join
         btree fashion
         log2(n) + 1 rounds of join to obtain the final proof(SuccinctReceipt) aka the stark proof
@@ -29,39 +29,58 @@ development stages of a job:
           3: (1234, 5) -> the final stark proof
     c. snark extraction
         - apply identity_p254 and then compress -> ~300 bytes snark proof
- 3. verification
-    a. succeeded => harvest ready(verified)
-    b. failed => harvest ready(unverified)
- 4. harvest ready
 */
 
 #[derive(Debug)]
-pub struct ProveAndLift {
-    
+pub struct Proof {    
+    pub prover: String,
+    pub filepath: Option<String>
+}
+
+#[derive(Debug)]
+pub struct ProveAndLift {    
     pub num_segments: u32,
 
-    // <segment-id, <cid, prover>>
-    pub segments: HashMap<u32, HashMap<String, String>>,
+    // <segment-id, <cid, proof>>
+    pub proofs: HashMap<u32, HashMap<String, Proof>>,
     
+    // each segment is represented by one bit: "true" => proved, "false" => not proved yet
     pub proved_map: BitVec,
 }
 
 impl ProveAndLift {
-
     pub fn new(
         num_segments: u32
     ) -> Self {
         ProveAndLift {
             num_segments: num_segments,
-            segments: HashMap::<u32, HashMap<String, String>>::new(),
+            proofs: HashMap::<u32, HashMap<String, Proof>>::new(),
             proved_map: BitVec::from_elem(num_segments as usize, false)
-        }        
+        }
     }
     
     pub fn is_proving_finished(
         &self
     ) -> bool {
        self.num_segments == self.proved_map.len() as u32
+    }
+
+    pub fn are_all_proofs_donwloaded(
+        &self
+    ) -> bool {
+        if self.num_segments != self.proofs.len() as u32{
+            return false;        
+        }
+        // all segments should have at least one proof on disk
+        self.proofs
+        .values()
+        .all(|proofs| 
+            proofs
+            .values()
+            .any(|proof|
+                true == proof.filepath.is_some()
+            )
+        )
     }
 }
 
@@ -177,7 +196,10 @@ pub enum Stage {
     // prove & lift is complete, now joining segments
     Join,
 
-    // join is completed, the receipt is now a stark receipt
+    // verifying joined proofs
+    JoinVerification,
+
+    // join is completed and the stark proof is ready
     Stark,
 
     // extracting the final snark
@@ -212,6 +234,18 @@ impl Recursion {
         }
     }
 
+    pub fn begin_prove_verification(&mut self) {
+        if self.stage != Stage::Prove {
+            eprintln!("[warn] Stage must be `Prove` to initiate verification.");
+            return;            
+        }
+        if false == self.prove_and_lift.is_proving_finished() {
+            eprintln!("[warn] All segments must be proved before verification.");
+            return;
+        }
+        self.stage = Stage::ProveVerification;
+    }
+
     pub fn begin_join(
         &mut self
     ) {
@@ -219,7 +253,8 @@ impl Recursion {
             eprintln!("[warn] Prove stage must be finished before join begins.");
             return;
         }        
-        let receipts = vec![];//self.prove_and_lift.segments.iter().map(|some_seg| 
+        let receipts = vec![];
+        //self.prove_and_lift.segments.iter().map(|some_seg| 
         //     if let SegmentStatus::ProvedAndLifted(receipt) = &some_seg.status { 
         //         receipt.clone()
         //     } else {

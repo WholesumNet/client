@@ -18,7 +18,6 @@ use libp2p::{
 };
 use std::collections::{
     HashMap,
-    BTreeMap,
 };
 use std::{
     fs,
@@ -26,7 +25,6 @@ use std::{
         Instant, 
         Duration,
     },
-    path::PathBuf,
     future::IntoFuture,
 };
 use rand::Rng;
@@ -37,12 +35,6 @@ use toml;
 use tracing_subscriber::EnvFilter;
 use anyhow;
 use reqwest;
-
-use bollard::Docker;
-use jocker::exec::{
-    // import_docker_image,
-    run_docker_job,
-};
 
 use clap::{
     Parser, Subcommand
@@ -68,14 +60,12 @@ use mongodb::{
     bson::{
         Bson,
         doc,
-        oid::ObjectId
     },
     options::{
         ClientOptions,
         ServerApi,
         ServerApiVersion
     },
-    Client
 };
 
 use dstorage::lighthouse;
@@ -84,10 +74,7 @@ mod job;
 use job::Job;
 
 mod recursion;
-use recursion::{
-    Recursion,
-    Stage,
-};
+use recursion::Stage;
 
 mod db;
 
@@ -155,11 +142,6 @@ async fn main() -> anyhow::Result<()> {
         .timeout(Duration::from_secs(60)) //@ how much timeout is enough?
         .build()?;
 
-    // setup docker
-    println!("[info] Connecting to the Docker daemon...");
-    let docker_con = Docker::connect_with_socket_defaults()?;
-    println!("[info] Docker daemon handle is up and ready.");
-
     // setup mongodb
     let db_client = mongodb_setup("mongodb://localhost:27017").await?;
 
@@ -171,6 +153,8 @@ async fn main() -> anyhow::Result<()> {
 
     // future for local verification of receipts
     // let mut stark_receipt_verification_futures = FuturesUnordered::new();
+
+    let mut download_proof_futures = FuturesUnordered::new();
     
     // local libp2p key 
     let local_key = {
@@ -201,7 +185,7 @@ async fn main() -> anyhow::Result<()> {
         .collection::<db::Join>("joins");
 
     // the job
-    let mut db_job_oid = bson::Bson::Null;
+    let db_job_oid;
     let mut job = match &cli.job {
         Some(Commands::New{ job_file }) => {
             let job = new_job(job_file)?;
@@ -246,7 +230,6 @@ async fn main() -> anyhow::Result<()> {
     };     
     // futures for mongodb progress saving 
     let mut db_insert_futures = FuturesUnordered::new();
-    // let mut db_job_update_futures = FuturesUnordered::new();
 
     // swarm 
     let mut swarm = comms::p2p::setup_swarm(&local_key).await?;
@@ -291,9 +274,13 @@ async fn main() -> anyhow::Result<()> {
     swarm.listen_on("/ip6/::/tcp/20201".parse()?)?;
     swarm.listen_on("/ip6/::/udp/20201/quic-v1".parse()?)?;
 
+    // used for networking
     let mut timer_peer_discovery = stream::interval(Duration::from_secs(5 * 60)).fuse();
-
+    // used for posting job needs
     let mut timer_post_job = stream::interval(Duration::from_secs(10)).fuse();
+    // used for downloading proofs from dStorage
+    let mut timer_download_proof = stream::interval(Duration::from_secs(15)).fuse();
+
     // gossip messages are content-addressed, so we add a random nounce to each message
     let mut rng = rand::thread_rng();
     // kick it off
@@ -312,7 +299,7 @@ async fn main() -> anyhow::Result<()> {
                     .get_closest_peers(random_peer_id);
             },
 
-            // post need compute, and status updates
+            // post need compute and status updates
             () = timer_post_job.select_next_some() => { 
                 match job.recursion.stage {
                     Stage::Prove => {
@@ -339,10 +326,6 @@ async fn main() -> anyhow::Result<()> {
                         }
                     },
 
-                    Stage::ProveVerification => {
-
-                    },
-
                     Stage::Join => {
                         let need_join = compute::NeedCompute {
                             job_id: job.id.clone(),
@@ -363,7 +346,7 @@ async fn main() -> anyhow::Result<()> {
                         }
                     },
 
-                    Stage::Stark | Stage::Snark => continue,    
+                    _ => (),    
                 };
                                 
                 // need status updates?                
@@ -378,6 +361,76 @@ async fn main() -> anyhow::Result<()> {
                 ) {                
                     eprintln!("`status update` publish error: {e:?}");
                 }                
+            },
+
+            () = timer_download_proof.select_next_some() => {
+                match job.recursion.stage {
+                    Stage::Prove | Stage::ProveVerification => {
+                        // max concurrent download size is 32
+                        if download_proof_futures.len() >= 32 {
+                            continue;
+                        }
+                        // <segment-id, <cid, proof>>
+                        // pub proofs: HashMap<u32, HashMap<String, Proof>>,
+                        for (seg_id, proofs) in &job.recursion.prove_and_lift.proofs {
+                            for (cid, proof) in proofs {
+                                if true == proof.filepath.is_some() {
+                                    continue;
+                                }
+                                
+                                download_proof_futures.push(
+                                    download_proof(
+                                        &ds_client,
+                                        cid.clone(),
+                                        format!("{}/prove/{seg_id}-{cid}.proof", job.working_dir),
+                                        format!("{seg_id}") //@ inefficient as we have to cast to string
+                                    )
+                                );                                
+                            }
+                        }
+                    },
+
+                    Stage::Join | Stage::JoinVerification => {},  
+                    
+                    _ =>  (),  
+                }                
+            },
+
+            // proof is downloaded
+            dl_res = download_proof_futures.select_next_some() => {
+                if let Err(failed) = dl_res {
+                    eprintln!("[warn] Failed to download the proof: `{failed:?}`");
+                    continue;
+                }
+                let downloaded_proof: DownloadedProof = dl_res.unwrap();
+                //@ what if it's a mistimed proof? ie it's for the prove stage but we're in the join stage
+                match job.recursion.stage {
+                    Stage::Prove | Stage::ProveVerification => {
+                        let seg_id = match u32::from_str_radix(&downloaded_proof.item_id, 10) {
+                            Err(_) => {
+                                eprintln!("[warn] Mis-timed download: `{:?}`", downloaded_proof);
+                                continue;
+                            },
+
+                            Ok(seg_id) => seg_id,                            
+                        };
+                        job.recursion.prove_and_lift.proofs
+                        .get_mut(&seg_id)
+                        .unwrap()
+                        .get_mut(&downloaded_proof.cid)
+                        .unwrap()
+                        .filepath = Some(downloaded_proof.filepath);
+
+                        if true == job.recursion.prove_and_lift.are_all_proofs_donwloaded() {
+                            // composition begins!
+                        }
+                    },
+
+                    Stage::Join | Stage::JoinVerification => {},
+
+                    _ => {},
+
+                }
             },
 
             // succinct receipt's verification has been finished
@@ -947,19 +1000,32 @@ fn process_updates(
                             );
                             continue;
                         }
+                        //@ need to validate received proof somehow
                         job.recursion.prove_and_lift.proved_map.set(seg_id as usize, true);
-                        job.recursion.prove_and_lift.segments
+                        job.recursion.prove_and_lift.proofs
                         .entry(seg_id)
-                        .and_modify(|seg|{
-                            seg.insert(receipt_cid.to_string(), prover_id.clone());
+                        .and_modify(|seg| {
+                            seg.insert(
+                                receipt_cid.to_string(),
+                                recursion::Proof {
+                                    prover: prover_id.clone(),
+                                    filepath: None
+                                }
+                            );
                         })
                         .or_insert(
                             HashMap::from([
-                                (receipt_cid.to_string(), prover_id.clone())
+                                (
+                                    receipt_cid.to_string(), 
+                                    recursion::Proof {
+                                        prover: prover_id.clone(),
+                                        filepath: None
+                                    }
+                                )
                             ])
                         );
                         if true == job.recursion.prove_and_lift.is_proving_finished() {
-                            job.recursion.stage = Stage::ProveVerification;
+                            job.recursion.begin_prove_verification();
                         }
                         // db
                         segment_inserts.push(
@@ -1017,6 +1083,44 @@ fn process_updates(
         };
     } 
     Ok(segment_inserts)  
+}
+
+
+#[derive(Debug)]
+struct DownloadProofError {
+    pub cid: String,
+    pub item_id: String,
+    pub err_msg: String,
+}
+
+#[derive(Debug)]
+struct DownloadedProof {
+    pub cid: String,
+    pub item_id: String,
+    pub filepath: String,
+}
+
+async fn download_proof(
+    ds_client: &reqwest::Client,
+    cid: String,
+    filepath: String,
+    item_id: String,
+) -> anyhow::Result<DownloadedProof, DownloadProofError> {
+    lighthouse::download_file(
+        ds_client,
+        &cid,
+        filepath.clone()
+    ).await
+    .map_err(|e| DownloadProofError {
+        cid: cid.clone(),
+        item_id: item_id.clone(),
+        err_msg: format!("Proof download error: `{}`",  e.to_string())
+    })?;
+    Ok(DownloadedProof {
+        cid: cid,
+        item_id: item_id,
+        filepath: filepath
+    })
 }
 
 #[derive(Debug, Clone)]
