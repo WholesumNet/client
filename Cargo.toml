@@ -17,7 +17,6 @@ clap = { version = "4.3.21", features = ["derive"] }
 uuid = { version = "1.4.1", features = ["v4", "fast-rng", "macro-diagnostics"] }
 home = "0.5.5"
 reqwest = "0.11"
-bollard = "0.17"
 rand = "0.8.5"
 tracing = "0.1.37"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -27,6 +26,7 @@ bs58 = { version = "0.5.1", features = ["check"]}
 chrono = { version = "0.4.38", features = ["serde"] }
 anyhow = "1.0.86"
 hex = "0.4.3"
+bit-vec = { version = "0.8.0", features = ["serde"] }
 
 risc0-zkvm = { version = "1.1.2", features = ["prove"] }
 
@@ -34,4 +34,4 @@ mongodb = "3.1.0"
 
 comms = {path = "../comms"}
 dstorage = { path = "../dstorage" }
-jocker = {path = "../jocker" }
+serde_json = "1.0.134"

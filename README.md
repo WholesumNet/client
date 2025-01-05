@@ -9,21 +9,30 @@ Wholesum network is a p2p verifiable computing network `tailored for ETH L2 sequ
 
 You would need to get certain environments ready for the client to function properly.
 
+#### Risc0 
+
+To install Risc0, please follow the following [guide](https://github.com/risc0/risc0?tab=readme-ov-file#getting-started).
+
 #### Docker
 
 Docker runtime is needed as it is used to run `Risc0` containers. This awesome [guide](https://www.digitalocean.com/community/tutorials/how-to-install-and-use-docker-on-ubuntu-20-04) from DigitalOcean is helpful in this regard.
 
-### Lighthouse@Filecoin/Swarmy@Swarm
+#### MongoDB
+
+Install the MongoDB from [here](https://www.mongodb.com/docs/manual/tutorial/install-mongodb-community-with-docker/). Make sure a Docker container runs and is listenning on `localhost:27017`
+
+#### Decentralized storage
 
 - Lighthouse:  
-  You would need a subscription plan from [Lighthouse](https://docs.lighthouse.storage/lighthouse-1/quick-start) to run the client. Please obtain an api key and specify it with `-d` flag when running the client.
-  
-- Swarmy:
-  Still under development.
-  
-### MongoDB
+  You would need a subscription plan from [Lighthouse](https://docs.lighthouse.storage/lighthouse-1/quick-start). Please obtain an API key, put it into a file with the following look:
 
-Install the MongoDB from [here](https://www.mongodb.com/docs/manual/tutorial/install-mongodb-community-with-docker/) and make sure a Docker container runs and is listenning on `localhost:27017`
+  <pre>
+    apiKey = 'your key'
+  </pre>
+  
+- Swarm:
+  Still under develepment.
+  
 
 ### Library dependencies
 
@@ -32,7 +41,6 @@ To run a client agent, you would first need to fork the following libraries and 
 - [comms](https://github.com/WholesumNet/comms)
 - [dStorage](https://github.com/WholesumNet/dStorage)
 - [jocker](https://github.com/WholesumNet/jocker)
-- [benchmark](https://github.com/WholesumNet/benchmark)
 
 ### The job file
 
@@ -74,9 +82,9 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-  -d, --dstorage-key-file <DSTORAGE_KEY_FILE>  
+  -d, --dstorage-key-file &lt;DSTORAGE_KEY_FILE&gt;  
       --dev                                    
-  -k, --key-file <KEY_FILE>                    
+  -k, --key-file &lt;KEY_FILE&gt;                    
   -h, --help                                   Print help
   -V, --version                                Print version
 </pre>

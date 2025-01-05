@@ -8,6 +8,7 @@ use std::{
 use serde::{
     Serialize, Deserialize
 };
+use bit_vec::BitVec;
 
 /*
 verifiable computing is resource hungry, with at least 10x more compute steps
@@ -16,121 +17,77 @@ proving.
 development stages of a job:
  0. created 
  1. segmented(into N items according to r0 po2_limit)
- 2. parallel proving aka recursion
+ 2. parallel proving via recursion
     a. prove and lift
-        - N iterations -> N SuccinctReceipts
+        - N segments -> N proofs(SuccinctReceipt)
     b. join
         btree fashion
-        log2(n) + 1 rounds of join to obtain the final SuccinctReceipt aka stark receip
+        log2(n) + 1 rounds of join to obtain the final proof(SuccinctReceipt) aka the stark proof
         e.g. starting with N = 5 and segments labeled 1-5:
           1: (1, 2) -> 12, (3, 4) -> 34, 5 -> 5
           2: (12, 34) -> 1234, 5 -> 5
-          3: (1234, 5) -> the final stark receipt
+          3: (1234, 5) -> the final stark proof
     c. snark extraction
-        - apply identity_p254 and then compress -> ~300 bytes snark(Receipt)
- 3. verification
-    a. succeeded => harvest ready(verified)
-    b. failed => harvest ready(unverified)
- 4. harvest ready
+        - apply identity_p254 and then compress -> ~300 bytes snark proof
 */
 
-// stages of the recursion process
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Stage {
-    // proving(and lifting) segments
-    Prove,
-
-    // prove & lift is complete, now joining segments
-    Join,
-
-    // join is completed, the receipt is now a stark receipt
-    Stark,
-
-    // extracting the final snark
-    Snark,
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum SegmentStatus {
-    // r0 segment blob is uploaded to dstorage and awaits proving
-    // or is proved but awaits verification, args:
-    //   - cid of the segment on dstorage
-    ProveReady(String),
-
-    // proved(and lifted), and verified blob, args:
-    //   - cid of the succinct receipt on dstorage
-    ProvedAndLifted(String),
-}
-
-#[derive(Debug, Clone)]
-pub struct Segment {
-    // eg segment-0
-    pub id: String,
-
-    // the number of times this segment has been sent for proving. 
-    // used when we need to choose the next prove job in response to a new offer.
-    pub num_prove_deals: u32,
-
-    // per segment status
-    pub status: SegmentStatus,
-
-    // proved(and lifted) segments awaiting verification: <receipt_cid, prover_peer_id>
-    pub to_be_verified: HashMap<String, String>,
-}
-
-impl Segment {
-    pub fn new(
-        id: &str,
-        base_segment_cid: &str,
-    ) -> Self {
-        Segment {
-            id: id.to_string(),
-            num_prove_deals: 0,
-            status: SegmentStatus::ProveReady(
-                format!("{base_segment_cid}/{id}")
-            ),
-            to_be_verified: HashMap::<String, String>::new(),
-        }
-    }
+#[derive(Debug)]
+pub struct Proof {    
+    pub prover: String,
+    pub filepath: Option<String>
 }
 
 #[derive(Debug)]
-pub struct ProveAndLift {
-    pub segments: Vec<Segment>,
+pub struct ProveAndLift {    
+    pub num_segments: u32,
+
+    // <segment-id, <cid, proof>>
+    pub proofs: HashMap<u32, HashMap<String, Proof>>,
+    
+    // each segment is represented by one bit: "true" => proved, "false" => not proved yet
+    pub proved_map: BitVec,
 }
 
 impl ProveAndLift {
     pub fn new(
-        base_segment_cid: &str,
-        num_segments: usize
+        num_segments: u32
     ) -> Self {
         ProveAndLift {
-            segments: (0..num_segments).map(
-                |index| 
-                Segment::new(
-                    &format!("segment-{index}"),
-                    base_segment_cid
-                )
-            ).collect()
-        }        
+            num_segments: num_segments,
+            proofs: HashMap::<u32, HashMap<String, Proof>>::new(),
+            proved_map: BitVec::from_elem(num_segments as usize, false)
+        }
     }
     
-    pub fn is_finished(
+    pub fn is_proving_finished(
         &self
     ) -> bool {
-        self.segments.iter().all(|some_seg| {
-            match some_seg.status {
-                SegmentStatus::ProvedAndLifted(_) => true,
-                _ => false,            
-            }        
-        })
+       self.num_segments == self.proved_map.len() as u32
+    }
+
+    pub fn are_all_proofs_donwloaded(
+        &self
+    ) -> bool {
+        if self.num_segments != self.proofs.len() as u32{
+            return false;        
+        }
+        // all segments should have at least one proof on disk
+        self.proofs
+        .values()
+        .all(|proofs| 
+            proofs
+            .values()
+            .any(|proof|
+                true == proof.filepath.is_some()
+            )
+        )
     }
 }
 
 #[derive(Debug)]
 pub struct JoinPair {
     // joins are ordered, so use this to preserve consistency
-    pub position: usize,
+    pub position: u32,
 
     pub left: String,
     pub right: String,
@@ -147,9 +104,9 @@ pub struct Join {
     pub pairs: Vec<JoinPair>,
 
     // receipts of the previous round
-    pub joined: BTreeMap<usize, String>,
+    pub joined: BTreeMap<u32, String>,
 
-    // the left over: eg receipts: [0..4] -> pair 1: (0, 1), ..., leftover: (5)
+    // the result and also the left over(in non-final rounds): eg receipts(round1): [0..4] -> pair 1: (0, 1), ..., leftover: (5)
     pub agg: Option<String>,
 
     // map of verification pool: <receipt_cid, prover>
@@ -158,12 +115,12 @@ pub struct Join {
 
 impl Join {
     pub fn new(
-        num_segments: usize
+        num_segments: u32
     ) -> Self {
         Join {
             round: -1,
-            pairs: Vec::<JoinPair>::with_capacity(num_segments),
-            joined: BTreeMap::<usize, String>::new(),
+            pairs: Vec::<JoinPair>::with_capacity(num_segments as usize),
+            joined: BTreeMap::<u32, String>::new(),
             agg: None,
             to_be_verified: HashMap::<String, String>::new(),
         }
@@ -174,7 +131,7 @@ impl Join {
         receipts: Vec<String>,
     ) {
         for i in 0..receipts.len() {
-            self.joined.insert(i, receipts[i].clone());
+            self.joined.insert(i as u32, receipts[i].clone());
         }
     }
 
@@ -203,7 +160,7 @@ impl Join {
                 let pos = if i > 0 { i - 1 } else { i }; 
                 self.pairs.push(
                     JoinPair {
-                        position: pos,
+                        position: pos as u32,
                         left: to_be_joined[i].clone(),
                         right: to_be_joined[i + 1].clone(),
                         num_prove_deals: 0,
@@ -226,6 +183,29 @@ impl Join {
     }
 }
 
+// stages of the recursion process
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Stage {
+    
+    // proving(and lifting) segments
+    Prove,
+
+    // verifying proved(and lifted) segments
+    ProveVerification,
+
+    // prove & lift is complete, now joining segments
+    Join,
+
+    // verifying joined proofs
+    JoinVerification,
+
+    // join is completed and the stark proof is ready
+    Stark,
+
+    // extracting the final snark
+    Snark,
+}
+
 #[derive(Debug)]
 pub struct Recursion {
     pub stage: Stage,
@@ -242,18 +222,28 @@ pub struct Recursion {
 
 impl Recursion {
     pub fn new(
-        base_segment_cid: &str,
-        num_segments: usize
+        num_segments: u32
     ) -> Self {
         Recursion {
             stage: Stage::Prove,
             prove_and_lift: ProveAndLift::new(
-                base_segment_cid,
                 num_segments
             ),
             join: Join::new(num_segments),
             snark: None,
         }
+    }
+
+    pub fn begin_prove_verification(&mut self) {
+        if self.stage != Stage::Prove {
+            eprintln!("[warn] Stage must be `Prove` to initiate verification.");
+            return;            
+        }
+        if false == self.prove_and_lift.is_proving_finished() {
+            eprintln!("[warn] All segments must be proved before verification.");
+            return;
+        }
+        self.stage = Stage::ProveVerification;
     }
 
     pub fn begin_join(
@@ -263,14 +253,15 @@ impl Recursion {
             eprintln!("[warn] Prove stage must be finished before join begins.");
             return;
         }        
-        let receipts = self.prove_and_lift.segments.iter().map(|some_seg| 
-            if let SegmentStatus::ProvedAndLifted(receipt) = &some_seg.status { 
-                receipt.clone()
-            } else {
-                eprintln!("[warn] `{}`'s status is not proved and lifted.", some_seg.id);
-                String::new()
-            }                    
-        ).collect();
+        let receipts = vec![];
+        //self.prove_and_lift.segments.iter().map(|some_seg| 
+        //     if let SegmentStatus::ProvedAndLifted(receipt) = &some_seg.status { 
+        //         receipt.clone()
+        //     } else {
+        //         eprintln!("[warn] `{}`'s status is not proved and lifted.", some_seg.id);
+        //         String::new()
+        //     }                    
+        // ).collect();
         self.join.initiate(receipts);
         self.stage = Stage::Join;
     }    
