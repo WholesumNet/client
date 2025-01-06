@@ -1009,7 +1009,6 @@ fn process_updates(
                                 receipt_cid.to_string(),
                                 recursion::Proof {
                                     prover: prover_id.clone(),
-                                    filepath: None
                                 }
                             );
                         })
@@ -1019,7 +1018,6 @@ fn process_updates(
                                     receipt_cid.to_string(), 
                                     recursion::Proof {
                                         prover: prover_id.clone(),
-                                        filepath: None
                                     }
                                 )
                             ])
