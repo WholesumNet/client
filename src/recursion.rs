@@ -34,7 +34,6 @@ development stages of a job:
 #[derive(Debug)]
 pub struct Proof {    
     pub prover: String,
-    pub filepath: Option<String>
 }
 
 #[derive(Debug)]
@@ -63,24 +62,6 @@ impl ProveAndLift {
         &self
     ) -> bool {
        self.num_segments == self.proved_map.len() as u32
-    }
-
-    pub fn are_all_proofs_donwloaded(
-        &self
-    ) -> bool {
-        if self.num_segments != self.proofs.len() as u32{
-            return false;        
-        }
-        // all segments should have at least one proof on disk
-        self.proofs
-        .values()
-        .all(|proofs| 
-            proofs
-            .values()
-            .any(|proof|
-                true == proof.filepath.is_some()
-            )
-        )
     }
 }
 

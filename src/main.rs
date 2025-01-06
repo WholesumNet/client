@@ -154,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
     // future for local verification of receipts
     // let mut stark_receipt_verification_futures = FuturesUnordered::new();
 
-    let mut download_proof_futures = FuturesUnordered::new();
+    // let mut download_proof_futures = FuturesUnordered::new();
     
     // local libp2p key 
     let local_key = {
@@ -279,7 +279,7 @@ async fn main() -> anyhow::Result<()> {
     // used for posting job needs
     let mut timer_post_job = stream::interval(Duration::from_secs(10)).fuse();
     // used for downloading proofs from dStorage
-    let mut timer_download_proof = stream::interval(Duration::from_secs(15)).fuse();
+    // let mut timer_download_proof = stream::interval(Duration::from_secs(15)).fuse();
 
     // gossip messages are content-addressed, so we add a random nounce to each message
     let mut rng = rand::thread_rng();
@@ -363,75 +363,75 @@ async fn main() -> anyhow::Result<()> {
                 }                
             },
 
-            () = timer_download_proof.select_next_some() => {
-                match job.recursion.stage {
-                    Stage::Prove | Stage::ProveVerification => {
-                        // max concurrent download size is 32
-                        if download_proof_futures.len() >= 32 {
-                            continue;
-                        }
-                        // <segment-id, <cid, proof>>
-                        // pub proofs: HashMap<u32, HashMap<String, Proof>>,
-                        for (seg_id, proofs) in &job.recursion.prove_and_lift.proofs {
-                            for (cid, proof) in proofs {
-                                if true == proof.filepath.is_some() {
-                                    continue;
-                                }
+            // () = timer_download_proof.select_next_some() => {
+            //     match job.recursion.stage {
+            //         Stage::Prove | Stage::ProveVerification => {
+            //             // max concurrent download size is 32
+            //             if download_proof_futures.len() >= 32 {
+            //                 continue;
+            //             }
+            //             // <segment-id, <cid, proof>>
+            //             // pub proofs: HashMap<u32, HashMap<String, Proof>>,
+            //             for (seg_id, proofs) in &job.recursion.prove_and_lift.proofs {
+            //                 for (cid, proof) in proofs {
+            //                     if true == proof.filepath.is_some() {
+            //                         continue;
+            //                     }
                                 
-                                download_proof_futures.push(
-                                    download_proof(
-                                        &ds_client,
-                                        cid.clone(),
-                                        format!("{}/prove/{seg_id}-{cid}.proof", job.working_dir),
-                                        format!("{seg_id}") //@ inefficient as we have to cast to string
-                                    )
-                                );                                
-                            }
-                        }
-                    },
+            //                     download_proof_futures.push(
+            //                         download_proof(
+            //                             &ds_client,
+            //                             cid.clone(),
+            //                             format!("{}/prove/{seg_id}-{cid}.proof", job.working_dir),
+            //                             format!("{seg_id}") //@ inefficient as we have to cast to string
+            //                         )
+            //                     );                                
+            //                 }
+            //             }
+            //         },
 
-                    Stage::Join | Stage::JoinVerification => {},  
+            //         Stage::Join | Stage::JoinVerification => {},  
                     
-                    _ =>  (),  
-                }                
-            },
+            //         _ =>  (),  
+            //     }                
+            // },
 
             // proof is downloaded
-            dl_res = download_proof_futures.select_next_some() => {
-                if let Err(failed) = dl_res {
-                    eprintln!("[warn] Failed to download the proof: `{failed:?}`");
-                    continue;
-                }
-                let downloaded_proof: DownloadedProof = dl_res.unwrap();
-                //@ what if it's a mistimed proof? ie it's for the prove stage but we're in the join stage
-                match job.recursion.stage {
-                    Stage::Prove | Stage::ProveVerification => {
-                        let seg_id = match u32::from_str_radix(&downloaded_proof.item_id, 10) {
-                            Err(_) => {
-                                eprintln!("[warn] Mis-timed download: `{:?}`", downloaded_proof);
-                                continue;
-                            },
+            // dl_res = download_proof_futures.select_next_some() => {
+            //     if let Err(failed) = dl_res {
+            //         eprintln!("[warn] Failed to download the proof: `{failed:?}`");
+            //         continue;
+            //     }
+            //     let downloaded_proof: DownloadedProof = dl_res.unwrap();
+            //     //@ what if it's a mistimed proof? ie it's for the prove stage but we're in the join stage
+            //     match job.recursion.stage {
+            //         Stage::Prove | Stage::ProveVerification => {
+            //             let seg_id = match u32::from_str_radix(&downloaded_proof.item_id, 10) {
+            //                 Err(_) => {
+            //                     eprintln!("[warn] Mis-timed download: `{:?}`", downloaded_proof);
+            //                     continue;
+            //                 },
 
-                            Ok(seg_id) => seg_id,                            
-                        };
-                        job.recursion.prove_and_lift.proofs
-                        .get_mut(&seg_id)
-                        .unwrap()
-                        .get_mut(&downloaded_proof.cid)
-                        .unwrap()
-                        .filepath = Some(downloaded_proof.filepath);
+            //                 Ok(seg_id) => seg_id,                            
+            //             };
+            //             job.recursion.prove_and_lift.proofs
+            //             .get_mut(&seg_id)
+            //             .unwrap()
+            //             .get_mut(&downloaded_proof.cid)
+            //             .unwrap()
+            //             .filepath = Some(downloaded_proof.filepath);
 
-                        if true == job.recursion.prove_and_lift.are_all_proofs_donwloaded() {
-                            // composition begins!
-                        }
-                    },
+            //             if true == job.recursion.prove_and_lift.are_all_proofs_donwloaded() {
+            //                 // composition begins!
+            //             }
+            //         },
 
-                    Stage::Join | Stage::JoinVerification => {},
+            //         Stage::Join | Stage::JoinVerification => {},
 
-                    _ => {},
+            //         _ => {},
 
-                }
-            },
+            //     }
+            // },
 
             // succinct receipt's verification has been finished
             // v_res = succinct_receipt_verification_futures.select_next_some() => {                
@@ -1009,7 +1009,6 @@ fn process_updates(
                                 receipt_cid.to_string(),
                                 recursion::Proof {
                                     prover: prover_id.clone(),
-                                    filepath: None
                                 }
                             );
                         })
@@ -1019,7 +1018,6 @@ fn process_updates(
                                     receipt_cid.to_string(), 
                                     recursion::Proof {
                                         prover: prover_id.clone(),
-                                        filepath: None
                                     }
                                 )
                             ])
