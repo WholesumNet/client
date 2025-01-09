@@ -42,6 +42,8 @@ pub struct Join {
 
     pub round: u32,
 
+    pub left: String,
+    pub right: String,
     pub proof: Proof,
 }
 

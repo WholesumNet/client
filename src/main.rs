@@ -42,8 +42,7 @@ use clap::{
 
 use comms::{
     p2p::{MyBehaviourEvent},
-    notice,
-    compute
+    protocol
 };
 
 use uuid::Uuid;
@@ -303,16 +302,16 @@ async fn main() -> anyhow::Result<()> {
             () = timer_post_job.select_next_some() => { 
                 match job.recursion.stage {
                     Stage::Prove => {
-                        let need_prove = compute::NeedCompute {
+                        let prove_job = protocol::ComputeJob {
                             job_id: job.id.clone(),
                             budget: 0,
-                            compute_type: compute::ComputeType::ProveAndLift(
-                                compute::ProveDetails {
+                            compute_type: protocol::ComputeType::ProveAndLift(
+                                protocol::ProveAndLiftDetails {
                                     segments_base_cid: job.schema.prove.segments_cid.clone(),
                                     segment_prefix_str: String::from("segment-"),
                                     po2: job.schema.prove.po2 as u8,
                                     num_segments: job.schema.prove.num_segments,
-                                    proved_map: job.recursion.prove_and_lift.proved_map.to_bytes(),
+                                    progress_map: job.recursion.prove_and_lift.progress_map.to_bytes(),
                                 }
                             )
                         };
@@ -320,19 +319,26 @@ async fn main() -> anyhow::Result<()> {
                         if let Err(e) = gossip
                         .publish(
                             topic.clone(),
-                            bincode::serialize(&notice::Notice::Compute(need_prove))?
+                            bincode::serialize(&protocol::Need::Compute(prove_job))?
                         ) {            
                             eprintln!("[warn] Need compute gossip for prove error: `{e:?}`");
                         }
                     },
 
                     Stage::Join => {
-                        let need_join = compute::NeedCompute {
+                        let round = job.recursion.join_rounds.last().unwrap();
+                        let join_job = protocol::ComputeJob {
                             job_id: job.id.clone(),
                             budget: 0,
-                            compute_type: compute::ComputeType::Join(
-                                compute::JoinDetails {
-                                    pairs: vec![],
+                            compute_type: protocol::ComputeType::Join(
+                                protocol::JoinDetails {
+                                    num_pairs: round.pairs.len() as u32,
+                                    pairs: if round.pairs.len() > 32 {
+                                        protocol::JoinPairs::Inline(round.pairs.clone())
+                                    } else {
+                                        protocol::JoinPairs::Cid(round.cid_pairs_file.clone().unwrap())
+                                    },
+                                    progress_map: round.progress_map.to_bytes()
                                 }
                             )
                         };
@@ -340,18 +346,18 @@ async fn main() -> anyhow::Result<()> {
                         if let Err(e) = gossip
                         .publish(
                             topic.clone(),
-                            bincode::serialize(&notice::Notice::Compute(need_join))?
+                            bincode::serialize(&protocol::Need::Compute(join_job))?
                         ) {            
                             eprintln!("[warn] Need compute gossip for `join` error: `{e:?}`");
                         }
                     },
 
                     _ => (),    
-                };
+                }
                                 
                 // need status updates?                
                 let nonce: u8 = rng.gen();
-                let status_update = notice::Notice::UpdateMe(nonce);
+                let status_update = protocol::Need::UpdateMe(nonce);
                 let gossip = &mut swarm.behaviour_mut().gossipsub;
                 let topic = gossip.topics().nth(0).unwrap(); 
                 if let Err(e) = gossip
@@ -362,77 +368,7 @@ async fn main() -> anyhow::Result<()> {
                     eprintln!("`status update` publish error: {e:?}");
                 }                
             },
-
-            // () = timer_download_proof.select_next_some() => {
-            //     match job.recursion.stage {
-            //         Stage::Prove | Stage::ProveVerification => {
-            //             // max concurrent download size is 32
-            //             if download_proof_futures.len() >= 32 {
-            //                 continue;
-            //             }
-            //             // <segment-id, <cid, proof>>
-            //             // pub proofs: HashMap<u32, HashMap<String, Proof>>,
-            //             for (seg_id, proofs) in &job.recursion.prove_and_lift.proofs {
-            //                 for (cid, proof) in proofs {
-            //                     if true == proof.filepath.is_some() {
-            //                         continue;
-            //                     }
-                                
-            //                     download_proof_futures.push(
-            //                         download_proof(
-            //                             &ds_client,
-            //                             cid.clone(),
-            //                             format!("{}/prove/{seg_id}-{cid}.proof", job.working_dir),
-            //                             format!("{seg_id}") //@ inefficient as we have to cast to string
-            //                         )
-            //                     );                                
-            //                 }
-            //             }
-            //         },
-
-            //         Stage::Join | Stage::JoinVerification => {},  
-                    
-            //         _ =>  (),  
-            //     }                
-            // },
-
-            // proof is downloaded
-            // dl_res = download_proof_futures.select_next_some() => {
-            //     if let Err(failed) = dl_res {
-            //         eprintln!("[warn] Failed to download the proof: `{failed:?}`");
-            //         continue;
-            //     }
-            //     let downloaded_proof: DownloadedProof = dl_res.unwrap();
-            //     //@ what if it's a mistimed proof? ie it's for the prove stage but we're in the join stage
-            //     match job.recursion.stage {
-            //         Stage::Prove | Stage::ProveVerification => {
-            //             let seg_id = match u32::from_str_radix(&downloaded_proof.item_id, 10) {
-            //                 Err(_) => {
-            //                     eprintln!("[warn] Mis-timed download: `{:?}`", downloaded_proof);
-            //                     continue;
-            //                 },
-
-            //                 Ok(seg_id) => seg_id,                            
-            //             };
-            //             job.recursion.prove_and_lift.proofs
-            //             .get_mut(&seg_id)
-            //             .unwrap()
-            //             .get_mut(&downloaded_proof.cid)
-            //             .unwrap()
-            //             .filepath = Some(downloaded_proof.filepath);
-
-            //             if true == job.recursion.prove_and_lift.are_all_proofs_donwloaded() {
-            //                 // composition begins!
-            //             }
-            //         },
-
-            //         Stage::Join | Stage::JoinVerification => {},
-
-            //         _ => {},
-
-            //     }
-            // },
-
+            
             // succinct receipt's verification has been finished
             // v_res = succinct_receipt_verification_futures.select_next_some() => {                
             //     if let Err(failed) = v_res {
@@ -638,7 +574,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 })) => {                
                     match request {
-                        notice::Request::Update(new_updates) => {
+                        protocol::Request::Update(new_updates) => {
                             let mut segment_inserts = process_updates(
                                 &mut job,
                                 server_peer_id,
@@ -812,10 +748,9 @@ async fn resume_job(
         )
     }
     for seg_id in segments.keys() {
-        job.recursion.prove_and_lift.proved_map.set(*seg_id as usize, true);
+        job.recursion.prove_and_lift.progress_map.set(*seg_id as usize, true);
     }
-    if true == job.recursion.prove_and_lift.is_proving_finished() {
-        job.recursion.stage = Stage::ProveVerification;                
+    if true == job.recursion.prove_and_lift.is_finished() {
         // job.recursion.begin_join();
         // if true == job.recursion.join.begin_next_round() {
         //     println!("[info] Join is already finished.");
@@ -961,7 +896,7 @@ async fn retrieve_segments_from_db(
 fn process_updates(
     job: &mut Job,
     prover_peer_id: PeerId,
-    new_updates: Vec<compute::JobUpdate>,
+    new_updates: Vec<protocol::JobUpdate>,
 ) -> anyhow::Result<Vec<db::Segment>> {
     let mut segment_inserts = vec![];
     for new_update in new_updates {
@@ -974,11 +909,11 @@ fn process_updates(
 
         // let timestamp = Utc::now().timestamp();
         match &new_update.status {
-            compute::JobStatus::Running => {
+            protocol::JobStatus::Running => {
                 println!("[info] Job `{:?}` is running.", new_update);
             },
 
-            compute::JobStatus::ExecutionFailed(err_msg) => { 
+            protocol::JobStatus::ExecutionFailed(err_msg) => { 
                 println!("[info] Execution failed for `{:?}`, error: `{:?}`",
                     new_update.item,
                     err_msg
@@ -986,9 +921,9 @@ fn process_updates(
                 // let's not keep track of failed jobs
             },
 
-            compute::JobStatus::ExecutionSucceeded(receipt_cid) => { 
+            protocol::JobStatus::ExecutionSucceeded(receipt_cid) => { 
                 match new_update.item {
-                    compute::Item::Prove(seg_id) => {
+                    protocol::Item::ProveAndLift(seg_id) => {
                         if job.recursion.stage != Stage::Prove {                             
                             continue;
                         }
@@ -1001,7 +936,7 @@ fn process_updates(
                             continue;
                         }
                         //@ need to validate received proof somehow
-                        job.recursion.prove_and_lift.proved_map.set(seg_id as usize, true);
+                        job.recursion.prove_and_lift.progress_map.set(seg_id as usize, true);
                         job.recursion.prove_and_lift.proofs
                         .entry(seg_id)
                         .and_modify(|seg| {
@@ -1022,8 +957,10 @@ fn process_updates(
                                 )
                             ])
                         );
-                        if true == job.recursion.prove_and_lift.is_proving_finished() {
-                            job.recursion.begin_prove_verification();
+                        if true == job.recursion.prove_and_lift.is_finished() {
+                            if true == job.recursion.begin_join_stage() {
+                                // verify stark proof
+                            } 
                         }
                         // db
                         segment_inserts.push(
@@ -1038,35 +975,59 @@ fn process_updates(
                         );
                     },
 
-                    compute::Item::Join(_left, _right) => {
-                        // if job.recursion.stage != Stage::Join { 
-                        //     continue;
-                        // }                        
-                        // //@ wtd with this data?
-                        // if false == job.recursion.join.to_be_verified.contains_key(receipt_cid) {
-                        //     let join_id = seg_id;
-                        //     if join_id.split("-").count() != 2 {
-                        //         eprintln!("[warn] Join pair `{}` is invalid.",
-                        //             join_id
-                        //         );
-                        //         continue;
-                        //     }     
-                        //     job.recursion.join.to_be_verified.insert(
-                        //         receipt_cid.to_string(),
-                        //         prover_id.clone()
-                        //     );
-                        //     to_be_locally_verified.push(
-                        //         VerificationItem {
-                        //             receipt_cid: receipt_cid.to_string(),
-                        //             prover_id: prover_id.clone(),
-                        //             item_id: join_id.clone()
+                    protocol::Item::Join(left, right) => {
+                        if job.recursion.stage != Stage::Join { 
+                            continue;
+                        }
+                        let round = job.recursion.join_rounds.last_mut().unwrap();
+                        let index = match round.pairs.iter().position(| p | p.0 == left && p.1 == right) {
+                            Some(i) => i,
+                            None => {
+                                eprintln!("[warn] Invalid join pair, left: `{left:?}`, right: `{right:?}`");
+                                continue;
+                            }
+                        };
+                        round.progress_map.set(index, true);
+                        round.proofs
+                        .entry(index)
+                        .and_modify(|proofs_map| {
+                            proofs_map.insert(
+                                receipt_cid.to_string(),
+                                recursion::Proof {
+                                    prover: prover_id.clone(),
+                                }
+                            );
+                        })
+                        .or_insert(
+                            HashMap::from([
+                                (
+                                    receipt_cid.to_string(), 
+                                    recursion::Proof {
+                                        prover: prover_id.clone(),
+                                    }
+                                )
+                            ])
+                        );
+                        if round.progress_map.len() == round.pairs.len() {
+                            if true == job.recursion.begin_join_stage() {
+                                // verify stark proof
+                            }                             
+                        }
+                        // db
+                        // join_inserts.push(
+                        //     db::Join {
+                        //         job_id: db_job_oid.clone(),
+                        //         left: left.to_string(),
+                        //         right: right.to_string(),
+                        //         proof: db::Proof {
+                        //             cid: receipt_cid.to_string(),
+                        //             prover: prover_id.clone()
                         //         }
-                        //     );
-                        // }
-                        
+                        //     }                            
+                        // );
                     },
 
-                    compute::Item::Snark => {
+                    protocol::Item::Groth16 => {
                         // if job.recursion.stage != Stage::Stark { 
                         //     continue;
                         // }
@@ -1075,50 +1036,12 @@ fn process_updates(
                         // println!("[info] a SNARK proof has been extracted for the job `{job_id}`: {receipt_cid} ");
                     },
 
-                    compute::Item::Verification => {},
+                    protocol::Item::Verification => {},
                 };
             },            
         };
     } 
     Ok(segment_inserts)  
-}
-
-
-#[derive(Debug)]
-struct DownloadProofError {
-    pub cid: String,
-    pub item_id: String,
-    pub err_msg: String,
-}
-
-#[derive(Debug)]
-struct DownloadedProof {
-    pub cid: String,
-    pub item_id: String,
-    pub filepath: String,
-}
-
-async fn download_proof(
-    ds_client: &reqwest::Client,
-    cid: String,
-    filepath: String,
-    item_id: String,
-) -> anyhow::Result<DownloadedProof, DownloadProofError> {
-    lighthouse::download_file(
-        ds_client,
-        &cid,
-        filepath.clone()
-    ).await
-    .map_err(|e| DownloadProofError {
-        cid: cid.clone(),
-        item_id: item_id.clone(),
-        err_msg: format!("Proof download error: `{}`",  e.to_string())
-    })?;
-    Ok(DownloadedProof {
-        cid: cid,
-        item_id: item_id,
-        filepath: filepath
-    })
 }
 
 #[derive(Debug, Clone)]
