@@ -42,6 +42,8 @@ pub struct Join {
 
     pub round: u32,
 
+    pub left_input_proof: String,
+    pub right_input_proof: String,
     pub proof: Proof,
 }
 
