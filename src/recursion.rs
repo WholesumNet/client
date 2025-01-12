@@ -33,37 +33,38 @@ development stages of a job:
 */
 
 #[derive(Debug)]
-pub struct Proof {    
+pub struct Proof {
+    pub cid: String,
+
     pub prover: String,
+
+    // whether this proof is chosen for the next round
+    pub spent: bool
 }
 
 /* Prove */
 
 #[derive(Debug)]
-pub struct ProveAndLift {    
+pub struct ProveAndLift {
     pub num_segments: u32,
 
-    // <segment-id, <cid, proof-details>>
-    pub proofs: BTreeMap<u32, HashMap<String, Proof>>,
+    // <segment-id, <proofs>>
+    pub proofs: BTreeMap<u32, Vec<Proof>>,
     
     // each segment is represented by one bit: "true" => proved, "false" => not proved yet
     pub progress_map: BitVec,
 }
 
 impl ProveAndLift {
-    pub fn new(
-        num_segments: u32
-    ) -> Self {
+    pub fn new(num_segments: u32) -> Self {
         ProveAndLift {
             num_segments: num_segments,
-            proofs: BTreeMap::<u32, HashMap<String, Proof>>::new(),
+            proofs: BTreeMap::new(),
             progress_map: BitVec::from_elem(num_segments as usize, false)
         }
     }
     
-    pub fn is_finished(
-        &self
-    ) -> bool {
+    pub fn is_finished(&self) -> bool {
        self.num_segments == self.progress_map.len() as u32
     }
 }
@@ -72,19 +73,15 @@ impl ProveAndLift {
 
 #[derive(Debug)]
 pub struct JoinRound {
-    // round number
     pub number: u32,
 
     pub pairs: Vec<(String, String)>,
     
-    // advances to the next round automatically as the last output item
+    // advances to the next round automatically as the last proof
     pub leftover: Option<String>,
 
-    // output of this round: <index of in 'pairs', <cid, proof data>>
-    pub proofs: BTreeMap<usize, HashMap<String, Proof>>,
-
-    // cid of the json file that contains pairs 
-    pub cid_pairs_file: Option<String>,
+    // output of this round: <index of the pair in 'pairs', <proofs>>
+    pub proofs: BTreeMap<usize, Vec<Proof>>,
 
     // each pair is represented by one bit: "true" => joined, "false" => not joined yet
     pub progress_map: BitVec,
@@ -100,10 +97,10 @@ pub enum Stage {
     // prove & lift is complete, now joining segments
     Join,
 
-    // join is completed and the stark proof is ready
+    // join is complete, so begin stark verification
     Stark,
 
-    // get the final snark
+    // stark proof is ready, so begin groth16 verification
     Groth16,
 }
 
@@ -114,30 +111,25 @@ pub struct Recursion {
     // prove and lift data
     pub prove_and_lift: ProveAndLift,
 
-    // join data
+    // join data        
     pub join_rounds: Vec<JoinRound>,
+    // the result of the last join operation aka stark proof
     pub join_proof: Option<String>,
-
-    // snark data
-    pub snark: Option<String>,
 }
 
 impl Recursion {
-    pub fn new(
-        num_segments: u32
-    ) -> Self {
+    pub fn new(num_segments: u32) -> Self {
         Recursion {
             stage: Stage::Prove,
             prove_and_lift: ProveAndLift::new(num_segments),
-            join_rounds: vec![],
+            join_rounds: Vec::new(),
             join_proof: None,
-            snark: None,
         }
     }
 
     pub fn begin_join_stage(&mut self) -> bool {
         if self.stage != Stage::Prove {
-            eprintln!("[warn] The join stage follows the Prove stage.");
+            eprintln!("[warn] Join stage follows the Prove stage.");
             return false;
         }        
         if false == self.prove_and_lift.is_finished() {
@@ -148,35 +140,57 @@ impl Recursion {
             eprintln!("[warn] No proofs to join.");
             return false;
         }
-        self.stage = Stage::Join;
+        self.stage = Stage::Join;        
         self.begin_next_join_round()
     }
 
-    pub fn begin_next_join_round(&mut self) -> bool {
+    pub fn begin_next_join_round(&mut self) -> bool {        
         let mut prev_round_proofs = vec![];
         if true == self.join_rounds.is_empty() {
-            for proofs_map in self.prove_and_lift.proofs.values() {
+            for proofs in self.prove_and_lift.proofs.values_mut() {
                 //@ beware starvation of other cids
-                prev_round_proofs.push(
-                    proofs_map.keys().nth(0).unwrap().clone()
-                );
+                let chosen_proof = match proofs
+                    .iter_mut()
+                    .filter(|p| p.spent == false)
+                    .nth(0)
+                {
+                    None => {
+                        eprintln!("[warn] No more proofs to choose from, all are spent.");  
+                        return false                    
+                    },
+
+                    Some(p) => {
+                        p.spent = true;
+                        p.cid.clone()
+                    }
+                };
+                prev_round_proofs.push(chosen_proof.clone());
             }
         } else {
-            let prev_round = self.join_rounds.last().unwrap();
-            if prev_round.progress_map.len() != prev_round.pairs.len() {
-                eprintln!("[warn] The current join round is not finished yet.");
-                return false;
-            }
-            for proofs_map in prev_round.proofs.values() {
+            let last_round = self.join_rounds.last_mut().unwrap();            
+            for proofs in last_round.proofs.values_mut() {
                 //@ beware starvation of other cids
-                prev_round_proofs.push(
-                    proofs_map.keys().nth(0).unwrap().clone()
-                );
+                let chosen_proof = match proofs
+                    .iter_mut()
+                    .filter(|p| p.spent == false)
+                    .nth(0)
+                {
+                    None => {
+                        eprintln!("[warn] No more proofs to choose from, all are spent.");  
+                        return false                    
+                    },
+
+                    Some(p) => {
+                        p.spent = true;
+                        p.cid.clone()
+                    }
+                };
+                prev_round_proofs.push(chosen_proof);
             }
-            if let Some(lo) = &prev_round.leftover {
+            if let Some(lo) = &last_round.leftover {
                 prev_round_proofs.push(lo.clone());
             }
-        };
+        }
     
         if prev_round_proofs.len() == 1 {
             println!("[info] Join is finished.");
@@ -205,12 +219,11 @@ impl Recursion {
             JoinRound {
                 number: self.join_rounds.len() as u32 + 1,                
                 pairs: pairs,
-                cid_pairs_file: None,
-                proofs: BTreeMap::<usize, HashMap<String, Proof>>::new(),
+                proofs: BTreeMap::new(),
                 leftover: leftover,
                 progress_map: BitVec::from_elem(num_pairs, false),
             }
         );        
-        false        
-    }    
+        false
+    }  
 }

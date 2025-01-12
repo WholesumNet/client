@@ -144,17 +144,6 @@ async fn main() -> anyhow::Result<()> {
     // setup mongodb
     let db_client = mongodb_setup("mongodb://localhost:27017").await?;
 
-    // future for offer evaluation
-    // let mut offer_evaluation_futures = FuturesUnordered::new();
-
-    // future for local verification of succinct receipts
-    // let mut succinct_receipt_verification_futures = FuturesUnordered::new();
-
-    // future for local verification of receipts
-    // let mut stark_receipt_verification_futures = FuturesUnordered::new();
-
-    // let mut download_proof_futures = FuturesUnordered::new();
-    
     // local libp2p key 
     let local_key = {
         if let Some(key_file) = cli.key_file {
@@ -170,7 +159,14 @@ async fn main() -> anyhow::Result<()> {
         }
     };    
     println!("[info] Peer id: `{:?}`", PeerId::from_public_key(&local_key.public()));  
+    
+    // future for local verification of succinct receipts
+    // let mut succinct_receipt_verification_futures = FuturesUnordered::new();
 
+    // future for local verification of receipts
+    // let mut stark_receipt_verification_futures = FuturesUnordered::new();
+
+    // let mut download_proof_futures = FuturesUnordered::new();    
 
 
     let col_jobs = db_client
@@ -182,6 +178,9 @@ async fn main() -> anyhow::Result<()> {
     let col_joins = db_client
         .database("wholesum_client")
         .collection::<db::Join>("joins");
+    
+    // futures for mongodb progress saving 
+    let mut db_insert_futures = FuturesUnordered::new();
 
     // the job
     let db_job_oid;
@@ -227,8 +226,6 @@ async fn main() -> anyhow::Result<()> {
             panic!("[warn] Missing command, not sure what you meant.");
         },
     };     
-    // futures for mongodb progress saving 
-    let mut db_insert_futures = FuturesUnordered::new();
 
     // swarm 
     let mut swarm = comms::p2p::setup_swarm(&local_key).await?;
@@ -333,11 +330,7 @@ async fn main() -> anyhow::Result<()> {
                             compute_type: protocol::ComputeType::Join(
                                 protocol::JoinDetails {
                                     num_pairs: round.pairs.len() as u32,
-                                    pairs: if round.pairs.len() > 32 {
-                                        protocol::JoinPairs::Inline(round.pairs.clone())
-                                    } else {
-                                        protocol::JoinPairs::Cid(round.cid_pairs_file.clone().unwrap())
-                                    },
+                                    pairs: round.pairs.clone(),
                                     progress_map: round.progress_map.to_bytes()
                                 }
                             )
@@ -565,7 +558,7 @@ async fn main() -> anyhow::Result<()> {
 
                 // requests
                 SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
-                    peer: server_peer_id,
+                    peer: prover_peer_id,
                     message: request_response::Message::Request {
                         request,
                         // channel,
@@ -575,20 +568,173 @@ async fn main() -> anyhow::Result<()> {
                 })) => {                
                     match request {
                         protocol::Request::Update(new_updates) => {
-                            let mut segment_inserts = process_updates(
-                                &mut job,
-                                server_peer_id,
-                                new_updates
-                            )?;
-                            for db_seg in segment_inserts.iter_mut() {
-                                db_seg.job_id = db_job_oid.clone();
-                                db_insert_futures.push(
-                                    col_segments.insert_one(
-                                        db_seg
-                                    )
-                                    .into_future()
-                                );
-                            }                           
+                            for new_update in new_updates {
+                                if job.id != new_update.id {
+                                    println!("[warn] Status update for an unknown job `{new_update:?}`, ignored.");
+                                    continue;
+                                }
+
+                                // let timestamp = Utc::now().timestamp();
+                                match &new_update.status {
+                                    protocol::JobStatus::Running => {
+                                        println!("[info] Job `{:?}` is running.", new_update);
+                                    },
+
+                                    protocol::JobStatus::ExecutionFailed(err_msg) => { 
+                                        println!("[info] Execution failed for `{:?}`, error: `{:?}`",
+                                            new_update.item,
+                                            err_msg
+                                        );
+                                        // let's not keep track of failed jobs
+                                    },
+
+                                    protocol::JobStatus::ExecutionSucceeded(receipt_cid) => { 
+                                        match new_update.item {
+                                            protocol::Item::ProveAndLift(seg_id) => {
+                                                if job.recursion.stage != Stage::Prove {                             
+                                                    continue;
+                                                }
+                                                if seg_id >= job.schema.prove.num_segments {
+                                                    eprintln!(
+                                                        "[warn] Invalid segment id `{}`, valid range: `0 - {}`",
+                                                        seg_id,
+                                                        job.schema.prove.num_segments
+                                                    );
+                                                    continue;
+                                                }
+                                                //@ need to validate received proof somehow
+                                                job.recursion.prove_and_lift.progress_map.set(seg_id as usize, true);
+
+                                                job.recursion.prove_and_lift
+                                                .proofs
+                                                .entry(seg_id)
+                                                .and_modify(|proofs| {
+                                                    match proofs
+                                                    .iter()
+                                                    .find(|p: &&recursion::Proof| p.cid == *receipt_cid) {
+                                                        None => {
+                                                            proofs.push(
+                                                                recursion::Proof {
+                                                                    cid: receipt_cid.to_string(),
+                                                                    prover: prover_peer_id.to_string(),
+                                                                    spent: false,
+                                                                }
+                                                            )
+                                                        },
+
+                                                        Some(_) => ()
+                                                    }
+                                                })
+                                                .or_insert_with(|| {
+                                                    vec![
+                                                        recursion::Proof {
+                                                            cid: receipt_cid.to_string(),
+                                                            prover: prover_peer_id.to_string(),
+                                                            spent: false,
+                                                        }
+                                                    ]
+                                                });                   
+                                            
+                                                if true == job.recursion.prove_and_lift.is_finished() {
+                                                    if true == job.recursion.begin_join_stage() {
+                                                        // verify stark proof
+                                                    }
+                                                }
+                                                // db
+                                                db_insert_futures.push(
+                                                    col_segments.insert_one(
+                                                        db::Segment {
+                                                            id: seg_id,
+                                                            job_id: db_job_oid.clone(),
+                                                            proof: db::Proof {
+                                                                cid: receipt_cid.to_string(),
+                                                                prover: prover_peer_id.to_string()
+                                                            }
+                                                        }
+                                                    )
+                                                    .into_future()
+                                                );                                               
+                                            },
+
+                                            protocol::Item::Join(left, right) => {
+                                                if job.recursion.stage != Stage::Join { 
+                                                    continue;
+                                                }
+                                                let round = job.recursion.join_rounds.last_mut().unwrap();
+                                                let round_number = round.number;
+                                                //@ not efficient to do 100k comparisons.
+                                                let index = match round.pairs.iter().position(|p| p.0 == left && p.1 == right) {
+                                                    Some(i) => i,
+                                                    None => {
+                                                        eprintln!("[warn] Unknown join pair, left: `{left:?}`, right: `{right:?}`");
+                                                        continue;
+                                                    }
+                                                };
+                                                round.progress_map.set(index, true);
+                                                round.proofs.entry(index)
+                                                .and_modify(|proofs| {
+                                                    match proofs
+                                                    .iter()
+                                                    .find(|p: &&recursion::Proof| p.cid == *receipt_cid) {
+                                                        None => {
+                                                            proofs.push(
+                                                                recursion::Proof {
+                                                                    cid: receipt_cid.to_string(),
+                                                                    prover: prover_peer_id.to_string(),
+                                                                    spent: false,
+                                                                }
+                                                            )
+                                                        },
+
+                                                        Some(_) => ()
+                                                    }
+                                                })
+                                                .or_insert_with(|| {
+                                                    vec![
+                                                        recursion::Proof {
+                                                            cid: receipt_cid.to_string(),
+                                                            prover: prover_peer_id.to_string(),
+                                                            spent: false,
+                                                        }
+                                                    ]
+                                                });                                                
+                                                if round.progress_map.len() == round.pairs.len() {
+                                                    if true == job.recursion.begin_next_join_round() {
+                                                        // verify stark proof
+                                                        
+                                                    }                             
+                                                }
+                                                // db
+                                                //@ watch for duplicates
+                                                db_insert_futures.push(
+                                                    col_joins.insert_one(
+                                                        db::Join {
+                                                            job_id: db_job_oid.clone(),
+                                                            round: round_number,
+                                                            left_input_proof: left.clone(),
+                                                            right_input_proof: right.clone(),
+                                                            proof: db::Proof {
+                                                                cid: receipt_cid.to_string(),
+                                                                prover: prover_peer_id.to_string()
+                                                            }
+                                                        }
+                                                    )
+                                                    .into_future()
+                                                );
+                                            },
+
+                                            protocol::Item::Groth16 => {
+                                                // if job.recursion.stage != Stage::Groth16 { 
+                                                //     continue;
+                                                // }
+                                                // job.recursion.snark = Some(receipt_cid.to_string());
+                                                // job.recursion.stage = Stage::Snark;
+                                                // println!("[info] a SNARK proof has been extracted for the job `{job_id}`: {receipt_cid} ");
+                                            },
+                                        };
+                                    },            
+                                };
+                            }                                                    
                         },
                     }
                 },
@@ -893,156 +1039,155 @@ async fn retrieve_segments_from_db(
 // }
 
 // process status updates
-fn process_updates(
-    job: &mut Job,
-    prover_peer_id: PeerId,
-    new_updates: Vec<protocol::JobUpdate>,
-) -> anyhow::Result<Vec<db::Segment>> {
-    let mut segment_inserts = vec![];
-    for new_update in new_updates {
-        let prover_id = prover_peer_id.to_string();
+// fn process_updates(
+//     job: &mut Job,
+//     prover_peer_id: PeerId,
+//     new_updates: Vec<protocol::JobUpdate>,
+// ) -> anyhow::Result<Vec<db::Segment>> {
+//     let mut segment_inserts = vec![];
+//     for new_update in new_updates {
+//         let prover_id = prover_peer_id.to_string();
 
-        if job.id != new_update.id {
-            println!("[warn] Status update for an unknown job `{new_update:?}`, ignored.");
-            continue;
-        }
+//         if job.id != new_update.id {
+//             println!("[warn] Status update for an unknown job `{new_update:?}`, ignored.");
+//             continue;
+//         }
 
-        // let timestamp = Utc::now().timestamp();
-        match &new_update.status {
-            protocol::JobStatus::Running => {
-                println!("[info] Job `{:?}` is running.", new_update);
-            },
+//         // let timestamp = Utc::now().timestamp();
+//         match &new_update.status {
+//             protocol::JobStatus::Running => {
+//                 println!("[info] Job `{:?}` is running.", new_update);
+//             },
 
-            protocol::JobStatus::ExecutionFailed(err_msg) => { 
-                println!("[info] Execution failed for `{:?}`, error: `{:?}`",
-                    new_update.item,
-                    err_msg
-                );
-                // let's not keep track of failed jobs
-            },
+//             protocol::JobStatus::ExecutionFailed(err_msg) => { 
+//                 println!("[info] Execution failed for `{:?}`, error: `{:?}`",
+//                     new_update.item,
+//                     err_msg
+//                 );
+//                 // let's not keep track of failed jobs
+//             },
 
-            protocol::JobStatus::ExecutionSucceeded(receipt_cid) => { 
-                match new_update.item {
-                    protocol::Item::ProveAndLift(seg_id) => {
-                        if job.recursion.stage != Stage::Prove {                             
-                            continue;
-                        }
-                        if seg_id >= job.schema.prove.num_segments {
-                            eprintln!(
-                                "[warn] Invalid segment id `{}`, valid range: `0 - {}`",
-                                seg_id,
-                                job.schema.prove.num_segments
-                            );
-                            continue;
-                        }
-                        //@ need to validate received proof somehow
-                        job.recursion.prove_and_lift.progress_map.set(seg_id as usize, true);
-                        job.recursion.prove_and_lift.proofs
-                        .entry(seg_id)
-                        .and_modify(|seg| {
-                            seg.insert(
-                                receipt_cid.to_string(),
-                                recursion::Proof {
-                                    prover: prover_id.clone(),
-                                }
-                            );
-                        })
-                        .or_insert(
-                            HashMap::from([
-                                (
-                                    receipt_cid.to_string(), 
-                                    recursion::Proof {
-                                        prover: prover_id.clone(),
-                                    }
-                                )
-                            ])
-                        );
-                        if true == job.recursion.prove_and_lift.is_finished() {
-                            if true == job.recursion.begin_join_stage() {
-                                // verify stark proof
-                            } 
-                        }
-                        // db
-                        segment_inserts.push(
-                            db::Segment {
-                                id: seg_id,
-                                job_id: bson::Bson::Null,
-                                proof: db::Proof {
-                                    cid: receipt_cid.to_string(),
-                                    prover: prover_id.clone()
-                                }
-                            }                            
-                        );
-                    },
+//             protocol::JobStatus::ExecutionSucceeded(receipt_cid) => { 
+//                 match new_update.item {
+//                     protocol::Item::ProveAndLift(seg_id) => {
+//                         if job.recursion.stage != Stage::Prove {                             
+//                             continue;
+//                         }
+//                         if seg_id >= job.schema.prove.num_segments {
+//                             eprintln!(
+//                                 "[warn] Invalid segment id `{}`, valid range: `0 - {}`",
+//                                 seg_id,
+//                                 job.schema.prove.num_segments
+//                             );
+//                             continue;
+//                         }
+//                         //@ need to validate received proof somehow
+//                         job.recursion.prove_and_lift.progress_map.set(seg_id as usize, true);
+//                         job.recursion.prove_and_lift.proofs
+//                         .entry(seg_id)
+//                         .and_modify(|seg| {
+//                             seg.insert(
+//                                 receipt_cid.to_string(),
+//                                 recursion::Proof {
+//                                     prover: prover_id.clone(),
+//                                 }
+//                             );
+//                         })
+//                         .or_insert(
+//                             HashMap::from([
+//                                 (
+//                                     receipt_cid.to_string(), 
+//                                     recursion::Proof {
+//                                         prover: prover_id.clone(),
+//                                     }
+//                                 )
+//                             ])
+//                         );
+//                         if true == job.recursion.prove_and_lift.is_finished() {
+//                             if true == job.recursion.begin_join_stage() {
+//                                 // verify stark proof
+//                             } 
+//                         }
+//                         // db
+//                         segment_inserts.push(
+//                             db::Segment {
+//                                 id: seg_id,
+//                                 job_id: bson::Bson::Null,
+//                                 proof: db::Proof {
+//                                     cid: receipt_cid.to_string(),
+//                                     prover: prover_id.clone()
+//                                 }
+//                             }                            
+//                         );
+//                     },
 
-                    protocol::Item::Join(left, right) => {
-                        if job.recursion.stage != Stage::Join { 
-                            continue;
-                        }
-                        let round = job.recursion.join_rounds.last_mut().unwrap();
-                        let index = match round.pairs.iter().position(| p | p.0 == left && p.1 == right) {
-                            Some(i) => i,
-                            None => {
-                                eprintln!("[warn] Invalid join pair, left: `{left:?}`, right: `{right:?}`");
-                                continue;
-                            }
-                        };
-                        round.progress_map.set(index, true);
-                        round.proofs
-                        .entry(index)
-                        .and_modify(|proofs_map| {
-                            proofs_map.insert(
-                                receipt_cid.to_string(),
-                                recursion::Proof {
-                                    prover: prover_id.clone(),
-                                }
-                            );
-                        })
-                        .or_insert(
-                            HashMap::from([
-                                (
-                                    receipt_cid.to_string(), 
-                                    recursion::Proof {
-                                        prover: prover_id.clone(),
-                                    }
-                                )
-                            ])
-                        );
-                        if round.progress_map.len() == round.pairs.len() {
-                            if true == job.recursion.begin_join_stage() {
-                                // verify stark proof
-                            }                             
-                        }
-                        // db
-                        // join_inserts.push(
-                        //     db::Join {
-                        //         job_id: db_job_oid.clone(),
-                        //         left: left.to_string(),
-                        //         right: right.to_string(),
-                        //         proof: db::Proof {
-                        //             cid: receipt_cid.to_string(),
-                        //             prover: prover_id.clone()
-                        //         }
-                        //     }                            
-                        // );
-                    },
+//                     protocol::Item::Join(left, right) => {
+//                         if job.recursion.stage != Stage::Join { 
+//                             continue;
+//                         }
+//                         let round = job.recursion.join_rounds.last_mut().unwrap();
+//                         //@ not efficient to do 100k comparisons.
+//                         let index = match round.pairs.iter().position(| p | p.0 == left && p.1 == right) {
+//                             Some(i) => i,
+//                             None => {
+//                                 eprintln!("[warn] Invalid join pair, left: `{left:?}`, right: `{right:?}`");
+//                                 continue;
+//                             }
+//                         };
+//                         round.progress_map.set(index, true);
+//                         round.proofs
+//                         .entry(index)
+//                         .and_modify(|proofs_map| {
+//                             proofs_map.insert(
+//                                 receipt_cid.to_string(),
+//                                 recursion::Proof {
+//                                     prover: prover_id.clone(),
+//                                 }
+//                             );
+//                         })
+//                         .or_insert(
+//                             HashMap::from([
+//                                 (
+//                                     receipt_cid.to_string(), 
+//                                     recursion::Proof {
+//                                         prover: prover_id.clone(),
+//                                     }
+//                                 )
+//                             ])
+//                         );
+//                         if round.progress_map.len() == round.pairs.len() {
+//                             if true == job.recursion.begin_join_stage() {
+//                                 // verify stark proof
+//                             }                             
+//                         }
+//                         // db
+//                         // join_inserts.push(
+//                         //     db::Join {
+//                         //         job_id: db_job_oid.clone(),
+//                         //         left: left.to_string(),
+//                         //         right: right.to_string(),
+//                         //         proof: db::Proof {
+//                         //             cid: receipt_cid.to_string(),
+//                         //             prover: prover_id.clone()
+//                         //         }
+//                         //     }                            
+//                         // );
+//                     },
 
-                    protocol::Item::Groth16 => {
-                        // if job.recursion.stage != Stage::Stark { 
-                        //     continue;
-                        // }
-                        // job.recursion.snark = Some(receipt_cid.to_string());
-                        // job.recursion.stage = Stage::Snark;
-                        // println!("[info] a SNARK proof has been extracted for the job `{job_id}`: {receipt_cid} ");
-                    },
-
-                    protocol::Item::Verification => {},
-                };
-            },            
-        };
-    } 
-    Ok(segment_inserts)  
-}
+//                     protocol::Item::Groth16 => {
+//                         // if job.recursion.stage != Stage::Groth16 { 
+//                         //     continue;
+//                         // }
+//                         // job.recursion.snark = Some(receipt_cid.to_string());
+//                         // job.recursion.stage = Stage::Snark;
+//                         // println!("[info] a SNARK proof has been extracted for the job `{job_id}`: {receipt_cid} ");
+//                     },
+//                 };
+//             },            
+//         };
+//     } 
+//     Ok(segment_inserts)  
+// }
 
 #[derive(Debug, Clone)]
 struct VerificationResult {
