@@ -65,7 +65,7 @@ impl ProveAndLift {
     }
     
     pub fn is_finished(&self) -> bool {
-       self.num_segments == self.progress_map.len() as u32
+       self.progress_map.all()
     }
 }
 
