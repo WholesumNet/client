@@ -128,8 +128,9 @@ impl Recursion {
     }
 
     pub fn begin_join_stage(&mut self) -> bool {
+        println!("[info] Attempting to start the join stage...");
         if self.stage != Stage::Prove {
-            eprintln!("[warn] Join stage follows the Prove stage.");
+            eprintln!("[warn] Join stage must follow the prove stage.");
             return false;
         }        
         if false == self.prove_and_lift.is_finished() {
@@ -137,7 +138,7 @@ impl Recursion {
             return false;
         }
         if true == self.prove_and_lift.proofs.is_empty() {
-            eprintln!("[warn] No proofs to join.");
+            eprintln!("[warn] No proofs for the join stage to start.");
             return false;
         }
         self.stage = Stage::Join;        
@@ -223,6 +224,12 @@ impl Recursion {
                 leftover: leftover,
                 progress_map: BitVec::from_elem(num_pairs, false),
             }
+        );
+        //@ just for info, should be removed
+        println!(
+            "[info] Starting join round {}, pairs: {:#?}",
+            self.join_rounds.len(),
+            self.join_rounds.last().unwrap()            
         );        
         false
     }  
