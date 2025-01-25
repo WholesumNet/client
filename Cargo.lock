@@ -1122,7 +1122,6 @@ dependencies = [
  "libp2p",
  "mongodb",
  "num_enum",
- "rand",
  "reqwest 0.11.27",
  "risc0-zkvm",
  "serde",

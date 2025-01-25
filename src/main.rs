@@ -17,7 +17,7 @@ use libp2p::{
     PeerId,
 };
 use std::collections::{
-    HashMap,
+    BTreeMap,
 };
 use std::{
     fs,
@@ -27,9 +27,7 @@ use std::{
     },
     future::IntoFuture,
 };
-use rand::Rng;
 use bincode;
-// use chrono::{Utc};
 
 use toml;
 use tracing_subscriber::EnvFilter;
@@ -50,7 +48,6 @@ use uuid::Uuid;
 use risc0_zkvm::{
     Receipt, InnerReceipt, SuccinctReceipt, ReceiptClaim,
     Journal,
-    // sha::Digest,
 };
 use hex::FromHex;
 
@@ -308,29 +305,18 @@ async fn main() -> anyhow::Result<()> {
                     // do nothing
                 }
             },
-            
-            // succinct receipt's verification has been finished
-            // v_res = succinct_receipt_verification_futures.select_next_some() => {                
-            //     if let Err(failed) = v_res {
-            //         let failed: VerificationError = failed;
-            //         eprintln!("[warn] Proved receipt(`{}`)'s verification has failed. error: `{}`", 
-            //             failed.item_id,
-            //             failed.err_msg
-            //         );
-            //     }
-            // },
 
             v_res = join_proof_verification_futures.select_next_some() => {
                 let receipt: Receipt = match v_res {
                     Err(failed) => {
                         //@ which segment/join/... to blame? 
-                        eprintln!("[warn] Join proof verification has been failed: `{:#?}`", failed);
+                        eprintln!("[warn] Failed to verify the final join proof: `{:#?}`", failed);
                         continue;                        
                     },
 
                     Ok(r) => r
                 };
-                println!("[info] Bingo! the final join proof has been verified, aggregation is complete.");
+                println!("[info] Bingo! the final join proof has been verified, recursion is complete.");
                 job.recursion.stage = Stage::Groth16;
                 db_update_futures.push(
                     col_jobs.update_one(
@@ -349,17 +335,17 @@ async fn main() -> anyhow::Result<()> {
 
             res = db_insert_futures.select_next_some() => {
                 match res {
-                    Err(e) => eprintln!("[warn] Failed to record progress(insert) to the db: `{:#?}`", e),
+                    Err(e) => eprintln!("[warn] DB insert was failed: `{:#?}`", e),
 
-                    Ok(oid) => println!("[info] Progress recorded(insert) to the db: `{:?}`", oid)
+                    Ok(oid) => println!("[info] DB insert was successful: `{:?}`", oid)
                 }                
             },
 
             res = db_update_futures.select_next_some() => {
                 match res {
-                    Err(e) => eprintln!("[warn] Failed to record progress(update) to the db: `{:#?}`", e), 
+                    Err(e) => eprintln!("[warn] DB update was failed: `{:#?}`", e),
 
-                    Ok(oid) => println!("[info] Progress recorded(update) to the db: `{:?}`", oid)
+                    Ok(oid) => println!("[info] DB update was successful: `{:?}`", oid)
                 } 
             },
 
@@ -730,8 +716,6 @@ fn i_need_update(
     topic: &gossipsub::IdentTopic,
     job_id: &str,
 ) -> anyhow::Result<()> {
-    let mut rng = rand::thread_rng();
-    let nonce: u8 = rng.gen();
     if let Err(e) = gossipsub
     .publish(
         topic.clone(),
@@ -916,12 +900,13 @@ async fn resume_job(
         recursion: recursion::Recursion::new(db_job.num_segments)
     };
     // prove stage(segments)
-    let segments = retrieve_segments_from_db(
+    let proofs = retrieve_segments_from_db(
         col_segments,
         &db_job_oid,
     ).await?;
-    if segments.len() == 0 {
-        println!("[warn] No segments to sync with.");
+    println!("[info] Number of proved segments: `{}`", proofs.len());
+    if true == proofs.is_empty() {
+        println!("[warn] No proved segments to sync with.");
         return Ok(
             (
                 job,
@@ -929,20 +914,23 @@ async fn resume_job(
             )
         )
     }
-    for seg_id in segments.keys() {
+    for seg_id in proofs.keys() {
         job.recursion.prove_and_lift.progress_map.set(*seg_id as usize, true);
     }
+    job.recursion.prove_and_lift.proofs = proofs;
     if true == job.recursion.prove_and_lift.is_finished() {
-        // job.recursion.begin_join();
-        // if true == job.recursion.join.begin_next_round() {
-        //     println!("[info] Join is already finished.");
-        //     return Ok(
-        //         (
-        //             job,
-        //             db_job_oid
-        //         )
-        //     )            
-        // }
+        println!("[info] Prove stage is finished.");
+        if true == job.recursion.begin_join_stage() {
+            // verify stark proof
+            println!("[info] Attempting to verify the stark proof");
+
+            return Ok(
+                (
+                    job,
+                    db_job_oid
+                )
+            );
+        }
     }
     // join
     // let join_btree = retrieve_verified_joins_from_db(
@@ -1015,7 +1003,7 @@ async fn resume_job(
 async fn retrieve_segments_from_db(
     col_segments: &mongodb::Collection<db::Segment>,
     db_job_oid: &Bson,
-) -> anyhow::Result<HashMap<u32, HashMap<String, String>>> {
+) -> anyhow::Result<BTreeMap<u32, Vec<recursion::Proof>>> {
     // retrieve all proved segments
     println!("[info] Retrieving segments from the db...");
     let mut cursor = col_segments.find(
@@ -1024,19 +1012,29 @@ async fn retrieve_segments_from_db(
         }
     )
     .await?;
-    let mut segments = HashMap::<u32, HashMap<String, String>>::new();
+    let mut proofs = BTreeMap::<u32, Vec<recursion::Proof>>::new();
     while let Some(db_segment) = cursor.try_next().await? {        
-        segments.entry(db_segment.id)
+        proofs.entry(db_segment.id)
         .and_modify(|v| {
-            v.insert(db_segment.proof.cid.clone(), db_segment.proof.prover.clone());
+            v.push(
+                recursion::Proof {
+                    cid: db_segment.proof.cid.clone(),
+                    prover: db_segment.proof.prover.clone(),
+                    spent: false
+                }
+            );
         })
         .or_insert_with(|| {
-            HashMap::from([
-                (db_segment.proof.cid, db_segment.proof.prover)
-            ])
+            vec![
+                recursion::Proof {
+                    cid: db_segment.proof.cid,
+                    prover: db_segment.proof.prover,
+                    spent: false
+                }
+            ]
         });
     }
-    Ok(segments)
+    Ok(proofs)
 }
 
 // async fn retrieve_verified_joins_from_db(
@@ -1152,20 +1150,20 @@ async fn verify_join_proof(
     image_id: String,
 ) -> anyhow::Result<Receipt> {
     let sr: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(
-        &std::fs::read(succinct_receipt_file_path)?
+        &std::fs::read(&succinct_receipt_file_path)?
     )?;
     let journal: Journal = bincode::deserialize(
-        &std::fs::read(journal_file_path)?
+        &std::fs::read(&journal_file_path)?
     )?;
-    let stark_receipt = Receipt::new(
+    let receipt = Receipt::new(
         InnerReceipt::Succinct(sr),
         journal.bytes
     );        
     let now = Instant::now();
-    stark_receipt.verify(
+    receipt.verify(
         <[u8; 32]>::from_hex(&image_id)?
     )?;
     let verification_dur = now.elapsed().as_millis();
-    println!("[info] STARK verification took `{verification_dur} msecs`.");
-    Ok(stark_receipt)
+    println!("[info] Verification took `{verification_dur} msecs`.");
+    Ok(receipt)
 }
