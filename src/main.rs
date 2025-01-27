@@ -307,7 +307,7 @@ async fn main() -> anyhow::Result<()> {
             },
 
             v_res = join_proof_verification_futures.select_next_some() => {
-                let receipt: Receipt = match v_res {
+                let _receipt: Receipt = match v_res {
                     Err(failed) => {
                         //@ which segment/join/... to blame? 
                         eprintln!("[warn] Failed to verify the final join proof: `{:#?}`", failed);
@@ -325,7 +325,7 @@ async fn main() -> anyhow::Result<()> {
                         }, 
                         doc! {
                             "$set": doc! {
-                                "stage": bson::to_bson(&Stage::Stark)?,
+                                "stage": bson::to_bson(&Stage::Agg)?,
                             }
                         }
                     )
@@ -566,8 +566,8 @@ async fn main() -> anyhow::Result<()> {
                                         if true == job.recursion.prove_and_lift.is_finished() {
                                             println!("[info] Prove stage is finished.");
                                             if true == job.recursion.begin_join_stage() {
-                                                // verify stark proof
-                                                println!("[info] Attempting to verify the stark proof");
+                                                // verify join proof
+                                                println!("[info] Attempting to verify the final join proof");
                                             }
                                         }
                                         // db
@@ -613,6 +613,13 @@ async fn main() -> anyhow::Result<()> {
                                                 continue;
                                             }
                                         };
+                                        if true == round
+                                            .progress_map
+                                            .get(index)
+                                            .unwrap()
+                                        {
+                                            continue;
+                                        }
                                         round.progress_map.set(index, true);
                                         println!(
                                             "[info] `Pair {:?}` is joined, progress_map: {:?}",
@@ -647,7 +654,6 @@ async fn main() -> anyhow::Result<()> {
                                             ]
                                         });
                                         // db
-                                        //@ watch for duplicates
                                         db_insert_futures.push(
                                             col_joins.insert_one(
                                                 db::Join {
@@ -900,12 +906,11 @@ async fn resume_job(
         recursion: recursion::Recursion::new(db_job.num_segments)
     };
     // prove stage(segments)
-    let proofs = retrieve_segments_from_db(
+    let db_proofs = retrieve_segments_from_db(
         col_segments,
         &db_job_oid,
     ).await?;
-    println!("[info] Number of proved segments: `{}`", proofs.len());
-    if true == proofs.is_empty() {
+    if true == db_proofs.is_empty() {
         println!("[warn] No proved segments to sync with.");
         return Ok(
             (
@@ -914,16 +919,17 @@ async fn resume_job(
             )
         )
     }
-    for seg_id in proofs.keys() {
+    println!("[info] Number of proved segments found: `{}`", db_proofs.len());
+    for seg_id in db_proofs.keys() {
         job.recursion.prove_and_lift.progress_map.set(*seg_id as usize, true);
     }
-    job.recursion.prove_and_lift.proofs = proofs;
+    job.recursion.prove_and_lift.proofs = db_proofs;
+    println!("[info] Prove stage is in sync with DB.");
     if true == job.recursion.prove_and_lift.is_finished() {
         println!("[info] Prove stage is finished.");
         if true == job.recursion.begin_join_stage() {
-            // verify stark proof
-            println!("[info] Attempting to verify the stark proof");
-
+            println!("[info] Attempting to verify the final join proof...");
+            //@ todo: verify join proof
             return Ok(
                 (
                     job,
@@ -931,67 +937,107 @@ async fn resume_job(
                 )
             );
         }
+    } else {
+        eprintln!("[warn] Prove stage is not finished yet so no need to retrieve join data from DB.");
+        return Ok(
+                (
+                    job,
+                    db_job_oid
+                )
+        );
     }
     // join
-    // let join_btree = retrieve_verified_joins_from_db(
-    //     col_joins,
-    //     &verified_segments,
-    //     &db_job_oid,
-    //     &job.working_dir
-    // ).await?;
-    // if join_btree.len() == 0 {
-    //     eprintln!("[warn] No verified joins to sync with.");
-    //     return Ok(
-    //         (
-    //             job,
-    //             db_job_oid
-    //         )
-    //     )
-    // }
-    // let db_cur_round = join_btree.keys().last().unwrap();
-    // // println!("db round: {db_cur_round}");    
-    // // println!("db rounds: {:?}", join_btree.keys());
-    // // emulate a full join and sync with    
-    // loop {
-    //     let round_joins = match join_btree
-    //         .get(&(job.recursion.join.round as u32))
-    //     {
-    //         Some(v) => v,
-    //         None => {
-    //             println!("no more joins is possible.");
-    //             break;
-    //         }
-    //     };            
-    //     // println!("r: {}, len: {}", job.recursion.join.round, round_joins.len());
-    //     for db_join in round_joins {
-    //         let joined_pair_index = job
-    //             .recursion
-    //             .join
-    //             .pairs
-    //             .iter()
-    //             .position(|p| 
-    //                 p.left == db_join.verified_blob.input_cid_left &&
-    //                 p.right == db_join.verified_blob.input_cid_right
-    //             );
-    //         if true == joined_pair_index.is_none() {
-    //             eprintln!("[warn] Missing join pair, sync may be incomplete.");
-    //             continue;
-    //         }
-    //         // println!("removing pair {}-{}", db_join.verified_blob.input_cid_left,db_join.verified_blob.input_cid_right);
-    //         let joined_pair = job.recursion.join.pairs.swap_remove(joined_pair_index.unwrap());
-    //         job.recursion.join.joined.insert(
-    //             joined_pair.position,
-    //             db_join.verified_blob.cid.clone()
-    //         );            
-    //     }
-    //     if true == job.recursion.join.begin_next_round() ||
-    //        job.recursion.join.round as u32 == *db_cur_round
-    //     {            
-    //         break;
-    //     }
-    // }
-    // println!("{:#?}", job.recursion.join);
-    // println!("[info] Join is synced with the db.");
+    let join_btree = retrieve_joins_from_db(
+        col_joins,
+        &db_job_oid,
+    ).await?;
+    if join_btree.len() == 0 {
+        eprintln!("[warn] No joins to sync with.");
+        return Ok(
+            (
+                job,
+                db_job_oid
+            )
+        )
+    }
+    let max_allowed_join_rounds = job.schema.prove.num_segments.ilog2() + 1;
+    let available_join_rounds_on_db = join_btree.keys().last().unwrap();
+    if *available_join_rounds_on_db > max_allowed_join_rounds {
+        eprintln!("[warn] Too many join rounds. Max would be `{}`, but `{}` are available.",
+            max_allowed_join_rounds,
+            available_join_rounds_on_db
+        );
+        return Ok(
+            (
+                job,
+                db_job_oid
+            )
+        )
+    }
+    for (round_number, db_joins) in join_btree.into_iter() {
+        println!("[info] Checking join round {round_number}...");
+        let round = job.recursion.join_rounds.last_mut().unwrap();
+        for db_join in db_joins.iter() {
+            if let Some(pair_index) = round
+                .pairs
+                .iter()
+                .position(|p| 
+                    p.0 == db_join.left_input_proof &&
+                    p.1 == db_join.right_input_proof
+                )
+            {
+                if true == round
+                    .progress_map
+                    .get(pair_index)
+                    .unwrap()
+                {
+                    continue;
+                }
+                round.progress_map.set(pair_index, true);                
+                round.proofs.entry(pair_index)
+                .and_modify(|proofs| {
+                    match proofs
+                    .iter()
+                    .find(|p: &&recursion::Proof| p.cid == db_join.proof.cid) {
+                        None => {
+                            proofs.push(
+                                recursion::Proof {
+                                    cid: db_join.proof.cid.clone(),
+                                    prover: db_join.proof.prover.clone(),
+                                    spent: false,
+                                }
+                            )
+                        },
+
+                        Some(_) => ()
+                    }
+                })
+                .or_insert_with(|| {
+                    vec![
+                        recursion::Proof {
+                            cid: db_join.proof.cid.clone(),
+                            prover: db_join.proof.prover.clone(),
+                            spent: false,
+                        }
+                    ]
+                });
+
+            } else {
+                eprintln!("[warn] `({}-{})` is not found in the pairs. Sync may be incomplete.",
+                    db_join.left_input_proof,
+                    db_join.right_input_proof
+                );              
+                continue;
+            }
+        }
+        println!("[info] Sync is complete for round {}.", round.number);
+        if true == round.progress_map.all() {
+            if true == job.recursion.begin_next_join_round() {
+                println!("[info] Let's verify the final join proof.");                    
+            }
+        }
+    }
+
     Ok(
         (
             job,
@@ -1037,40 +1083,35 @@ async fn retrieve_segments_from_db(
     Ok(proofs)
 }
 
-// async fn retrieve_verified_joins_from_db(
-//     col_joins: &mongodb::Collection<db::Join>,
-//     verified_segments: &Vec<recursion::Segment>,
-//     db_job_oid: &Bson,
-//     working_dir: &str,
-// ) -> anyhow::Result<BTreeMap<u32, Vec<db::Join>>> {
-//     println!("[info] Retrieving verified joins from the db...");
-//     // println!("{db_job_oid:?}");
-//     let mut cursor = col_joins.find(
-//         doc! {
-//             "job_id": db_job_oid
-//         }
-//     )
-//     // .projection(
-//     //     doc! {
-//     //         "verified_blob": 0
-//     //     }
-//     // )
-//     .sort(
-//         doc! {
-//             "round": 1 
-//         }
-//     )
-//     .await?;
-//     let mut join_btree = BTreeMap::<u32, Vec<db::Join>>::new();
-//     while let Some(db_join) = cursor.try_next().await? {  
-//         // println!("{}, {}", db_join.round, db_join.verified_blob.cid);      
-//         join_btree.entry(db_join.round as u32)
-//             .and_modify(|j| j.push(db_join.clone()))
-//             .or_insert(vec![db_join]);
-//     }
-//     // emulate
-//     Ok(join_btree)
-// }
+async fn retrieve_joins_from_db(
+    col_joins: &mongodb::Collection<db::Join>,
+    db_job_oid: &Bson,
+) -> anyhow::Result<BTreeMap<u32, Vec<db::Join>>> {
+    println!("[info] Retrieving joins from the db...");
+    let mut cursor = col_joins.find(
+        doc! {
+            "job_id": db_job_oid
+        }
+    )
+    // .projection(
+    //     doc! {
+    //         "verified_blob": 0
+    //     }
+    // )
+    .sort(
+        doc! {
+            "round": 1 
+        }
+    )
+    .await?;
+    let mut join_btree = BTreeMap::<u32, Vec<db::Join>>::new();
+    while let Some(db_join) = cursor.try_next().await? {  
+        join_btree.entry(db_join.round as u32)
+            .and_modify(|j| j.push(db_join.clone()))
+            .or_insert(vec![db_join]);
+    }
+    Ok(join_btree)
+}
 
 #[derive(Debug, Clone)]
 struct VerificationResult {
