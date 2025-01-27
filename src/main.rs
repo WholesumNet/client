@@ -944,7 +944,7 @@ async fn resume_job(
                     job,
                     db_job_oid
                 )
-            );
+        );
     }
     // join
     let join_btree = retrieve_joins_from_db(
