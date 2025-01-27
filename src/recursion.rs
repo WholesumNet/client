@@ -1,9 +1,5 @@
-use std::{    
-    vec::Vec,
-    collections::{
-        HashMap,
-        BTreeMap
-    },
+use std::{ 
+    collections::BTreeMap,
 };
 use serde::{
     Serialize,
@@ -23,11 +19,11 @@ development stages of a job:
         - N segments -> N proofs(SuccinctReceipt)
     b. join
         btree fashion
-        log2(n) + 1 rounds of join to obtain the final proof(SuccinctReceipt) aka the stark proof
+        log2(n) + 1 rounds of join to obtain the final join proof(SuccinctReceipt)
         e.g. starting with N = 5 and segments labeled 1-5:
           1: (1, 2) -> 12, (3, 4) -> 34, 5 -> 5
           2: (12, 34) -> 1234, 5 -> 5
-          3: (1234, 5) -> the final stark proof
+          3: (1234, 5) -> the final join proof
     c. snark extraction
         - apply identity_p254 and then compress -> ~300 bytes snark proof
 */
@@ -97,10 +93,10 @@ pub enum Stage {
     // prove & lift is complete, now joining segments
     Join,
 
-    // join is complete, so begin stark verification
-    Stark,
+    // join is complete, so begin join verification
+    Agg,
 
-    // stark proof is ready, so begin groth16 verification
+    // join proof is ready, so begin groth16 verification
     Groth16,
 }
 
@@ -113,7 +109,7 @@ pub struct Recursion {
 
     // join data        
     pub join_rounds: Vec<JoinRound>,
-    // the result of the last join operation aka stark proof
+    // the result of the final join
     pub join_proof: Option<String>,
 }
 
@@ -196,7 +192,7 @@ impl Recursion {
         if prev_round_proofs.len() == 1 {
             println!("[info] Join is finished.");
             self.join_proof = Some(prev_round_proofs.pop().unwrap());
-            self.stage = Stage::Stark;
+            self.stage = Stage::Agg;
             return true;            
         } else if prev_round_proofs.len() == 2 {
             println!("[info] This is going to be the last join round.");
@@ -226,10 +222,8 @@ impl Recursion {
             }
         );
         //@ just for info, should be removed
-        println!(
-            "[info] Starting join round {}, pairs: {:#?}",
-            self.join_rounds.len(),
-            self.join_rounds.last().unwrap()            
+        println!("[info] Starting a new join round: {:#?}",
+            self.join_rounds.last().unwrap()        
         );        
         false
     }  
