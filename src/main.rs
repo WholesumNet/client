@@ -176,11 +176,10 @@ async fn main() -> anyhow::Result<()> {
     let mut db_update_futures = FuturesUnordered::new();
 
     // the job
-    let db_job_oid;
-    let mut job = match &cli.job {
+    let (mut job, db_job_oid) = match &cli.job {
         Some(Commands::New{ job_file }) => {
             let job = new_job(job_file)?;
-            db_job_oid = col_jobs.insert_one(
+            let oid = col_jobs.insert_one(
                 db::Job {
                     id: job.id.clone(),
                     po2: job.schema.prove.po2,
@@ -199,26 +198,24 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?
             .inserted_id;
-            println!("[info] Job's progress will be recorded to the db, id: `{db_job_oid:?}`");
-            job
+            (job, oid)
         },
 
         Some(Commands::Resume{ job_id }) => {
-            let (synced_job, joid) = resume_job(
+            resume_job(
                 &db_client.database("wholesum_client").collection("jobs"),
                 &col_segments,
                 &col_joins,
                 job_id
             )
-            .await?;
-            db_job_oid = joid;
-            synced_job
+            .await?
         },
 
         _ => {
             panic!("[warn] Missing command, not sure what you meant.");
         },
-    };     
+    };
+    println!("[info] Job's progress will be recorded to the DB with Id: `{db_job_oid:?}`");
 
     // swarm 
     let mut swarm = comms::p2p::setup_swarm(&local_key).await?;
@@ -268,6 +265,28 @@ async fn main() -> anyhow::Result<()> {
     // used for posting job needs
     let mut timer_post_job = stream::interval(Duration::from_secs(60)).fuse();
     let mut timer_post_update = stream::interval(Duration::from_secs(600)).fuse();
+
+    if job.recursion.stage == Stage::Agg {
+        // verify the final join proof                                                
+        println!("[info] Let's verify the final join proof.");
+        let join_proof_cid = job.recursion.join_proof.clone().unwrap();
+        let join_proof_filepath = format!("{}/join/proof", job.working_dir);
+        if let Err(e) = lighthouse::download_file(
+            &ds_client,
+            &join_proof_cid,
+            join_proof_filepath.clone()
+        ).await {
+            eprintln!("[warn] Proof download failed: `{e:?}`");
+        } else {                                                
+            join_proof_verification_futures.push(
+                verify_join_proof(
+                    join_proof_filepath.clone(),
+                    job.schema.verification.journal_file_path.clone(),
+                    job.schema.verification.image_id.clone(),
+                )
+            );                                                    
+        }
+    }
 
     loop {
         select! {
@@ -695,12 +714,14 @@ async fn main() -> anyhow::Result<()> {
                                     },
 
                                     protocol::ProofType::Groth16 => {
-                                        // if job.recursion.stage != Stage::Groth16 { 
-                                        //     continue;
-                                        // }
-                                        // job.recursion.snark = Some(receipt_cid.to_string());
-                                        // job.recursion.stage = Stage::Snark;
-                                        // println!("[info] a SNARK proof has been extracted for the job `{job_id}`: {receipt_cid} ");
+                                        if job.recursion.stage != Stage::Groth16 { 
+                                            continue;
+                                        }
+                                        job.recursion.groth16_proofs.insert(
+                                            prover_peer_id.to_string(),
+                                            new_proof.cid.clone()
+                                        );
+                                        println!("[info] A Groth16 proof has been extracted: `{:?}`.", new_proof.cid);
                                     },
                                 };
                             }                                                    
@@ -738,6 +759,7 @@ fn i_need_compute(
     job: &job::Job
 ) -> anyhow::Result<()> {
     let compute_job = match job.recursion.stage {
+        // request for prove
         Stage::Prove => {
             println!(
                 "gossip progress_map: {:?}",
@@ -758,6 +780,7 @@ fn i_need_compute(
             }
         },
 
+        // request for join
         Stage::Join => {
             let round = job.recursion.join_rounds.last().unwrap();
             protocol::ComputeJob {
@@ -771,6 +794,19 @@ fn i_need_compute(
                 )
             }
         },
+
+        // request for groth16
+        Stage::Groth16 => {
+            protocol::ComputeJob {
+                job_id: job.id.clone(),
+                budget: 0,
+                job_type: protocol::JobType::Groth16(
+                    protocol::Groth16Details {
+                        cid: job.recursion.join_proof.clone().unwrap()
+                    }
+                )
+            }
+        }
 
         _ => {
             return Ok(())
@@ -940,10 +976,10 @@ async fn resume_job(
     } else {
         eprintln!("[warn] Prove stage is not finished yet so no need to retrieve join data from DB.");
         return Ok(
-                (
-                    job,
-                    db_job_oid
-                )
+            (
+                job,
+                db_job_oid
+            )
         );
     }
     // join
@@ -1032,8 +1068,7 @@ async fn resume_job(
         }
         println!("[info] Sync is complete for round {}.", round.number);
         if true == round.progress_map.all() {
-            if true == job.recursion.begin_next_join_round() {
-                println!("[info] Let's verify the final join proof.");                    
+            if true == job.recursion.begin_next_join_round() {                
             }
         }
     }
@@ -1205,6 +1240,6 @@ async fn verify_join_proof(
         <[u8; 32]>::from_hex(&image_id)?
     )?;
     let verification_dur = now.elapsed().as_millis();
-    println!("[info] Verification took `{verification_dur} msecs`.");
+    println!("[info](DUR) Verification took `{verification_dur} msecs`.");
     Ok(receipt)
 }

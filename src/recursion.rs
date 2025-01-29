@@ -1,5 +1,5 @@
 use std::{ 
-    collections::BTreeMap,
+    collections::{ BTreeMap, HashMap},
 };
 use serde::{
     Serialize,
@@ -93,10 +93,10 @@ pub enum Stage {
     // prove & lift is complete, now joining segments
     Join,
 
-    // join is complete, so begin join verification
+    // join is complete, so begin local join verification
     Agg,
 
-    // join proof is ready, so begin groth16 verification
+    // join is complete and its proof is verified, so begin groth16 extraction
     Groth16,
 }
 
@@ -111,6 +111,8 @@ pub struct Recursion {
     pub join_rounds: Vec<JoinRound>,
     // the result of the final join
     pub join_proof: Option<String>,
+    // the snark proofs: <prover, proof ~ 300 bytes in base64 format>
+    pub groth16_proofs: HashMap<String, String>,
 }
 
 impl Recursion {
@@ -120,6 +122,7 @@ impl Recursion {
             prove_and_lift: ProveAndLift::new(num_segments),
             join_rounds: Vec::new(),
             join_proof: None,
+            groth16_proofs: HashMap::new(),
         }
     }
 
