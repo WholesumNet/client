@@ -548,9 +548,8 @@ async fn main() -> anyhow::Result<()> {
                                         //@ need to validate received proof somehow
                                         job.recursion.prove_and_lift.progress_map.set(seg_id as usize, true);
                                         println!(
-                                            "[info] `Segment {}` is proved, progress_map: {:?}",
-                                            seg_id,
-                                            job.recursion.prove_and_lift.progress_map
+                                            "[info] `Segment {}` is proved.",
+                                            seg_id
                                         );
                                         job.recursion.prove_and_lift
                                         .proofs
@@ -641,9 +640,8 @@ async fn main() -> anyhow::Result<()> {
                                         }
                                         round.progress_map.set(index, true);
                                         println!(
-                                            "[info] `Pair {:?}` is joined, progress_map: {:?}",
-                                            (&left, &right),
-                                            round.progress_map
+                                            "[info] `Pair {:?}` is joined.",
+                                            (&left, &right)
                                         );
                                         round.proofs.entry(index)
                                         .and_modify(|proofs| {
@@ -760,11 +758,7 @@ fn i_need_compute(
 ) -> anyhow::Result<()> {
     let compute_job = match job.recursion.stage {
         // request for prove
-        Stage::Prove => {
-            println!(
-                "gossip progress_map: {:?}",
-                job.recursion.prove_and_lift.progress_map
-            );
+        Stage::Prove => {            
             protocol::ComputeJob {
                 job_id: job.id.clone(),
                 budget: 0,
