@@ -27,10 +27,10 @@ use std::{
     },
     future::IntoFuture,
 };
+use env_logger::Env;
+use log::{info, warn, error};
 use bincode;
-
 use toml;
-use tracing_subscriber::EnvFilter;
 use anyhow;
 use reqwest;
 
@@ -117,13 +117,11 @@ enum Commands {
 
 #[async_std::main]
 async fn main() -> anyhow::Result<()> {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init();
-
+    env_logger::Builder::from_env(Env::default().default_filter_or("info"))
+        .init();
     let cli = Cli::parse();
-    println!("<-> Client agent for Wholesum network <->");
-    println!("operating mode: `{}` network",
+    info!("<-> Client agent for Wholesum network <->");
+    info!("operating mode: `{}` network",
         if false == cli.dev {"global"} else {"local(development)"}
     );
 
@@ -151,11 +149,11 @@ async fn main() -> anyhow::Result<()> {
             let new_key = identity::Keypair::generate_ed25519();
             let bytes = new_key.to_protobuf_encoding().unwrap();
             let _bw = fs::write("./key.secret", bytes);
-            println!("[warn] No keys were supplied, so one has been generated for you and saved to `./key.secret` file.");
+            warn!("No keys were supplied, so one has been generated for you and saved to `./key.secret` file.");
             new_key
         }
     };    
-    println!("[info] Peer id: `{:?}`", PeerId::from_public_key(&local_key.public()));  
+    info!("Peer id: `{:?}`", PeerId::from_public_key(&local_key.public()));  
     
     // futures for local verification of succinct proofs
     // let mut succinct_proof_verification_futures = FuturesUnordered::new();
@@ -215,7 +213,7 @@ async fn main() -> anyhow::Result<()> {
             panic!("[warn] Missing command, not sure what you meant.");
         },
     };
-    println!("[info] Job's progress will be recorded to the DB with Id: `{db_job_oid:?}`");
+    info!("Job's progress will be recorded to the DB with Id: `{db_job_oid:?}`");
 
     // swarm 
     let mut swarm = comms::p2p::setup_swarm(&local_key).await?;
@@ -242,15 +240,15 @@ async fn main() -> anyhow::Result<()> {
                 .behaviour_mut()
                 .kademlia
                 .bootstrap() {
-            eprintln!("[warn] Failed to bootstrap Kademlia: `{:?}`", e);
+            warn!("Failed to bootstrap Kademlia: `{:?}`", e);
 
         } else {
-            println!("[info] Self-bootstraping is initiated.");
+            info!("Self-bootstraping is initiated.");
         }
     }
 
     // if let Err(e) = swarm.behaviour_mut().kademlia.bootstrap() {
-    //     eprintln!("[warn] Failed to bootstrap Kademlia: `{:?}`", e);
+    //     warn!("Failed to bootstrap Kademlia: `{:?}`", e);
     // }
     
     // listen on all interfaces and whatever port the os assigns
@@ -268,7 +266,7 @@ async fn main() -> anyhow::Result<()> {
 
     if job.recursion.stage == Stage::Agg {
         // verify the final join proof                                                
-        println!("[info] Let's verify the final join proof.");
+        info!("Let's verify the final join proof.");
         let join_proof_cid = job.recursion.join_proof.clone().unwrap();
         let join_proof_filepath = format!("{}/join/proof", job.working_dir);
         if let Err(e) = lighthouse::download_file(
@@ -276,7 +274,7 @@ async fn main() -> anyhow::Result<()> {
             &join_proof_cid,
             join_proof_filepath.clone()
         ).await {
-            eprintln!("[warn] Proof download failed: `{e:?}`");
+            warn!("Proof download failed: `{e:?}`");
         } else {                                                
             join_proof_verification_futures.push(
                 verify_join_proof(
@@ -296,7 +294,7 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
                 let random_peer_id = PeerId::random();
-                println!("Searching for the closest peers to `{random_peer_id}`");
+                info!("Searching for the closest peers to `{random_peer_id}`");
                 swarm
                     .behaviour_mut()
                     .kademlia
@@ -329,13 +327,13 @@ async fn main() -> anyhow::Result<()> {
                 let _receipt: Receipt = match v_res {
                     Err(failed) => {
                         //@ which segment/join/... to blame? 
-                        eprintln!("[warn] Failed to verify the final join proof: `{:#?}`", failed);
+                        warn!("Failed to verify the final join proof: `{:#?}`", failed);
                         continue;                        
                     },
 
                     Ok(r) => r
                 };
-                println!("[info] Bingo! the final join proof has been verified, recursion is complete.");
+                info!("Bingo! the final join proof has been verified, recursion is complete.");
                 job.recursion.stage = Stage::Groth16;
                 db_update_futures.push(
                     col_jobs.update_one(
@@ -354,17 +352,17 @@ async fn main() -> anyhow::Result<()> {
 
             res = db_insert_futures.select_next_some() => {
                 match res {
-                    Err(e) => eprintln!("[warn] DB insert was failed: `{:#?}`", e),
+                    Err(e) => warn!("DB insert was failed: `{:#?}`", e),
 
-                    Ok(oid) => println!("[info] DB insert was successful: `{:?}`", oid)
+                    Ok(oid) => info!("DB insert was successful: `{:?}`", oid)
                 }                
             },
 
             res = db_update_futures.select_next_some() => {
                 match res {
-                    Err(e) => eprintln!("[warn] DB update was failed: `{:#?}`", e),
+                    Err(e) => warn!("DB update was failed: `{:#?}`", e),
 
-                    Ok(oid) => println!("[info] DB update was successful: `{:?}`", oid)
+                    Ok(oid) => info!("DB update was successful: `{:?}`", oid)
                 } 
             },
 
@@ -372,7 +370,7 @@ async fn main() -> anyhow::Result<()> {
             event = swarm.select_next_some() => match event {
                 
                 SwarmEvent::NewListenAddr { address, .. } => {
-                    println!("[info] Local node is listening on {address}");
+                    info!("Local node is listening on {address}");
                 },
 
                 // mdns events
@@ -382,7 +380,7 @@ async fn main() -> anyhow::Result<()> {
                     )
                 ) => {
                     for (peer_id, _multiaddr) in list {
-                        println!("mDNS discovered a new peer: {peer_id}");
+                        info!("mDNS discovered a new peer: {peer_id}");
                         swarm
                             .behaviour_mut()
                             .gossipsub
@@ -396,7 +394,7 @@ async fn main() -> anyhow::Result<()> {
                     )
                 ) => {
                     for (peer_id, _multiaddr) in list {
-                        println!("mDNS discovered peer has expired: {peer_id}");
+                        info!("mDNS discovered peer has expired: {peer_id}");
                         swarm
                             .behaviour_mut()
                             .gossipsub
@@ -505,7 +503,7 @@ async fn main() -> anyhow::Result<()> {
                     // let msg_str = String::from_utf8_lossy(&message.data);
                     // println!("Got message: '{}' with id: {id} from peer: {peer_id}",
                     //          msg_str);
-                    println!("received gossip message: {:#?}", message);                    
+                    info!("received gossip message: {:#?}", message);                    
                 },
 
                 // requests
@@ -522,7 +520,7 @@ async fn main() -> anyhow::Result<()> {
                         protocol::Request::ProofIsReady(new_proofs) => {
                             for new_proof in new_proofs {
                                 if job.id != new_proof.job_id {
-                                    println!("[warn] Status update for an unknown job `{new_proof:?}`, ignored.");
+                                    warn!("Status update for an unknown job `{new_proof:?}`, ignored.");
                                     continue;
                                 }
                                 match new_proof.proof_type {
@@ -531,8 +529,8 @@ async fn main() -> anyhow::Result<()> {
                                             continue;
                                         }
                                         if seg_id >= job.schema.prove.num_segments {
-                                            eprintln!(
-                                                "[warn] Invalid segment id `{}`, valid range: `0 - {}`",
+                                            warn!(
+                                                "Invalid segment id `{}`, valid range: `0 - {}`",
                                                 seg_id,
                                                 job.schema.prove.num_segments
                                             );
@@ -547,10 +545,7 @@ async fn main() -> anyhow::Result<()> {
                                         }
                                         //@ need to validate received proof somehow
                                         job.recursion.prove_and_lift.progress_map.set(seg_id as usize, true);
-                                        println!(
-                                            "[info] `Segment {}` is proved.",
-                                            seg_id
-                                        );
+                                        info!("`Segment {}` is proved.", seg_id);
                                         job.recursion.prove_and_lift
                                         .proofs
                                         .entry(seg_id)
@@ -582,10 +577,10 @@ async fn main() -> anyhow::Result<()> {
                                         });
                                     
                                         if true == job.recursion.prove_and_lift.is_finished() {
-                                            println!("[info] Prove stage is finished.");
+                                            info!("Prove stage is finished.");
                                             if true == job.recursion.begin_join_stage() {
                                                 // verify join proof
-                                                println!("[info] Attempting to verify the final join proof");
+                                                info!("Attempting to verify the final join proof");
                                             }
                                         }
                                         // db
@@ -627,7 +622,7 @@ async fn main() -> anyhow::Result<()> {
                                         let index = match round.pairs.iter().position(|p| p.0 == left && p.1 == right) {
                                             Some(i) => i,
                                             None => {
-                                                eprintln!("[warn] Unknown join pair, left: `{left:?}`, right: `{right:?}`");
+                                                warn!("Unknown join pair, left: `{left:?}`, right: `{right:?}`");
                                                 continue;
                                             }
                                         };
@@ -639,10 +634,7 @@ async fn main() -> anyhow::Result<()> {
                                             continue;
                                         }
                                         round.progress_map.set(index, true);
-                                        println!(
-                                            "[info] `Pair {:?}` is joined.",
-                                            (&left, &right)
-                                        );
+                                        info!("Pair `{:?}` is joined.", (&left, &right));
                                         round.proofs.entry(index)
                                         .and_modify(|proofs| {
                                             match proofs
@@ -689,7 +681,7 @@ async fn main() -> anyhow::Result<()> {
                                         if true == round.progress_map.all() {
                                             if true == job.recursion.begin_next_join_round() {
                                                 // verify the final join proof                                                
-                                                println!("[info] Let's verify the final join proof.");
+                                                info!("Let's verify the final join proof.");
                                                 let join_proof_cid = job.recursion.join_proof.clone().unwrap();
                                                 let join_proof_filepath = format!("{}/join/proof", job.working_dir);
                                                 if let Err(e) = lighthouse::download_file(
@@ -697,7 +689,7 @@ async fn main() -> anyhow::Result<()> {
                                                     &join_proof_cid,
                                                     join_proof_filepath.clone()
                                                 ).await {
-                                                    eprintln!("[warn] Proof download failed: `{e:?}`");
+                                                    warn!("Proof download failed: `{e:?}`");
                                                 } else {                                                
                                                     join_proof_verification_futures.push(
                                                         verify_join_proof(
@@ -719,7 +711,7 @@ async fn main() -> anyhow::Result<()> {
                                             prover_peer_id.to_string(),
                                             new_proof.cid.clone()
                                         );
-                                        println!("[info] A Groth16 proof has been extracted: `{:?}`.", new_proof.cid);
+                                        info!("A Groth16 proof has been extracted: `{:?}`.", new_proof.cid);
                                     },
                                 };
                             }                                                    
@@ -746,7 +738,7 @@ fn i_need_update(
         topic.clone(),
         bincode::serialize(&protocol::Need::UpdateMe(job_id.to_string()))?
     ) {                
-        eprintln!("[warn] `status update` gossip failed, error: {e:?}");
+        warn!("`status update` gossip failed, error: {e:?}");
     }        
     Ok(())
 }
@@ -811,7 +803,7 @@ fn i_need_compute(
         topic.clone(),
         bincode::serialize(&protocol::Need::Compute(compute_job))?
     ) {            
-        eprintln!("[warn] Need compute gossip failed, error: `{e:?}`");
+        warn!("Need compute gossip failed, error: `{e:?}`");
     }
     Ok(())
 }
@@ -828,7 +820,7 @@ fn get_home_dir() -> anyhow::Result<String> {
 async fn mongodb_setup(
     uri: &str,
 ) -> anyhow::Result<mongodb::Client> {
-    println!("[info] Connecting to the MongoDB daemon...");
+    info!("Connecting to the MongoDB daemon...");
     let mut client_options = ClientOptions::parse(
         uri
     ).await?;
@@ -842,7 +834,7 @@ async fn mongodb_setup(
         .database("admin")
         .run_command(doc! { "ping": 1 })
         .await?;
-    println!("[info] Successfully connected to the MongoDB instance!");
+    info!("Successfully connected to the MongoDB instance!");
     Ok(client)
 }
 
@@ -866,7 +858,7 @@ pub fn new_job(
         )?;
     }
     if schema.prove.num_segments == 0 {
-        eprintln!("[warn] Number of segments is 0.");
+        warn!("Number of segments is 0.");
     }    
     let rec = recursion::Recursion::new(
         schema.prove.num_segments
@@ -888,7 +880,7 @@ async fn resume_job(
     col_joins: &mongodb::Collection<db::Join>,
     job_id: &str,
 ) -> anyhow::Result<(job::Job, Bson)> {
-    println!("[info] Resuming job `{job_id}`");
+    info!("Resuming job `{job_id}`");
     let doc = col_jobs_generic
         .find_one(doc! {
             "id": job_id.to_string()
@@ -899,7 +891,7 @@ async fn resume_job(
         doc.get("_id")
         .ok_or_else(|| anyhow::anyhow!("`_id` is not available"))?
         .clone();
-    println!("[info] Job is found, oid: `{db_job_oid:?}`");
+    info!("Job is found, oid: `{db_job_oid:?}`");
     let db_job: db::Job = bson::from_document(doc)?;
     let working_dir = format!("{}/.wholesum/client/jobs/{}",
         get_home_dir()?,
@@ -941,7 +933,7 @@ async fn resume_job(
         &db_job_oid,
     ).await?;
     if true == db_proofs.is_empty() {
-        println!("[warn] No proved segments to sync with.");
+        warn!("No proved segments to sync with.");
         return Ok(
             (
                 job,
@@ -949,16 +941,16 @@ async fn resume_job(
             )
         )
     }
-    println!("[info] Number of proved segments found: `{}`", db_proofs.len());
+    info!("Number of proved segments found: `{}`", db_proofs.len());
     for seg_id in db_proofs.keys() {
         job.recursion.prove_and_lift.progress_map.set(*seg_id as usize, true);
     }
     job.recursion.prove_and_lift.proofs = db_proofs;
-    println!("[info] Prove stage is in sync with DB.");
+    info!("Prove stage is in sync with DB.");
     if true == job.recursion.prove_and_lift.is_finished() {
-        println!("[info] Prove stage is finished.");
+        info!("Prove stage is finished.");
         if true == job.recursion.begin_join_stage() {
-            println!("[info] Attempting to verify the final join proof...");
+            info!("Attempting to verify the final join proof...");
             //@ todo: verify join proof
             return Ok(
                 (
@@ -968,7 +960,7 @@ async fn resume_job(
             );
         }
     } else {
-        eprintln!("[warn] Prove stage is not finished yet so no need to retrieve join data from DB.");
+        warn!("Prove stage is not finished yet so no need to retrieve join data from DB.");
         return Ok(
             (
                 job,
@@ -982,7 +974,7 @@ async fn resume_job(
         &db_job_oid,
     ).await?;
     if join_btree.len() == 0 {
-        eprintln!("[warn] No joins to sync with.");
+        warn!("No joins to sync with.");
         return Ok(
             (
                 job,
@@ -993,7 +985,7 @@ async fn resume_job(
     let max_allowed_join_rounds = job.schema.prove.num_segments.ilog2() + 1;
     let available_join_rounds_on_db = join_btree.keys().last().unwrap();
     if *available_join_rounds_on_db > max_allowed_join_rounds {
-        eprintln!("[warn] Too many join rounds. Max would be `{}`, but `{}` are available.",
+        warn!("Too many join rounds. Max would be `{}`, but `{}` are available.",
             max_allowed_join_rounds,
             available_join_rounds_on_db
         );
@@ -1005,7 +997,7 @@ async fn resume_job(
         )
     }
     for (round_number, db_joins) in join_btree.into_iter() {
-        println!("[info] Checking join round {round_number}...");
+        info!("Checking join round {round_number}...");
         let round = job.recursion.join_rounds.last_mut().unwrap();
         for db_join in db_joins.iter() {
             if let Some(pair_index) = round
@@ -1053,14 +1045,14 @@ async fn resume_job(
                 });
 
             } else {
-                eprintln!("[warn] `({}-{})` is not found in the pairs. Sync may be incomplete.",
+                warn!("`({}-{})` is not found in the pairs. Sync may be incomplete.",
                     db_join.left_input_proof,
                     db_join.right_input_proof
                 );              
                 continue;
             }
         }
-        println!("[info] Sync is complete for round {}.", round.number);
+        info!("Sync is complete for round {}.", round.number);
         if true == round.progress_map.all() {
             if true == job.recursion.begin_next_join_round() {                
             }
@@ -1080,7 +1072,7 @@ async fn retrieve_segments_from_db(
     db_job_oid: &Bson,
 ) -> anyhow::Result<BTreeMap<u32, Vec<recursion::Proof>>> {
     // retrieve all proved segments
-    println!("[info] Retrieving segments from the db...");
+    info!("Retrieving segments from the db...");
     let mut cursor = col_segments.find(
         doc! {
             "job_id": db_job_oid
@@ -1116,7 +1108,7 @@ async fn retrieve_joins_from_db(
     col_joins: &mongodb::Collection<db::Join>,
     db_job_oid: &Bson,
 ) -> anyhow::Result<BTreeMap<u32, Vec<db::Join>>> {
-    println!("[info] Retrieving joins from the db...");
+    info!("Retrieving joins from the db...");
     let mut cursor = col_joins.find(
         doc! {
             "job_id": db_job_oid
@@ -1201,7 +1193,7 @@ async fn verify_succinct_receipt(
 
         Ok(_) => {
             let verification_dur = now.elapsed().as_millis();
-            println!("verification took `{verification_dur} msecs`.");
+            info!("Verification took `{verification_dur} msecs`.");
             Ok(VerificationResult {
                 prover_id: prover_id,
                 receipt_cid: receipt_cid,
@@ -1234,6 +1226,6 @@ async fn verify_join_proof(
         <[u8; 32]>::from_hex(&image_id)?
     )?;
     let verification_dur = now.elapsed().as_millis();
-    println!("[info](DUR) Verification took `{verification_dur} msecs`.");
+    info!("Verification took `{verification_dur} msecs`.");
     Ok(receipt)
 }
