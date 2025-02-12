@@ -541,11 +541,20 @@ async fn main() -> anyhow::Result<()> {
                                             .get(seg_id as usize)
                                             .unwrap()
                                         {
+                                            //@ allow other provers too
                                             continue;
                                         }
                                         //@ need to validate received proof somehow
                                         job.recursion.prove_and_lift.progress_map.set(seg_id as usize, true);
-                                        info!("`Segment {}` is proved.", seg_id);
+                                        let progress_pct: f64 = 100f64 *
+                                            job.recursion.prove_and_lift.progress_map.count_ones() as f64 /
+                                            job.recursion.prove_and_lift.num_segments as f64;
+                                        info!(
+                                            "Segment `{}` is proved. `{}` more to go, overall progress `{:.2}%`",
+                                            seg_id,
+                                            job.recursion.prove_and_lift.progress_map.count_zeros(),
+                                            progress_pct
+                                        );
                                         job.recursion.prove_and_lift
                                         .proofs
                                         .entry(seg_id)
@@ -634,7 +643,14 @@ async fn main() -> anyhow::Result<()> {
                                             continue;
                                         }
                                         round.progress_map.set(index, true);
-                                        info!("Pair `{:?}` is joined.", (&left, &right));
+                                        let progress_pct: f64 = 100f64 *
+                                            round.progress_map.count_ones() as f64 /
+                                            round.pairs.len() as f64;
+                                        info!("Pair `{:?}` is joined. `{}` to go, overall progress `{:.2}%`",
+                                            (&left, &right),
+                                            round.progress_map.count_zeros(),
+                                            progress_pct
+                                        );
                                         round.proofs.entry(index)
                                         .and_modify(|proofs| {
                                             match proofs
@@ -941,7 +957,15 @@ async fn resume_job(
             )
         )
     }
-    info!("Number of proved segments found: `{}`", db_proofs.len());
+    let progress_pct: f64 = 100f64 *
+        db_proofs.len() as f64 /
+        db_job.num_segments as f64;
+    info!(
+        "Number of proved segments found: `{}`. `{}` more to go, overall progress `{:.2}%`",
+        db_proofs.len(),
+        db_job.num_segments - db_proofs.len() as u32,
+        progress_pct
+    );
     for seg_id in db_proofs.keys() {
         job.recursion.prove_and_lift.progress_map.set(*seg_id as usize, true);
     }
