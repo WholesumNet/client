@@ -261,8 +261,8 @@ async fn main() -> anyhow::Result<()> {
     // used for networking
     let mut timer_peer_discovery = stream::interval(Duration::from_secs(5 * 60)).fuse();
     // used for posting job needs
-    let mut timer_post_job = stream::interval(Duration::from_secs(60)).fuse();
-    let mut timer_post_update = stream::interval(Duration::from_secs(600)).fuse();
+    let mut timer_post_job = stream::interval(Duration::from_secs(15)).fuse();
+    // let mut timer_post_update = stream::interval(Duration::from_secs(600)).fuse();
 
     if job.recursion.stage == Stage::Agg {
         // verify the final join proof                                                
@@ -303,25 +303,25 @@ async fn main() -> anyhow::Result<()> {
 
             // post need compute
             () = timer_post_job.select_next_some() => {
-                if let Err(_) = i_need_compute(
-                    &mut swarm.behaviour_mut().gossipsub,
-                    &topic,
-                    &job
-                ) {
-                    // do nothing
-                }                 
-            },
-
-            // post job update needs
-            () = timer_post_update.select_next_some() => {
-                if let Err(_) = i_need_update(
-                    &mut swarm.behaviour_mut().gossipsub,
-                    &topic,
-                    &job.id,
-                ) {
-                    // do nothing
+                if job.recursion.stage != Stage::Agg {
+                    let _ = i_need_compute(
+                        &mut swarm.behaviour_mut().gossipsub,
+                        &topic,
+                        &job
+                    );
                 }
             },
+
+            // // post job update needs
+            // () = timer_post_update.select_next_some() => {
+            //     if let Err(_) = i_need_update(
+            //         &mut swarm.behaviour_mut().gossipsub,
+            //         &topic,
+            //         &job.id,
+            //     ) {
+            //         // do nothing
+            //     }
+            // },
 
             v_res = join_proof_verification_futures.select_next_some() => {
                 let _receipt: Receipt = match v_res {
@@ -536,25 +536,6 @@ async fn main() -> anyhow::Result<()> {
                                             );
                                             continue;
                                         }
-                                        if true == job.recursion.prove_and_lift
-                                            .progress_map
-                                            .get(seg_id as usize)
-                                            .unwrap()
-                                        {
-                                            //@ allow other provers too
-                                            continue;
-                                        }
-                                        //@ need to validate received proof somehow
-                                        job.recursion.prove_and_lift.progress_map.set(seg_id as usize, true);
-                                        let progress_pct: f64 = 100f64 *
-                                            job.recursion.prove_and_lift.progress_map.count_ones() as f64 /
-                                            job.recursion.prove_and_lift.num_segments as f64;
-                                        info!(
-                                            "Segment `{}` is proved. `{}` more to go, overall progress `{:.2}%`",
-                                            seg_id,
-                                            job.recursion.prove_and_lift.progress_map.count_zeros(),
-                                            progress_pct
-                                        );
                                         job.recursion.prove_and_lift
                                         .proofs
                                         .entry(seg_id)
@@ -584,15 +565,7 @@ async fn main() -> anyhow::Result<()> {
                                                 }
                                             ]
                                         });
-                                    
-                                        if true == job.recursion.prove_and_lift.is_finished() {
-                                            info!("Prove stage is finished.");
-                                            if true == job.recursion.begin_join_stage() {
-                                                // verify join proof
-                                                info!("Attempting to verify the final join proof");
-                                            }
-                                        }
-                                        // db
+                                        // record segment proof to db
                                         db_insert_futures.push(
                                             col_segments.insert_one(
                                                 db::Segment {
@@ -605,20 +578,46 @@ async fn main() -> anyhow::Result<()> {
                                                 }
                                             )
                                             .into_future()
-                                        );                                               
-                                        db_update_futures.push(
-                                            col_jobs.update_one(
-                                                doc! {
-                                                    "_id": db_job_oid.clone()
-                                                },
-                                                doc! {
-                                                    "$set": doc! {
-                                                        "stage": bson::to_bson(&Stage::Join)?,
-                                                    }
-                                                }
-                                            )
-                                            .into_future()
                                         );
+                                        if true == job.recursion.prove_and_lift
+                                            .progress_map
+                                            .get(seg_id as usize)
+                                            .unwrap()
+                                        {
+                                            continue;
+                                        }
+                                        //@ need to validate received proof somehow
+                                        job.recursion.prove_and_lift.progress_map.set(seg_id as usize, true);
+                                        let progress_pct: f64 = 100f64 *
+                                            job.recursion.prove_and_lift.progress_map.count_ones() as f64 /
+                                            job.recursion.prove_and_lift.num_segments as f64;
+                                        info!(
+                                            "Segment `{}` is proved. `{}` more to go, overall progress `{:.2}%`",
+                                            seg_id,
+                                            job.recursion.prove_and_lift.progress_map.count_zeros(),
+                                            progress_pct
+                                        );
+                                        if true == job.recursion.prove_and_lift.is_finished() {
+                                            info!("Prove stage is finished.");
+                                            // record stage change(join) to db
+                                            db_update_futures.push(
+                                                col_jobs.update_one(
+                                                    doc! {
+                                                        "_id": db_job_oid.clone()
+                                                    },
+                                                    doc! {
+                                                        "$set": doc! {
+                                                            "stage": bson::to_bson(&Stage::Join)?,
+                                                        }
+                                                    }
+                                                )
+                                                .into_future()
+                                            );
+                                            if true == job.recursion.begin_join_stage() {
+                                                // verify join proof
+                                                info!("Attempting to verify the final join proof");
+                                            }
+                                        }                                        
                                     },
 
                                     protocol::ProofType::Join(left, right) => {
@@ -635,22 +634,6 @@ async fn main() -> anyhow::Result<()> {
                                                 continue;
                                             }
                                         };
-                                        if true == round
-                                            .progress_map
-                                            .get(index)
-                                            .unwrap()
-                                        {
-                                            continue;
-                                        }
-                                        round.progress_map.set(index, true);
-                                        let progress_pct: f64 = 100f64 *
-                                            round.progress_map.count_ones() as f64 /
-                                            round.pairs.len() as f64;
-                                        info!("Pair `{:?}` is joined. `{}` to go, overall progress `{:.2}%`",
-                                            (&left, &right),
-                                            round.progress_map.count_zeros(),
-                                            progress_pct
-                                        );
                                         round.proofs.entry(index)
                                         .and_modify(|proofs| {
                                             match proofs
@@ -678,7 +661,7 @@ async fn main() -> anyhow::Result<()> {
                                                 }
                                             ]
                                         });
-                                        // db
+                                        // record join proof to db
                                         db_insert_futures.push(
                                             col_joins.insert_one(
                                                 db::Join {
@@ -693,7 +676,23 @@ async fn main() -> anyhow::Result<()> {
                                                 }
                                             )
                                             .into_future()
-                                        );                                                
+                                        );
+                                        if true == round
+                                            .progress_map
+                                            .get(index)
+                                            .unwrap()
+                                        {
+                                            continue;
+                                        }
+                                        round.progress_map.set(index, true);
+                                        let progress_pct: f64 = 100f64 *
+                                            round.progress_map.count_ones() as f64 /
+                                            round.pairs.len() as f64;
+                                        info!("Pair `{:?}` is joined. `{}` to go, overall progress `{:.2}%`",
+                                            (&left, &right),
+                                            round.progress_map.count_zeros(),
+                                            progress_pct
+                                        );
                                         if true == round.progress_map.all() {
                                             if true == job.recursion.begin_next_join_round() {
                                                 // verify the final join proof                                                
@@ -730,7 +729,7 @@ async fn main() -> anyhow::Result<()> {
                                         info!("A Groth16 proof has been extracted: `{:?}`.", new_proof.cid);
                                     },
                                 };
-                            }                                                    
+                            }                            
                         },
                     }
                 },
