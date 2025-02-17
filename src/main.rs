@@ -262,7 +262,7 @@ async fn main() -> anyhow::Result<()> {
     let mut timer_peer_discovery = stream::interval(Duration::from_secs(5 * 60)).fuse();
     // used for posting job needs
     let mut timer_post_job = stream::interval(Duration::from_secs(15)).fuse();
-    let mut timer_post_update = stream::interval(Duration::from_secs(600)).fuse();
+    // let mut timer_post_update = stream::interval(Duration::from_secs(600)).fuse();
 
     if job.recursion.stage == Stage::Agg {
         // verify the final join proof                                                
@@ -303,25 +303,25 @@ async fn main() -> anyhow::Result<()> {
 
             // post need compute
             () = timer_post_job.select_next_some() => {
-                if let Err(_) = i_need_compute(
-                    &mut swarm.behaviour_mut().gossipsub,
-                    &topic,
-                    &job
-                ) {
-                    // do nothing
-                }                 
-            },
-
-            // post job update needs
-            () = timer_post_update.select_next_some() => {
-                if let Err(_) = i_need_update(
-                    &mut swarm.behaviour_mut().gossipsub,
-                    &topic,
-                    &job.id,
-                ) {
-                    // do nothing
+                if job.recursion.stage != Stage::Agg {
+                    let _ = i_need_compute(
+                        &mut swarm.behaviour_mut().gossipsub,
+                        &topic,
+                        &job
+                    );
                 }
             },
+
+            // // post job update needs
+            // () = timer_post_update.select_next_some() => {
+            //     if let Err(_) = i_need_update(
+            //         &mut swarm.behaviour_mut().gossipsub,
+            //         &topic,
+            //         &job.id,
+            //     ) {
+            //         // do nothing
+            //     }
+            // },
 
             v_res = join_proof_verification_futures.select_next_some() => {
                 let _receipt: Receipt = match v_res {
@@ -565,12 +565,25 @@ async fn main() -> anyhow::Result<()> {
                                                 }
                                             ]
                                         });
+                                        // record segment proof to db
+                                        db_insert_futures.push(
+                                            col_segments.insert_one(
+                                                db::Segment {
+                                                    id: seg_id,
+                                                    job_id: db_job_oid.clone(),
+                                                    proof: db::Proof {
+                                                        cid: new_proof.cid.clone(),
+                                                        prover: prover_peer_id.to_string()
+                                                    }
+                                                }
+                                            )
+                                            .into_future()
+                                        );
                                         if true == job.recursion.prove_and_lift
                                             .progress_map
                                             .get(seg_id as usize)
                                             .unwrap()
                                         {
-                                            //@ allow other provers too
                                             continue;
                                         }
                                         //@ need to validate received proof somehow
@@ -586,38 +599,25 @@ async fn main() -> anyhow::Result<()> {
                                         );
                                         if true == job.recursion.prove_and_lift.is_finished() {
                                             info!("Prove stage is finished.");
+                                            // record stage change(join) to db
+                                            db_update_futures.push(
+                                                col_jobs.update_one(
+                                                    doc! {
+                                                        "_id": db_job_oid.clone()
+                                                    },
+                                                    doc! {
+                                                        "$set": doc! {
+                                                            "stage": bson::to_bson(&Stage::Join)?,
+                                                        }
+                                                    }
+                                                )
+                                                .into_future()
+                                            );
                                             if true == job.recursion.begin_join_stage() {
                                                 // verify join proof
                                                 info!("Attempting to verify the final join proof");
                                             }
-                                        }
-                                        // db
-                                        db_insert_futures.push(
-                                            col_segments.insert_one(
-                                                db::Segment {
-                                                    id: seg_id,
-                                                    job_id: db_job_oid.clone(),
-                                                    proof: db::Proof {
-                                                        cid: new_proof.cid.clone(),
-                                                        prover: prover_peer_id.to_string()
-                                                    }
-                                                }
-                                            )
-                                            .into_future()
-                                        );                                               
-                                        db_update_futures.push(
-                                            col_jobs.update_one(
-                                                doc! {
-                                                    "_id": db_job_oid.clone()
-                                                },
-                                                doc! {
-                                                    "$set": doc! {
-                                                        "stage": bson::to_bson(&Stage::Join)?,
-                                                    }
-                                                }
-                                            )
-                                            .into_future()
-                                        );
+                                        }                                        
                                     },
 
                                     protocol::ProofType::Join(left, right) => {
@@ -661,6 +661,22 @@ async fn main() -> anyhow::Result<()> {
                                                 }
                                             ]
                                         });
+                                        // record join proof to db
+                                        db_insert_futures.push(
+                                            col_joins.insert_one(
+                                                db::Join {
+                                                    job_id: db_job_oid.clone(),
+                                                    round: round_number,
+                                                    left_input_proof: left.clone(),
+                                                    right_input_proof: right.clone(),
+                                                    proof: db::Proof {
+                                                        cid: new_proof.cid.clone(),
+                                                        prover: prover_peer_id.to_string()
+                                                    }
+                                                }
+                                            )
+                                            .into_future()
+                                        );
                                         if true == round
                                             .progress_map
                                             .get(index)
@@ -676,23 +692,7 @@ async fn main() -> anyhow::Result<()> {
                                             (&left, &right),
                                             round.progress_map.count_zeros(),
                                             progress_pct
-                                        );                                        
-                                        // db
-                                        db_insert_futures.push(
-                                            col_joins.insert_one(
-                                                db::Join {
-                                                    job_id: db_job_oid.clone(),
-                                                    round: round_number,
-                                                    left_input_proof: left.clone(),
-                                                    right_input_proof: right.clone(),
-                                                    proof: db::Proof {
-                                                        cid: new_proof.cid.clone(),
-                                                        prover: prover_peer_id.to_string()
-                                                    }
-                                                }
-                                            )
-                                            .into_future()
-                                        );                                                
+                                        );
                                         if true == round.progress_map.all() {
                                             if true == job.recursion.begin_next_join_round() {
                                                 // verify the final join proof                                                
@@ -729,7 +729,7 @@ async fn main() -> anyhow::Result<()> {
                                         info!("A Groth16 proof has been extracted: `{:?}`.", new_proof.cid);
                                     },
                                 };
-                            }                                                    
+                            }                            
                         },
                     }
                 },
