@@ -261,7 +261,7 @@ async fn main() -> anyhow::Result<()> {
     // used for networking
     let mut timer_peer_discovery = stream::interval(Duration::from_secs(5 * 60)).fuse();
     // used for posting job needs
-    let mut timer_post_job = stream::interval(Duration::from_secs(60)).fuse();
+    let mut timer_post_job = stream::interval(Duration::from_secs(15)).fuse();
     let mut timer_post_update = stream::interval(Duration::from_secs(600)).fuse();
 
     if job.recursion.stage == Stage::Agg {
@@ -536,25 +536,6 @@ async fn main() -> anyhow::Result<()> {
                                             );
                                             continue;
                                         }
-                                        if true == job.recursion.prove_and_lift
-                                            .progress_map
-                                            .get(seg_id as usize)
-                                            .unwrap()
-                                        {
-                                            //@ allow other provers too
-                                            continue;
-                                        }
-                                        //@ need to validate received proof somehow
-                                        job.recursion.prove_and_lift.progress_map.set(seg_id as usize, true);
-                                        let progress_pct: f64 = 100f64 *
-                                            job.recursion.prove_and_lift.progress_map.count_ones() as f64 /
-                                            job.recursion.prove_and_lift.num_segments as f64;
-                                        info!(
-                                            "Segment `{}` is proved. `{}` more to go, overall progress `{:.2}%`",
-                                            seg_id,
-                                            job.recursion.prove_and_lift.progress_map.count_zeros(),
-                                            progress_pct
-                                        );
                                         job.recursion.prove_and_lift
                                         .proofs
                                         .entry(seg_id)
@@ -584,7 +565,25 @@ async fn main() -> anyhow::Result<()> {
                                                 }
                                             ]
                                         });
-                                    
+                                        if true == job.recursion.prove_and_lift
+                                            .progress_map
+                                            .get(seg_id as usize)
+                                            .unwrap()
+                                        {
+                                            //@ allow other provers too
+                                            continue;
+                                        }
+                                        //@ need to validate received proof somehow
+                                        job.recursion.prove_and_lift.progress_map.set(seg_id as usize, true);
+                                        let progress_pct: f64 = 100f64 *
+                                            job.recursion.prove_and_lift.progress_map.count_ones() as f64 /
+                                            job.recursion.prove_and_lift.num_segments as f64;
+                                        info!(
+                                            "Segment `{}` is proved. `{}` more to go, overall progress `{:.2}%`",
+                                            seg_id,
+                                            job.recursion.prove_and_lift.progress_map.count_zeros(),
+                                            progress_pct
+                                        );
                                         if true == job.recursion.prove_and_lift.is_finished() {
                                             info!("Prove stage is finished.");
                                             if true == job.recursion.begin_join_stage() {
@@ -635,22 +634,6 @@ async fn main() -> anyhow::Result<()> {
                                                 continue;
                                             }
                                         };
-                                        if true == round
-                                            .progress_map
-                                            .get(index)
-                                            .unwrap()
-                                        {
-                                            continue;
-                                        }
-                                        round.progress_map.set(index, true);
-                                        let progress_pct: f64 = 100f64 *
-                                            round.progress_map.count_ones() as f64 /
-                                            round.pairs.len() as f64;
-                                        info!("Pair `{:?}` is joined. `{}` to go, overall progress `{:.2}%`",
-                                            (&left, &right),
-                                            round.progress_map.count_zeros(),
-                                            progress_pct
-                                        );
                                         round.proofs.entry(index)
                                         .and_modify(|proofs| {
                                             match proofs
@@ -678,6 +661,22 @@ async fn main() -> anyhow::Result<()> {
                                                 }
                                             ]
                                         });
+                                        if true == round
+                                            .progress_map
+                                            .get(index)
+                                            .unwrap()
+                                        {
+                                            continue;
+                                        }
+                                        round.progress_map.set(index, true);
+                                        let progress_pct: f64 = 100f64 *
+                                            round.progress_map.count_ones() as f64 /
+                                            round.pairs.len() as f64;
+                                        info!("Pair `{:?}` is joined. `{}` to go, overall progress `{:.2}%`",
+                                            (&left, &right),
+                                            round.progress_map.count_zeros(),
+                                            progress_pct
+                                        );                                        
                                         // db
                                         db_insert_futures.push(
                                             col_joins.insert_one(
