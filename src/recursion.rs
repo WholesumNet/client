@@ -6,6 +6,7 @@ use serde::{
     Deserialize
 };
 use bit_vec::BitVec;
+use log::{info, warn};
 
 /*
 verifiable computing is resource hungry, with at least 10x more compute steps
@@ -127,17 +128,17 @@ impl Recursion {
     }
 
     pub fn begin_join_stage(&mut self) -> bool {
-        println!("[info] Attempting to start the join stage...");
+        info!("Attempting to start the join stage...");
         if self.stage != Stage::Prove {
-            eprintln!("[warn] Join stage must follow the prove stage.");
+            warn!("Join stage must follow the prove stage.");
             return false;
         }        
         if false == self.prove_and_lift.is_finished() {
-            eprintln!("[warn] The prove stage is not finished yet.");
+            warn!("The prove stage is not finished yet.");
             return false;
         }
         if true == self.prove_and_lift.proofs.is_empty() {
-            eprintln!("[warn] No proofs for the join stage to start.");
+            warn!("No proofs for the join stage to start.");
             return false;
         }
         self.stage = Stage::Join;        
@@ -155,7 +156,7 @@ impl Recursion {
                     .nth(0)
                 {
                     None => {
-                        eprintln!("[warn] No more proofs to choose from, all are spent.");  
+                        warn!("No more proofs to choose from, all are spent.");  
                         return false                    
                     },
 
@@ -176,7 +177,7 @@ impl Recursion {
                     .nth(0)
                 {
                     None => {
-                        eprintln!("[warn] No more proofs to choose from, all are spent.");  
+                        warn!("No more proofs to choose from, all are spent.");  
                         return false                    
                     },
 
@@ -193,12 +194,12 @@ impl Recursion {
         }
     
         if prev_round_proofs.len() == 1 {
-            println!("[info] Join is finished.");
+            info!("Join is finished.");
             self.join_proof = Some(prev_round_proofs.pop().unwrap());
             self.stage = Stage::Agg;
             return true;            
         } else if prev_round_proofs.len() == 2 {
-            println!("[info] This is going to be the last join round.");
+            info!("This is going to be the last join round.");
         }
         
         let leftover = if prev_round_proofs.len() % 2 == 1 {
@@ -225,7 +226,7 @@ impl Recursion {
             }
         );
         //@ just for info, should be removed
-        println!("[info] Starting a new join round: {:#?}",
+        info!("Starting a new join round: {:#?}",
             self.join_rounds.last().unwrap()        
         );        
         false

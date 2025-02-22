@@ -28,7 +28,7 @@ use std::{
     future::IntoFuture,
 };
 use env_logger::Env;
-use log::{info, warn, error};
+use log::{info, warn};
 use bincode;
 use toml;
 use anyhow;
@@ -47,7 +47,6 @@ use uuid::Uuid;
 
 use risc0_zkvm::{
     Receipt, InnerReceipt, SuccinctReceipt, ReceiptClaim,
-    Journal,
 };
 use hex::FromHex;
 
@@ -130,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::Error::msg("dStorage key file is missing."))?;
     let lighthouse_config: lighthouse::Config = 
         toml::from_str(&fs::read_to_string(ds_key_file)?)?;
-    let ds_key = lighthouse_config.apiKey;
+    let _ds_key = lighthouse_config.apiKey;
 
     let ds_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60)) //@ how much timeout is enough?
@@ -743,7 +742,7 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-fn i_need_update(
+fn _i_need_update(
     gossipsub: &mut gossipsub::Behaviour,
     topic: &gossipsub::IdentTopic,
     job_id: &str,
@@ -1174,7 +1173,7 @@ struct VerificationError {
 }
 
 // verify proved and lifted receipt 
-async fn verify_succinct_receipt(
+async fn _verify_succinct_receipt(
     ds_client: &reqwest::Client,
     residue_path: String,
     prover_id: String,
@@ -1235,19 +1234,20 @@ async fn verify_join_proof(
     image_id: String,
 ) -> anyhow::Result<Receipt> {
     let sr: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(
-        &std::fs::read(&succinct_receipt_file_path)?
+        &fs::read(&succinct_receipt_file_path)?
     )?;
-    let journal: Journal = bincode::deserialize(
-        &std::fs::read(&journal_file_path)?
+    let journal = bincode::deserialize(
+        &fs::read(&journal_file_path)?
     )?;
     let receipt = Receipt::new(
         InnerReceipt::Succinct(sr),
-        journal.bytes
-    );        
+        journal
+    );    
     let now = Instant::now();
     receipt.verify(
         <[u8; 32]>::from_hex(&image_id)?
     )?;
+
     let verification_dur = now.elapsed().as_millis();
     info!("Verification took `{verification_dur} msecs`.");
     Ok(receipt)
