@@ -15,7 +15,6 @@ pub struct ProveConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct VerificationConfig {
-    pub journal_file_path: String,
     // image_id as in risc0, it's a hash digest
     pub image_id: String,
 }

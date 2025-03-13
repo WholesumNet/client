@@ -28,7 +28,7 @@ use std::{
     future::IntoFuture,
 };
 use env_logger::Env;
-use log::{info, warn};
+use log::{info, warn, error};
 use bincode;
 use toml;
 use anyhow;
@@ -46,7 +46,7 @@ use comms::{
 use uuid::Uuid;
 
 use risc0_zkvm::{
-    Receipt, InnerReceipt, SuccinctReceipt, ReceiptClaim,
+    Receipt, InnerReceipt, SuccinctReceipt, ReceiptClaim, AssumptionReceipt
 };
 use hex::FromHex;
 
@@ -176,6 +176,11 @@ async fn main() -> anyhow::Result<()> {
     let (mut job, db_job_oid) = match &cli.job {
         Some(Commands::New{ job_file }) => {
             let job = new_job(job_file)?;
+            info!(
+                "A new job to prove is here: `{}`, schema: {:#?}",
+                job.id,
+                job.schema
+            );
             let oid = col_jobs.insert_one(
                 db::Job {
                     id: job.id.clone(),
@@ -184,11 +189,7 @@ async fn main() -> anyhow::Result<()> {
                     num_segments: job.schema.prove.num_segments,
                     stage: bson::to_bson(&Stage::Prove)?,
                     verification: db::Verification {
-                        image_id: job.schema.verification.image_id.clone(),
-                        journal_blob: 
-                            fs::read(
-                                job.schema.verification.journal_file_path.clone()
-                            )?                 
+                        image_id: job.schema.verification.image_id.clone(),                                        
                     },
                     snark_receipt: None,
                 }
@@ -267,22 +268,19 @@ async fn main() -> anyhow::Result<()> {
         // verify the final join proof                                                
         info!("Let's verify the final join proof.");
         let join_proof_cid = job.recursion.join_proof.clone().unwrap();
+        // join proof
         let join_proof_filepath = format!("{}/join/proof", job.working_dir);
-        if let Err(e) = lighthouse::download_file(
+        lighthouse::download_file(
             &ds_client,
             &join_proof_cid,
             join_proof_filepath.clone()
-        ).await {
-            warn!("Proof download failed: `{e:?}`");
-        } else {                                                
-            join_proof_verification_futures.push(
-                verify_join_proof(
-                    join_proof_filepath.clone(),
-                    job.schema.verification.journal_file_path.clone(),
-                    job.schema.verification.image_id.clone(),
-                )
-            );                                                    
-        }
+        ).await?;        
+        join_proof_verification_futures.push(
+            verify_join_proof(                
+                join_proof_filepath.clone(),
+                job.schema.verification.image_id.clone(),
+            )
+        );
     }
 
     loop {
@@ -326,7 +324,7 @@ async fn main() -> anyhow::Result<()> {
                 let _receipt: Receipt = match v_res {
                     Err(failed) => {
                         //@ which segment/join/... to blame? 
-                        warn!("Failed to verify the final join proof: `{:#?}`", failed);
+                        error!("Failed to verify the final join proof: `{:#?}`", failed);
                         continue;                        
                     },
 
@@ -708,7 +706,6 @@ async fn main() -> anyhow::Result<()> {
                                                     join_proof_verification_futures.push(
                                                         verify_join_proof(
                                                             join_proof_filepath.clone(),
-                                                            job.schema.verification.journal_file_path.clone(),
                                                             job.schema.verification.image_id.clone(),
                                                         )
                                                     );                                                    
@@ -916,7 +913,7 @@ async fn resume_job(
         fs::create_dir_all(
             format!("{working_dir}/{action}")
         )?;
-    }    
+    }
     let mut job = Job {
         id: job_id.to_string(),            
         working_dir: working_dir.clone(),
@@ -926,15 +923,7 @@ async fn resume_job(
                 num_segments: db_job.num_segments,
                 segments_cid: db_job.segments_cid.clone(),
             },
-            verification: job::VerificationConfig {
-                journal_file_path: {
-                    let journal_file_path = format!("{working_dir}/journal");
-                    fs::write(
-                        journal_file_path.clone(),
-                        &db_job.verification.journal_blob
-                    )?;
-                    journal_file_path
-                },
+            verification: job::VerificationConfig {                
                 image_id: db_job.verification.image_id,
             },
         },
@@ -1229,19 +1218,37 @@ async fn _verify_succinct_receipt(
 
 // verify the final join proof
 async fn verify_join_proof(
-    succinct_receipt_file_path: String,
-    journal_file_path: String,
+    join_proof_filepath: String,
     image_id: String,
 ) -> anyhow::Result<Receipt> {
-    let sr: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(
-        &fs::read(&succinct_receipt_file_path)?
-    )?;
-    let journal = bincode::deserialize(
-        &fs::read(&journal_file_path)?
-    )?;
+    let conditional_receipt: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(
+        &fs::read(&join_proof_filepath)?
+    )?;  
+    // let assumptions = conditional_receipt
+    //     .claim
+    //     .as_value()?
+    //     .output
+    //     .as_value()?
+    //     .as_ref()
+    //     .unwrap()
+    //     .assumptions
+    //     .as_value()?;
+    // info!("assumptions: {assumptions:#?}");
+    // info!("claim: {:#?}", conditional_receipt.claim);
+    // let mut succinct_receipt = conditional_receipt.clone();
+    let journal_bytes = conditional_receipt
+        .claim
+        .as_value()?
+        .output
+        .as_value()?
+        .as_ref()
+        .unwrap()
+        .journal
+        .as_value()?
+        .clone();    
     let receipt = Receipt::new(
-        InnerReceipt::Succinct(sr),
-        journal
+        InnerReceipt::Succinct(conditional_receipt),        
+        journal_bytes
     );    
     let now = Instant::now();
     receipt.verify(

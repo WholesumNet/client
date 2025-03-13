@@ -7,10 +7,7 @@ use serde::{
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Verification {
-    
     pub image_id: String,
-
-    pub journal_blob: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,8 +21,7 @@ pub struct Proof {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Segment {
-    
+pub struct Segment {    
     pub id: u32,
 
     //@ rename to job_oid: ObjectId
@@ -37,7 +33,6 @@ pub struct Segment {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Join {
-
     pub job_id: Bson,
 
     pub round: u32,
@@ -48,8 +43,7 @@ pub struct Join {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Job {
-    
+pub struct Job {    
     pub id: String,
 
     pub po2: u32,

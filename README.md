@@ -40,7 +40,6 @@ To run a client agent, you would first need to fork the following libraries and 
 
 - [comms](https://github.com/WholesumNet/comms)
 - [dStorage](https://github.com/WholesumNet/dStorage)
-- [jocker](https://github.com/WholesumNet/jocker)
 
 ### The job file
 
