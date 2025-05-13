@@ -1,12 +1,14 @@
 use std::{ 
     collections::{ BTreeMap, HashMap},
+    fs,
 };
 use serde::{
     Serialize,
     Deserialize
 };
 use bit_vec::BitVec;
-
+use rand::Rng;
+use log::{info, warn};
 /*
 verifiable computing is resource hungry, with at least 10x more compute steps
 compared to untrusted execution. to tackle it, we need to employ parallel
@@ -30,9 +32,10 @@ development stages of a job:
 
 #[derive(Debug)]
 pub struct Proof {
-    pub cid: String,
+    pub blob: Vec<u8>,
 
-    pub prover: String,
+    // xxh3 digest, used for quick comparison
+    pub blob_hash: u64,
 
     // whether this proof is chosen for the next round
     pub spent: bool
@@ -41,23 +44,50 @@ pub struct Proof {
 /* Prove */
 
 #[derive(Debug)]
+pub struct Segment {    
+    pub filepath: String,
+
+    pub blob: Vec<u8>,
+
+    // number of times this segment has been chosen for proving joins
+    pub num_deals: u32,
+}
+
+#[derive(Debug)]
 pub struct ProveAndLift {
+    //@ remove this
     pub num_segments: u32,
 
-    // <segment-id, <proofs>>
-    pub proofs: BTreeMap<u32, Vec<Proof>>,
+    pub segments: Vec<Segment>,
+
+    // <index, <prover, proofs>>
+    pub proofs: BTreeMap<u32, HashMap<String, Vec<Proof>>>,
     
-    // each segment is represented by one bit: "true" => proved, "false" => not proved yet
+    // each segment's proved status is represented by one bit: "true" => proved, "false" => not proved yet
     pub progress_map: BitVec,
 }
 
 impl ProveAndLift {
-    pub fn new(num_segments: u32) -> Self {
-        ProveAndLift {
+    pub fn new(
+        num_segments: u32,
+        segment_path: &str,
+        segment_filename_prefix: &str,
+    ) -> anyhow::Result<Self> {
+        let mut segments = Vec::new();
+        for index in 0..num_segments {
+            let filepath = format!("{segment_path}/{segment_filename_prefix}{index}");
+            segments.push(Segment {
+                filepath: filepath.clone(),
+                blob: fs::read(&filepath)?,
+                num_deals: 0,
+            });
+        }
+        Ok(ProveAndLift {
             num_segments: num_segments,
+            segments: segments,
             proofs: BTreeMap::new(),
             progress_map: BitVec::from_elem(num_segments as usize, false)
-        }
+        })
     }
     
     pub fn is_finished(&self) -> bool {
@@ -68,16 +98,26 @@ impl ProveAndLift {
 /* Join */
 
 #[derive(Debug)]
+pub struct JoinPair {
+    pub id: u32,
+
+    pub left_blob: Vec<u8>,
+    pub right_blob: Vec<u8>,
+
+    pub num_deals: u32
+}
+
+#[derive(Debug)]
 pub struct JoinRound {
     pub number: u32,
 
-    pub pairs: Vec<(String, String)>,
+    pub pairs: Vec<JoinPair>,
     
     // advances to the next round automatically as the last proof
-    pub leftover: Option<String>,
+    pub leftover: Option<Vec<u8>>,
 
-    // output of this round: <index of the pair in 'pairs', <proofs>>
-    pub proofs: BTreeMap<usize, Vec<Proof>>,
+    // output of this round: <index of the pair in 'pairs', <prover, proofs>>
+    pub proofs: BTreeMap<u32, HashMap<String, Vec<Proof>>>,
 
     // each pair is represented by one bit: "true" => joined, "false" => not joined yet
     pub progress_map: BitVec,
@@ -94,10 +134,10 @@ pub enum Stage {
     Join,
 
     // join is complete, so begin local join verification
-    Agg,
+    Stark,
 
-    // join is complete and its proof is verified, so begin groth16 extraction
-    Groth16,
+    // join is complete and its proof is verified, so begin groth16/plonk extraction
+    Snark,
 }
 
 #[derive(Debug)]
@@ -110,34 +150,38 @@ pub struct Recursion {
     // join data        
     pub join_rounds: Vec<JoinRound>,
     // the result of the final join
-    pub join_proof: Option<String>,
-    // the snark proofs: <prover, proof ~ 300 bytes in base64 format>
-    pub groth16_proofs: HashMap<String, String>,
+    pub join_proof: Option<Vec<u8>>,
+    // the snark proofs: <prover, proofs>
+    pub groth16_proofs: HashMap<String, Vec<Proof>>,
 }
 
 impl Recursion {
-    pub fn new(num_segments: u32) -> Self {
-        Recursion {
+    pub fn new(
+        num_segments: u32,
+        segment_path: &str,
+        segment_filename_prefix: &str,
+    ) -> anyhow::Result<Self> {
+        Ok(Recursion {
             stage: Stage::Prove,
-            prove_and_lift: ProveAndLift::new(num_segments),
+            prove_and_lift: ProveAndLift::new(num_segments, segment_path, segment_filename_prefix)?,
             join_rounds: Vec::new(),
             join_proof: None,
             groth16_proofs: HashMap::new(),
-        }
+        })
     }
 
     pub fn begin_join_stage(&mut self) -> bool {
-        println!("[info] Attempting to start the join stage...");
+        info!("Attempting to start the join stage...");
         if self.stage != Stage::Prove {
-            eprintln!("[warn] Join stage must follow the prove stage.");
+            warn!("Join stage must follow the prove stage.");
             return false;
         }        
         if false == self.prove_and_lift.is_finished() {
-            eprintln!("[warn] The prove stage is not finished yet.");
+            warn!("The prove stage is not finished yet.");
             return false;
         }
         if true == self.prove_and_lift.proofs.is_empty() {
-            eprintln!("[warn] No proofs for the join stage to start.");
+            warn!("No proofs for the join stage to start.");
             return false;
         }
         self.stage = Stage::Join;        
@@ -146,46 +190,24 @@ impl Recursion {
 
     pub fn begin_next_join_round(&mut self) -> bool {        
         let mut prev_round_proofs = vec![];
+        let mut rng = rand::rng();        
+        //@ beware of proof starvation
         if true == self.join_rounds.is_empty() {
-            for proofs in self.prove_and_lift.proofs.values_mut() {
-                //@ beware starvation of other cids
-                let chosen_proof = match proofs
-                    .iter_mut()
-                    .filter(|p| p.spent == false)
-                    .nth(0)
-                {
-                    None => {
-                        eprintln!("[warn] No more proofs to choose from, all are spent.");  
-                        return false                    
-                    },
-
-                    Some(p) => {
-                        p.spent = true;
-                        p.cid.clone()
-                    }
-                };
-                prev_round_proofs.push(chosen_proof.clone());
+            for segment_proofs in self.prove_and_lift.proofs.values_mut() {
+                let num_provers = segment_proofs.len(); 
+                let choosen_prover_index = rng.random_range(0..num_provers);
+                let prover_proofs = segment_proofs.values_mut().nth(choosen_prover_index).unwrap();
+                let chosen_proof = &prover_proofs[0];
+                prev_round_proofs.push(chosen_proof.blob.clone());
             }
         } else {
             let last_round = self.join_rounds.last_mut().unwrap();            
-            for proofs in last_round.proofs.values_mut() {
-                //@ beware starvation of other cids
-                let chosen_proof = match proofs
-                    .iter_mut()
-                    .filter(|p| p.spent == false)
-                    .nth(0)
-                {
-                    None => {
-                        eprintln!("[warn] No more proofs to choose from, all are spent.");  
-                        return false                    
-                    },
-
-                    Some(p) => {
-                        p.spent = true;
-                        p.cid.clone()
-                    }
-                };
-                prev_round_proofs.push(chosen_proof);
+            for all_proofs in last_round.proofs.values_mut() {
+                let num_provers = all_proofs.len(); 
+                let choosen_prover_index = rng.random_range(0..num_provers);
+                let prover_proofs = all_proofs.values_mut().nth(choosen_prover_index).unwrap();
+                let chosen_proof = &prover_proofs[0];
+                prev_round_proofs.push(chosen_proof.blob.clone());
             }
             if let Some(lo) = &last_round.leftover {
                 prev_round_proofs.push(lo.clone());
@@ -193,12 +215,12 @@ impl Recursion {
         }
     
         if prev_round_proofs.len() == 1 {
-            println!("[info] Join is finished.");
+            info!("Join is finished.");
             self.join_proof = Some(prev_round_proofs.pop().unwrap());
-            self.stage = Stage::Agg;
+            self.stage = Stage::Stark;
             return true;            
         } else if prev_round_proofs.len() == 2 {
-            println!("[info] This is going to be the last join round.");
+            info!("This is going to be the last join round.");
         }
         
         let leftover = if prev_round_proofs.len() % 2 == 1 {
@@ -209,9 +231,16 @@ impl Recursion {
         // [0, 1, 2, 3, ..., n - 1] => [(0, 1), (2, 3), ..., (n - 2, n - 1)]        
         let mut pairs = Vec::new();
         let mut iter = prev_round_proofs.into_iter();
+        let mut i = 0;
         while let Some(left) = iter.next() {
             if let Some(right) = iter.next() {
-                pairs.push((left, right));
+                pairs.push(JoinPair {
+                    id: i,
+                    left_blob: left,
+                    right_blob: right,
+                    num_deals: 0                    
+                });
+                i += 1;
             }
         }
         let num_pairs = pairs.len();
@@ -225,7 +254,7 @@ impl Recursion {
             }
         );
         //@ just for info, should be removed
-        println!("[info] Starting a new join round: {:#?}",
+        info!("Starting a new join round: {:#?}",
             self.join_rounds.last().unwrap()        
         );        
         false
