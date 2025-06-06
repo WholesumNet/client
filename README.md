@@ -3,7 +3,7 @@
 
 ## Overview
 
-Wholesum network is a p2p verifiable computing network `tailored for ETH L2 sequencer proving`. It builds on top of [Risc0](https://risczero.com/), [Libp2p](https://libp2p.io), and decentralized storage options like [Swarm](https://ethswarm.org) and Filecoin to facilitate verifiable computing at scale. The design of the network follows a p2p parallel proving scheme where Risc0 jobs are passed around, proved, and finally combined into a final proof ready for L1 verification.
+Wholesum network is a p2p prover network `tailored for ETH block`. It builds on top of [Risc0](https://risczero.com/) and [Libp2p](https://libp2p.io). The design of the network follows a p2p parallel proving scheme where Risc0 jobs are passed around, proved, and finally combined into a final proof ready for L1 verification.
 
 ### Prerequisites
 
@@ -21,50 +21,32 @@ Docker runtime is needed as it is used to run `Risc0` containers. This awesome [
 
 Install the MongoDB from [here](https://www.mongodb.com/docs/manual/tutorial/install-mongodb-community-with-docker/). Make sure a Docker container runs and is listenning on `localhost:27017`
 
-#### Decentralized storage
-
-- Lighthouse:  
-  You would need a subscription plan from [Lighthouse](https://docs.lighthouse.storage/lighthouse-1/quick-start). Please obtain an API key, put it into a file with the following look:
-
-  <pre>
-    apiKey = 'your key'
-  </pre>
-  
-- Swarm:
-  Still under develepment.
-  
-
 ### Library dependencies
 
 To run a client agent, you would first need to fork the following libraries and put them in the parent("..") directory of the client:
 
 - [comms](https://github.com/WholesumNet/comms)
-- [dStorage](https://github.com/WholesumNet/dStorage)
-- [jocker](https://github.com/WholesumNet/jocker)
 
 ### The job file
 
 You would need a job file to engage with the network. Here's a sample job file for the SHA example:
 <pre>
-# schema of a tyipcal job
+# schema of a tyipcal ETH block proving job
 
 [prove]
 
-# segments' cid
-segments_cid = "bafybeigzlwqexnsbr2euhpgcivtx3ak7dejud6tg7dyiyja522qscdsovi"
-
-#po2 limit
-po2 = 19
-
 # number of segments
-num_segments = 5
+num_segments = 19
+
+segment_path = "foo/block/1150000/21"
+segment_filename_prefix = "segment-"
 
 [verification]
 
-journal_file_path = "/foo/journal"
+journal_filepath = "foo/block/1150000/journal"
 
-# Risc0 image_id of the "sha example"
-image_id = "f3877c67f872cd6225e9d6038a5b7af0de2c3b5f3b2f27f76a8b09e2230a4f5c"
+image_id = "foobarbazkekw" 
+
 </pre>
 
 Save the above content to a file named `simple_job.toml`, and feed it to the CLI with the `-j` flag.
@@ -82,9 +64,8 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-  -d, --dstorage-key-file &lt;DSTORAGE_KEY_FILE&gt;  
-      --dev                                    
-  -k, --key-file &lt;KEY_FILE&gt;                    
-  -h, --help                                   Print help
-  -V, --version                                Print version
+      --dev                  
+  -k, --key-file <KEY_FILE>  
+  -h, --help                 Print help
+  -V, --version              Print version
 </pre>

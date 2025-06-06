@@ -16,21 +16,21 @@ use libp2p::{
     PeerId,
 };
 use std::collections::{
-    // BTreeMap,
-    HashMap
+    HashSet
 };
 use std::{
     fs,
     time::{
-        Instant, 
+        // Instant, 
         Duration,
     },
-    future::IntoFuture,
+    // future::IntoFuture,
 };
 use bincode;
+use xxhash_rust::xxh3::xxh3_128;
 
 use toml;
-use tracing_subscriber::EnvFilter;
+// use tracing_subscriber::EnvFilter;
 use anyhow;
 // use reqwest;
 
@@ -39,15 +39,10 @@ use clap::{
 };
 
 use uuid::Uuid;
-use xxhash_rust::xxh3;
-use risc0_zkvm::{
-    Receipt, InnerReceipt, SuccinctReceipt, ReceiptClaim,
-    Journal,
-};
-use hex::FromHex;
+use env_logger::Env;
 use log::{info, warn};
 use mongodb::{
-    bson,
+    // bson,
     bson::{
         // Bson,
         doc,
@@ -58,36 +53,32 @@ use mongodb::{
         ServerApiVersion
     },
 };
-// use rand::Rng;
-use rand::prelude::IndexedRandom;
 
-use comms::{
+use peyk::{
     p2p::{MyBehaviourEvent},
-    protocol
+    protocol,
+    protocol::{
+        ProofKind
+    }
 };
 
 mod job;
 use job::Job;
 
-mod recursion;
-use recursion::Stage;
+mod pipeline;
 
 mod db;
 
 // CLI
 #[derive(Parser, Debug)]
-#[command(name = "Client CLI for Wholesum: p2p verifiable computing network.")]
+#[command(name = "Client CLI for Wholesum")]
 #[command(author = "Wholesum team")]
 #[command(version = "1.0")]
-#[command(about = "Wholesum is a P2P verifiable computing marketplace and \
+#[command(about = "Wholesum is a p2p prover network and \
                    this program is a CLI for client nodes.",
           long_about = None)
 ]
 struct Cli {
-    #[arg(short, long)]
-    dstorage_key_file: Option<String>,
-
-
     #[arg(long, action)]
     dev: bool,
 
@@ -117,10 +108,8 @@ enum Commands {
 
 #[async_std::main]
 async fn main() -> anyhow::Result<()> {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init();
-
+    env_logger::Builder::from_env(Env::default().default_filter_or("info"))
+        .init();
     let cli = Cli::parse();
     info!("<-> Client agent for Wholesum network <->");
     info!("Operating mode: `{}` network",
@@ -148,24 +137,24 @@ async fn main() -> anyhow::Result<()> {
     
     // futures for local verification of succinct proofs
     // let mut succinct_proof_verification_futures = FuturesUnordered::new();
-    let mut join_proof_verification_futures = FuturesUnordered::new();
+    // let mut join_proof_verification_futures = FuturesUnordered::new();
 
     let col_jobs = db_client
         .database("wholesum_client")
         .collection::<db::Job>("jobs");
-    let col_segments = db_client
-        .database("wholesum_client")
-        .collection::<db::Segment>("segments");
-    let col_joins = db_client
-        .database("wholesum_client")
-        .collection::<db::Join>("joins");
-    let col_groth16 = db_client
-        .database("wholesum_client")
-        .collection::<db::Groth16>("groth16");
+    // let col_segments = db_client
+    //     .database("wholesum_client")
+    //     .collection::<db::Segment>("segments");
+    // let col_joins = db_client
+    //     .database("wholesum_client")
+    //     .collection::<db::Join>("joins");
+    // let col_groth16 = db_client
+    //     .database("wholesum_client")
+    //     .collection::<db::Groth16>("groth16");
     
     // futures for mongodb progress saving 
-    let mut db_insert_futures = FuturesUnordered::new();
-    let mut db_update_futures = FuturesUnordered::new();
+    // let mut db_insert_futures = FuturesUnordered::new();
+    // let mut db_update_futures = FuturesUnordered::new();
 
     // the job
     let (mut job, db_job_oid) = match &cli.job {
@@ -173,12 +162,9 @@ async fn main() -> anyhow::Result<()> {
             let job = new_job(job_file)?;            
             let oid = col_jobs.insert_one(
                 db::Job {
-                    id: job.id.clone(),                    
-                    num_segments: job.schema.prove.num_segments,
-                    stage: bson::to_bson(&Stage::Prove)?,
+                    id: job.id.clone(),
                     verification: db::Verification {
-                        image_id: job.schema.verification.image_id.clone(),
-                        journal_blob: job.journal.clone(),           
+                        image_id: job.schema.image_id.clone(),
                     },
                     snark_proof: None,
                 }
@@ -205,7 +191,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Job's progress will be recorded to the DB with Id: `{db_job_oid:?}`");
 
     // swarm 
-    let mut swarm = comms::p2p::setup_swarm(&local_key).await?;
+    let mut swarm = peyk::p2p::setup_swarm(&local_key).await?;
     let topic = gossipsub::IdentTopic::new("<-- Wholesum p2p prover bazaar -->");
     let _ = swarm
         .behaviour_mut()
@@ -250,30 +236,7 @@ async fn main() -> anyhow::Result<()> {
     // used for networking
     let mut timer_peer_discovery = stream::interval(Duration::from_secs(5 * 60)).fuse();
     // used for posting job needs
-    let mut timer_post_job = stream::interval(Duration::from_secs(60)).fuse();
-    let mut timer_post_update = stream::interval(Duration::from_secs(600)).fuse();
-
-    // if job.recursion.stage == Stage::Stark {
-    //     // verify the final join proof                                                
-    //     info!("Let's verify the final join proof.");
-    //     let join_proof_cid = job.recursion.join_proof.clone().unwrap();
-    //     let join_proof_filepath = format!("{}/join/proof", job.working_dir);
-    //     if let Err(e) = lighthouse::download_file(
-    //         &ds_client,
-    //         &join_proof_cid,
-    //         join_proof_filepath.clone()
-    //     ).await {
-    //         warn!("Proof download failed: `{e:?}`");
-    //     } else {                                                
-    //         join_proof_verification_futures.push(
-    //             verify_join_proof(
-    //                 join_proof_filepath.clone(),
-    //                 job.schema.verification.journal_file_path.clone(),
-    //                 job.schema.verification.image_id.clone(),
-    //             )
-    //         );                                                    
-    //     }
-    // }
+    let mut timer_post_job = stream::interval(Duration::from_secs(5)).fuse();
 
     loop {
         select! {
@@ -283,79 +246,54 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
                 let random_peer_id = PeerId::random();
-                println!("Searching for the closest peers to `{random_peer_id}`");
+                info!("Searching for the closest peers to `{random_peer_id}`");
                 swarm
                     .behaviour_mut()
                     .kademlia
                     .get_closest_peers(random_peer_id);
             },
 
-            // post need compute
+            // post need prove
             () = timer_post_job.select_next_some() => {
-                if let Err(_) = i_need_compute(
-                    &mut swarm.behaviour_mut().gossipsub,
-                    &topic,
-                    &job
-                ) {
-                    // do nothing
-                }                 
-            },
+                let need = match job.pipeline.stage {
+                    // request for groth16 proving
+                    pipeline::Stage::Groth16 => protocol::NeedKind::Groth16(0),
 
-            // post job update needs
-            () = timer_post_update.select_next_some() => {
-                if let Err(_) = i_need_update(
-                    &mut swarm.behaviour_mut().gossipsub,
-                    &topic,
-                    &job.id,
-                ) {
-                    // do nothing
-                }
-            },
-
-            v_res = join_proof_verification_futures.select_next_some() => {
-                if let Err(err_msg) = v_res {                    
-                        //@ which segment/join/... to blame? 
-                        warn!("Failed to verify the final join proof: `{err_msg:?}`");
-                        continue;                        
-                }
-                info!("[info] Bingo! the final join proof has been verified, recursion is complete.");
-                job.recursion.stage = Stage::Snark;
-                db_update_futures.push(
-                    col_jobs.update_one(
-                        doc! {
-                            "_id": db_job_oid.clone()
-                        }, 
-                        doc! {
-                            "$set": doc! {
-                                "stage": bson::to_bson(&Stage::Stark)?,
-                            }
-                        }
+                    // request for other kinds of proving
+                    _ => protocol::NeedKind::Prove(
+                        (job.pipeline.num_outstanding_aggregate_items() +
+                        job.pipeline.num_outstanding_resolve_items()) as u32
+                    ),
+                };
+                if let Err(err_msg) = swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(
+                        topic.clone(),
+                        bincode::serialize(&need)?
                     )
-                    .into_future()
-                );
-            },
-
-            res = db_insert_futures.select_next_some() => {
-                match res {
-                    Err(e) => eprintln!("[warn] DB insert was failed: `{:#?}`", e),
-
-                    Ok(oid) => println!("[info] DB insert was successful: `{:?}`", oid)
+                {            
+                    warn!("Need compute gossip failed, error: `{err_msg:?}`");
                 }                
             },
 
-            res = db_update_futures.select_next_some() => {
-                match res {
-                    Err(e) => eprintln!("[warn] DB update was failed: `{:#?}`", e),
+            // res = db_insert_futures.select_next_some() => {
+            //     if let Err(err_msg) = res {
+            //         warn!("DB insert was failed: `{err_msg:?}`");
+            //     }                
+            // },
 
-                    Ok(oid) => println!("[info] DB update was successful: `{:?}`", oid)
-                } 
-            },
+            // res = db_update_futures.select_next_some() => {
+            //     if let Err(err_msg) = res {
+            //         warn!("DB insert was failed: `{err_msg:?}`");
+            //     } 
+            // },
 
             // libp2p events
             event = swarm.select_next_some() => match event {
                 
                 SwarmEvent::NewListenAddr { address, .. } => {
-                    println!("[info] Local node is listening on {address}");
+                    info!("Local node is listening on {address}");
                 },
 
                 // mdns events
@@ -365,7 +303,7 @@ async fn main() -> anyhow::Result<()> {
                     )
                 ) => {
                     for (peer_id, _multiaddr) in list {
-                        println!("mDNS discovered a new peer: {peer_id}");
+                        info!("mDNS discovered a new peer: {peer_id}");
                         swarm
                             .behaviour_mut()
                             .gossipsub
@@ -379,7 +317,7 @@ async fn main() -> anyhow::Result<()> {
                     )
                 ) => {
                     for (peer_id, _multiaddr) in list {
-                        println!("mDNS discovered peer has expired: {peer_id}");
+                        info!("mDNS discovered peer has expired: {peer_id}");
                         swarm
                             .behaviour_mut()
                             .gossipsub
@@ -488,7 +426,7 @@ async fn main() -> anyhow::Result<()> {
                     // let msg_str = String::from_utf8_lossy(&message.data);
                     // println!("Got message: '{}' with id: {id} from peer: {peer_id}",
                     //          msg_str);
-                    println!("received gossip message: {:#?}", message);                    
+                    info!("received gossip message: {:#?}", message);                    
                 },
 
                 // requests
@@ -503,392 +441,216 @@ async fn main() -> anyhow::Result<()> {
                 })) => {                
                     match request {
                         // prover indicates her interest to compute                        
-                        protocol::Request::WouldCompute => {
-                            let mut rng = rand::rng();
-                            match job.recursion.stage {
-                                Stage::Prove => {                                    
-                                    // pick a random unproved segment and send it                                    
-                                    let mut unproved_segments = vec![];
-                                    for (segment_index, is_proved) in job.recursion.prove_and_lift.progress_map.iter().enumerate() {
-                                        if true == is_proved {
-                                            continue;
-                                        }                                        
-                                        unproved_segments.push(segment_index);                                        
-                                    }
-                                    if unproved_segments.len() == 0 {
-                                        warn!("No more segments to prove.");
-                                        continue;
-                                    }
-                                    let chosen_segment_index = *unproved_segments.choose(&mut rng).unwrap();
-                                    info!("Picked `segment {chosen_segment_index}` to prove.");
-                                    let chosen_segment = job.recursion.prove_and_lift.segments
-                                        .get_mut(chosen_segment_index)
-                                        .unwrap();
+                        protocol::Request::WouldProve => {
+                            let prover_id = prover_peer_id.to_string();
+                            match job.pipeline.stage {
+                                pipeline::Stage::Groth16 => {
+                                    let blob = bincode::serialize(
+                                        job.pipeline.agg_proof.as_ref().unwrap()
+                                    )
+                                    .unwrap();
                                     let compute_job = protocol::ComputeJob {
-                                        job_id: job.id.clone(),
-                                        job_type: protocol::JobType::Prove(
-                                            protocol::ProveDetails {
-                                                segment_id: chosen_segment_index as u32,
-                                                segment_blob: chosen_segment.blob.clone(),
-                                            }
-                                        )
-                                    };
-                                    if let Err(err_msg) = swarm
-                                        .behaviour_mut()
-                                        .req_resp
-                                            .send_response(channel,
-                                                protocol::Response::Job(compute_job)
-                                            )
-                                    {
-                                        warn!("Failed to send segment for proving: `{err_msg:?}`")
-                                    } else {
-                                        chosen_segment.num_deals += 1;
-                                    }
-                                },
-
-                                Stage::Join => {                                    
-                                    let round = job.recursion.join_rounds.last_mut().unwrap();
-                                    // pick a random unproved pair and send it                                    
-                                    let mut unproved_pairs = vec![];
-                                    for (pair_index, is_proved) in round.progress_map.iter().enumerate() {
-                                        if false == is_proved {
-                                            unproved_pairs.push(pair_index);
-                                        }                                        
-                                    }
-                                    if unproved_pairs.len() == 0 {
-                                        warn!("No more pairs to prove.");
-                                        continue;
-                                    }
-                                    let chosen_pair_index = *unproved_pairs.choose(&mut rng).unwrap();
-                                    info!("Picked `pair {chosen_pair_index}` to prove.");
-
-                                    let chosen_pair = round.pairs.get_mut(chosen_pair_index).unwrap();                                    
-                                    let compute_job = protocol::ComputeJob {
-                                        job_id: job.id.clone(),
-                                        job_type: protocol::JobType::Join(
-                                            protocol::JoinDetails {
-                                                pair_id: chosen_pair_index as u32,
-                                                blob_pair: (
-                                                    chosen_pair.left_blob.clone(),
-                                                    chosen_pair.right_blob.clone()
-                                                )
-                                            }
-                                        )
-                                    };
-                                    if let Err(err_msg) = swarm
-                                        .behaviour_mut()
-                                        .req_resp
-                                            .send_response(channel,
-                                                protocol::Response::Job(compute_job)
-                                            )
-                                    {
-                                        warn!("Failed to send join pair for proving: `{err_msg:?}`")
-                                    } else {
-                                        chosen_pair.num_deals += 1;
-                                    }
-                                }
-
-                                Stage::Snark => {
-                                    let compute_job = protocol::ComputeJob {
-                                        job_id: job.id.clone(),
-                                        job_type: protocol::JobType::Groth16(
+                                        id: job.id.clone(),
+                                        kind: protocol::JobKind::Groth16(
                                             protocol::Groth16Details {
-                                                proof_blob: job.recursion.join_proof.clone().unwrap()
+                                                blob: blob
                                             }
                                         )
                                     };
                                     if let Err(err_msg) = swarm
                                         .behaviour_mut()
                                         .req_resp
-                                            .send_response(channel,
+                                            .send_response(
+                                                channel,
                                                 protocol::Response::Job(compute_job)
                                             )
                                     {
-                                        warn!("Failed to send the STARK proof for Groth16 extraction: `{err_msg:?}`")
-                                    }
-
+                                        warn!("Failed to send Groth16 job: `{err_msg:?}`");
+                                    }                                    
                                 },
 
-                                _ => {}
-                            }                            
-                        },
+                                pipeline::Stage::Resolve => {
+                                    //@ ask for agg proof blob here too?
+                                    if job.pipeline.num_outstanding_resolve_items() == 0 {
+                                        continue
+                                    }                                    
+                                    if let Some(resolve_item) = job.pipeline.assign_resolve_item() {
+                                        let kind = match resolve_item {
+                                            pipeline::ResolveItem::Keccak(claim_digest, blob) => {
+                                                protocol::JobKind::Keccak(
+                                                    protocol::KeccakDetails {
+                                                        claim_digest: claim_digest.into(),
+                                                        blob: blob
+                                                    }
+                                                )
+                                            },
 
-                        // prover has finished its task
-                        protocol::Request::ProofIsReady(new_proofs) => {
-                            for new_proof in new_proofs {
-                                if job.id != new_proof.job_id {
-                                    warn!("Status update for an unknown job `{new_proof:?}`, ignored.");
-                                    continue;
+                                            pipeline::ResolveItem::Zkr(claim_digest, blob) => {
+                                                protocol::JobKind::Zkr(
+                                                    protocol::ZkrDetails {
+                                                        claim_digest: claim_digest.into(),
+                                                        blob: blob
+                                                    }
+                                                )
+                                            },
+                                        };
+                                        if let Err(err_msg) = swarm
+                                            .behaviour_mut()
+                                            .req_resp
+                                            .send_response(
+                                                channel,
+                                                protocol::Response::Job(protocol::ComputeJob {
+                                                    id: job.id.clone(),
+                                                    kind: kind,
+                                                })
+                                            )
+                                        {
+                                            warn!("Failed to send prove keccak/zkr job: `{err_msg:?}`");
+                                        }
+                                    }
+                                },
+
+                                pipeline::Stage::Aggregate => {
+                                    let (batch_index, assignments) = match job
+                                        .pipeline
+                                        .assign_agg_batch(&prover_id)
+                                    {
+                                        Some((i, a)) => (i, a),
+
+                                        None => {                                    
+                                            warn!("No jobs for `{prover_peer_id:?}` at this time.");
+                                            //@ send resolve jobs if possible
+                                            continue
+                                        }
+                                    };
+                                    //@ unify segment and join into one job
+                                    let job_kind = if job.pipeline.rounds.len() > 1 {
+                                        protocol::InputBlobKind::Proof
+                                    } else {
+                                        protocol::InputBlobKind::Segment
+                                    };
+                                    let compute_job = protocol::ComputeJob {
+                                        id: job.id.clone(),
+                                        kind: protocol::JobKind::Aggregate(
+                                            protocol::AggregateDetails {
+                                                id: batch_index as u32,
+                                                kind: job_kind,
+                                                batch: assignments
+                                                    .into_iter()
+                                                    .map(|ass| {
+                                                        protocol::InputBlob {
+                                                            blob: ass.blob.clone(),
+                                                            hash: ass.hash
+                                                        }
+                                                    })
+                                                .collect()
+                                            }
+                                        )
+                                    };
+                                    if let Err(err_msg) = swarm
+                                        .behaviour_mut()
+                                        .req_resp
+                                            .send_response(
+                                                channel,
+                                                protocol::Response::Job(compute_job)
+                                            )
+                                    {
+                                        warn!("Failed to send batch for proving: `{err_msg:?}`");
+                                    } else {
+                                        job.pipeline.confirm_assignment(&prover_id, batch_index);
+                                    }
                                 }
-                                match new_proof.proof_type {
-                                    protocol::ProofType::Prove(seg_id) => {
-                                        if job.recursion.stage != Stage::Prove {                             
-                                            continue;
-                                        }
-                                        if seg_id >= job.recursion.prove_and_lift.segments.len() as u32 {
-                                            warn!(
-                                                "Invalid segment id `{}`, valid range: `0 - {}`",
-                                                seg_id,
-                                                job.schema.prove.num_segments - 1
-                                            );
-                                            continue;
-                                        }                                     
-                                        let blob_hash = xxh3::xxh3_64(&new_proof.blob);
-                                        let mut segment_already_proved = false;
-                                        let mut proof_should_be_logged = true;
-                                        let prover_id = prover_peer_id.to_string();
-                                        job.recursion
-                                        .prove_and_lift
-                                        .proofs
-                                        .entry(seg_id)
-                                            .and_modify(|all_proofs| {
-                                                segment_already_proved = true;                                                    
-                                                all_proofs
-                                                    .entry(prover_id.clone())
-                                                    .and_modify(|prover_proofs| {
-                                                        match prover_proofs
-                                                            .iter()
-                                                            .find(|p: &&recursion::Proof| p.blob_hash == blob_hash) {
-                                                                None => {
-                                                                    prover_proofs.push(
-                                                                        recursion::Proof {                                                            
-                                                                            blob: new_proof.blob.clone(),
-                                                                            blob_hash: blob_hash,
-                                                                            spent: false,
-                                                                        }
-                                                                    );
-                                                                    info!("Another proof for `segment {seg_id:?}`.");
-                                                                },
-
-                                                                Some(_) => {
-                                                                    // duplicate proof
-                                                                    proof_should_be_logged = false;
-                                                                }
-                                                            }
-                                                    });
-                                            })                                            
-                                            .or_insert_with(|| {
-                                                let mut proofs = HashMap::new();
-                                                proofs.insert(
-                                                    prover_id.clone(),
-                                                    vec![
-                                                        recursion::Proof {
-                                                            blob_hash: blob_hash,
-                                                            blob: new_proof.blob.clone(),
-                                                            spent: false,
-                                                        }
-                                                    ]
-                                                );
-                                                proofs
-                                            });
-                                        if false == segment_already_proved {                                            
-                                            //@ need to validate received proof somehow
-                                            job.recursion.prove_and_lift.progress_map.set(seg_id as usize, true);
-                                            info!(
-                                                "`Segment {}` is proved, progress_map: {:?}",
-                                                seg_id,
-                                                job.recursion.prove_and_lift.progress_map
-                                            );
-                                        
-                                            if true == job.recursion.prove_and_lift.is_finished() {
-                                                info!("Prove stage is finished.");
-                                                db_update_futures.push(
-                                                    col_jobs.update_one(
-                                                        doc! {
-                                                            "_id": db_job_oid.clone()
-                                                        },
-                                                        doc! {
-                                                            "$set": doc! {
-                                                                "stage": bson::to_bson(&Stage::Join)?,
-                                                            }
-                                                        }
-                                                    )
-                                                    .into_future()
-                                                );                                                
-                                            }
-                                        }
-                                        // db
-                                        if true == proof_should_be_logged {
-                                            db_insert_futures.push(
-                                                col_segments.insert_one(
-                                                    db::Segment {
-                                                        id: seg_id,
-                                                        job_id: db_job_oid.clone(),
-                                                        proof: db::Proof {
-                                                            prover: prover_id.clone(),
-                                                            blob: new_proof.blob.clone(),
-                                                            hash: blob_hash,
-                                                        }
-                                                    }
-                                                )
-                                                .into_future()
-                                            );
-                                        }                                        
-                                    },
-
-                                    protocol::ProofType::Join(pair_id) => {
-                                        if job.recursion.stage != Stage::Join { 
-                                            continue;
-                                        }
-                                        let round = job.recursion.join_rounds.last_mut().unwrap();
-                                        let round_number = round.number;
-
-                                        if pair_id >= round.pairs.len() as u32 {
-                                            warn!(
-                                                "Invalid pair id `{}`, valid range: `0 - {}`",
-                                                pair_id,
-                                                job.schema.prove.num_segments - 1
-                                            );
-                                            continue;
-                                        }                                     
-                                        let blob_hash = xxh3::xxh3_64(&new_proof.blob);
-                                        let mut pair_already_proved = false;
-                                        let mut proof_should_be_logged = true;
-                                        let prover_id = prover_peer_id.to_string();                                        
-                                        round.proofs
-                                        .entry(pair_id)
-                                            .and_modify(|all_proofs| {
-                                                pair_already_proved = true;                                                    
-                                                all_proofs
-                                                .entry(prover_id.clone())
-                                                    .and_modify(|prover_proofs| {
-                                                        match prover_proofs
-                                                            .iter()
-                                                            .find(|p: &&recursion::Proof| p.blob_hash == blob_hash) {
-                                                                None => {
-                                                                    prover_proofs.push(
-                                                                        recursion::Proof {                                                            
-                                                                            blob: new_proof.blob.clone(),
-                                                                            blob_hash: blob_hash,
-                                                                            spent: false,
-                                                                        }
-                                                                    );
-                                                                    info!("Another proof for `pair {pair_id:?}`.");
-                                                                },
-
-                                                                Some(_) => {
-                                                                    // duplicate proof
-                                                                    proof_should_be_logged = false;
-                                                                }
-                                                            }
-                                                    });
-                                            })                                            
-                                            .or_insert_with(|| {
-                                                let mut proofs = HashMap::new();
-                                                proofs.insert(
-                                                    prover_id.clone(),
-                                                    vec![
-                                                        recursion::Proof {
-                                                            blob_hash: blob_hash,
-                                                            blob: new_proof.blob.clone(),
-                                                            spent: false,
-                                                        }
-                                                    ]
-                                                );
-                                                proofs
-                                            });
-                                        // db
-                                        if true == proof_should_be_logged {
-                                            db_insert_futures.push(
-                                                col_joins.insert_one(
-                                                    db::Join {
-                                                        job_id: db_job_oid.clone(),
-                                                        round: round_number,
-                                                        pair_id: pair_id,
-                                                        proof: db::Proof {
-                                                            prover: prover_id.clone(),
-                                                            blob: new_proof.blob.clone(),
-                                                            hash: blob_hash,
-                                                        }
-                                                    }
-                                                )
-                                                .into_future()
-                                            );
-                                        }
-                                        if false == pair_already_proved {
-                                            if true == round.progress_map.all() {
-                                                if true == job.recursion.begin_next_join_round() {
-                                                    // verify the final join proof                                                
-                                                    info!("Let's verify the final join proof.");                                                    
-                                                    join_proof_verification_futures.push(
-                                                        verify_join_proof(
-                                                            new_proof.blob.clone(),
-                                                            job.journal.clone(),
-                                                            job.schema.verification.image_id.clone(),
-                                                        )
-                                                    );                                                    
-                                                }                             
-                                            }
-                                        }
-                                    },
-
-                                    protocol::ProofType::Groth16 => {
-                                        if job.recursion.stage != Stage::Snark { 
-                                            continue;
-                                        }                                        
-                                        info!("A Groth16 proof has been extracted.");                                        
-                                        let blob_hash = xxh3::xxh3_64(&new_proof.blob);
-                                        let mut groth16_already_extracted = false;
-                                        let mut proof_should_be_logged = true;
-                                        let prover_id = prover_peer_id.to_string();                                        
-                                        job.recursion
-                                        .groth16_proofs
-                                        .entry(prover_id.clone())                                            
-                                            .and_modify(|prover_proofs| {
-                                                groth16_already_extracted = true;                                                    
-                                                match prover_proofs
-                                                    .iter()
-                                                    .find(|p: &&recursion::Proof| p.blob_hash == blob_hash) {
-                                                        None => {
-                                                            prover_proofs.push(
-                                                                recursion::Proof {                                                            
-                                                                    blob: new_proof.blob.clone(),
-                                                                    blob_hash: blob_hash,
-                                                                    spent: false,
-                                                                }
-                                                            );
-                                                        },
-
-                                                        Some(_) => {
-                                                            // duplicate proof
-                                                            proof_should_be_logged = false;
-                                                        }
-                                                    }
-                                            })                                        
-                                            .or_insert_with(|| {
-                                                vec![
-                                                    recursion::Proof {
-                                                        blob_hash: blob_hash,
-                                                        blob: new_proof.blob.clone(),
-                                                        spent: false,
-                                                    }
-                                                ]
-                                            });
-                                        // db
-                                        if true == proof_should_be_logged {
-                                            db_insert_futures.push(
-                                                col_groth16.insert_one(
-                                                    db::Groth16 {
-                                                        job_id: db_job_oid.clone(),                                                        
-                                                        proof: db::Proof {
-                                                            prover: prover_id.clone(),
-                                                            blob: new_proof.blob.clone(),
-                                                            hash: blob_hash,
-                                                        }
-                                                    }
-                                                )
-                                                .into_future()
-                                            );
-                                        }
-                                        if false == groth16_already_extracted {                                            
-                                            // verify the final join proof                                                
-                                            info!("Let's verify the Groth16 proof");
-
-                                        }
-                                    },
-                                };
-                            }                                                    
+                            };
                         },
+
+                        // prover has finished its job
+                        protocol::Request::ProofIsReady(token) => {
+                            if job.id != token.job_id {
+                                warn!("Ignored unknown proof token: `{token:?}`");
+                                continue;
+                            }
+                            let prover_id = prover_peer_id.to_string();
+                            match token.kind {
+                                ProofKind::Assumption(claim_digest, blob) => {
+                                    job.pipeline.add_assumption_proof(
+                                        claim_digest.into(),
+                                        blob,
+                                        prover_id
+                                    );
+                                },                                 
+
+                                ProofKind::Aggregate(batch_id) => {                                    
+                                    job.pipeline.add_proof(
+                                        batch_id as usize,
+                                        None,
+                                        token.hash,
+                                        prover_id.clone()
+                                    );
+                                    if job.pipeline.stage == pipeline::Stage::Resolve {
+                                        let _req_id = swarm
+                                            .behaviour_mut()
+                                            .req_resp
+                                            .send_request(
+                                                &prover_peer_id,
+                                                protocol::Request::TransferBlob(token.hash),
+                                            );
+                                        info!("Requested blob transfer from prover.");
+                                    }
+                                },                                    
+
+                                ProofKind::Groth16(blob) => {
+                                    if job.pipeline.stage != pipeline::Stage::Groth16 {
+                                        continue
+                                    }
+                                    info!("A Groth16 proof has been generated, let's verify it on-chain!");
+                                    let hash = xxh3_128(&blob);
+                                    match job.pipeline.groth16_proof {
+                                        None => {
+                                            job.pipeline.groth16_proof = Some(
+                                                pipeline::Proof {                                                    
+                                                    provers: HashSet::from([prover_id]),
+                                                    blob: Some(blob),
+                                                    hash: hash
+                                                }
+                                            );
+                                        }
+
+                                        Some(ref mut proof) => {
+                                            if hash != proof.hash {
+                                                warn!("Existing hash `{}` differs from the new hash `{}`",
+                                                    proof.hash, hash
+                                                );
+                                                continue
+                                            }
+                                            proof.provers.insert(prover_id);
+                                        }
+                                    };
+                                    // on-chain verification!
+                                },
+                            };
+                        },
+
+                        protocol::Request::TransferBlob(_) => (),
+                    }
+                },
+
+                SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
+                    peer: client_peer_id,
+                    message: request_response::Message::Response {
+                        response,
+                        //response_id,
+                        ..
+                    }
+                })) => {                
+                    match response {
+                        protocol::Response::BlobIsReady(blob) => {
+                            job.pipeline.add_agg_proof(
+                                &client_peer_id.to_string(),
+                                &blob
+                            );
+                        },
+
+                        _ => {},
                     }
                 },
 
@@ -899,51 +661,6 @@ async fn main() -> anyhow::Result<()> {
             },
         }
     }
-}
-
-fn i_need_update(
-    gossipsub: &mut gossipsub::Behaviour,
-    topic: &gossipsub::IdentTopic,
-    job_id: &str,
-) -> anyhow::Result<()> {
-    if let Err(e) = gossipsub
-    .publish(
-        topic.clone(),
-        bincode::serialize(&protocol::Need::UpdateMe(job_id.to_string()))?
-    ) {                
-        eprintln!("[warn] `status update` gossip failed, error: {e:?}");
-    }        
-    Ok(())
-}
-
-fn i_need_compute(
-    gossipsub: &mut gossipsub::Behaviour,
-    topic: &gossipsub::IdentTopic,
-    job: &job::Job
-) -> anyhow::Result<()> {
-    let need_type = match job.recursion.stage {
-        // request for prove
-        Stage::Prove => protocol::NeedType::Prove,
-        
-        // request for join
-        Stage::Join => protocol::NeedType::Join,
-
-        // request for groth16/plonk
-        Stage::Snark => protocol::NeedType::Groth16,
-
-        _ => {
-            return Ok(())
-        },    
-    };
-    if let Err(err_msg) = gossipsub
-        .publish(
-            topic.clone(),
-            bincode::serialize(&protocol::Need::Compute(0, need_type))?
-        )
-    {            
-        warn!("Need compute gossip failed, error: `{err_msg:?}`");
-    }
-    Ok(())
 }
 
 fn get_home_dir() -> anyhow::Result<String> {
@@ -994,23 +711,14 @@ pub fn new_job(
         fs::create_dir_all(
             format!("{working_dir}/{action}")
         )?;
-    }
-    if schema.prove.num_segments == 0 {
-        eprintln!("[warn] Number of segments is 0.");
     }    
-    let rec = recursion::Recursion::new(
-        schema.prove.num_segments,
-        &schema.prove.segment_path,
-        &schema.prove.segment_filename_prefix,
-    )?;
-    let journal = fs::read(&schema.verification.journal_filepath)?;
+    let pipeline = pipeline::Pipeline::new(schema.image_id.clone().into());
     Ok(
         Job {
             id: generated_job_id.clone(),
             working_dir: working_dir,
             schema: schema,
-            recursion: rec,
-            journal: journal,
+            pipeline: pipeline,
         }
     )
         
@@ -1060,7 +768,7 @@ pub fn new_job(
 //             },
 //         },
 
-//         recursion: recursion::Recursion::new(db_job.num_segments)
+//         recursion: pipeline::pipeline::new(db_job.num_segments)
 //     };
 //     // prove stage(segments)
 //     let db_proofs = retrieve_segments_from_db(
@@ -1078,13 +786,13 @@ pub fn new_job(
 //     }
 //     println!("[info] Number of proved segments found: `{}`", db_proofs.len());
 //     for seg_id in db_proofs.keys() {
-//         job.recursion.prove_and_lift.progress_map.set(*seg_id as usize, true);
+//         job.pipeline.prove_and_lift.progress_map.set(*seg_id as usize, true);
 //     }
-//     job.recursion.prove_and_lift.proofs = db_proofs;
+//     job.pipeline.prove_and_lift.proofs = db_proofs;
 //     println!("[info] Prove stage is in sync with DB.");
-//     if true == job.recursion.prove_and_lift.is_finished() {
+//     if true == job.pipeline.prove_and_lift.is_finished() {
 //         println!("[info] Prove stage is finished.");
-//         if true == job.recursion.begin_join_stage() {
+//         if true == job.pipeline.begin_join_stage() {
 //             println!("[info] Attempting to verify the final join proof...");
 //             //@ todo: verify join proof
 //             return Ok(
@@ -1133,7 +841,7 @@ pub fn new_job(
 //     }
 //     for (round_number, db_joins) in join_btree.into_iter() {
 //         println!("[info] Checking join round {round_number}...");
-//         let round = job.recursion.join_rounds.last_mut().unwrap();
+//         let round = job.pipeline.join_rounds.last_mut().unwrap();
 //         for db_join in db_joins.iter() {
 //             if let Some(pair_index) = round
 //                 .pairs
@@ -1155,10 +863,10 @@ pub fn new_job(
 //                 .and_modify(|proofs| {
 //                     match proofs
 //                     .iter()
-//                     .find(|p: &&recursion::Proof| p.cid == db_join.proof.cid) {
+//                     .find(|p: &&pipeline::Proof| p.cid == db_join.proof.cid) {
 //                         None => {
 //                             proofs.push(
-//                                 recursion::Proof {
+//                                 pipeline::Proof {
 //                                     cid: db_join.proof.cid.clone(),
 //                                     prover: db_join.proof.prover.clone(),
 //                                     spent: false,
@@ -1171,7 +879,7 @@ pub fn new_job(
 //                 })
 //                 .or_insert_with(|| {
 //                     vec![
-//                         recursion::Proof {
+//                         pipeline::Proof {
 //                             cid: db_join.proof.cid.clone(),
 //                             prover: db_join.proof.prover.clone(),
 //                             spent: false,
@@ -1189,7 +897,7 @@ pub fn new_job(
 //         }
 //         println!("[info] Sync is complete for round {}.", round.number);
 //         if true == round.progress_map.all() {
-//             if true == job.recursion.begin_next_join_round() {                
+//             if true == job.pipeline.begin_next_join_round() {                
 //             }
 //         }
 //     }
@@ -1205,7 +913,7 @@ pub fn new_job(
 // async fn retrieve_segments_from_db(
 //     col_segments: &mongodb::Collection<db::Segment>,
 //     db_job_oid: &Bson,
-// ) -> anyhow::Result<BTreeMap<u32, Vec<recursion::Proof>>> {
+// ) -> anyhow::Result<BTreeMap<u32, Vec<pipeline::Proof>>> {
 //     // retrieve all proved segments
 //     println!("[info] Retrieving segments from the db...");
 //     let mut cursor = col_segments.find(
@@ -1214,12 +922,12 @@ pub fn new_job(
 //         }
 //     )
 //     .await?;
-//     let mut proofs = BTreeMap::<u32, Vec<recursion::Proof>>::new();
+//     let mut proofs = BTreeMap::<u32, Vec<pipeline::Proof>>::new();
 //     while let Some(db_segment) = cursor.try_next().await? {        
 //         proofs.entry(db_segment.id)
 //         .and_modify(|v| {
 //             v.push(
-//                 recursion::Proof {
+//                 pipeline::Proof {
 //                     cid: db_segment.proof.cid.clone(),
 //                     prover: db_segment.proof.prover.clone(),
 //                     spent: false
@@ -1228,7 +936,7 @@ pub fn new_job(
 //         })
 //         .or_insert_with(|| {
 //             vec![
-//                 recursion::Proof {
+//                 pipeline::Proof {
 //                     cid: db_segment.proof.cid,
 //                     prover: db_segment.proof.prover,
 //                     spent: false
@@ -1269,39 +977,39 @@ pub fn new_job(
 //     Ok(join_btree)
 // }
 
-#[derive(Debug, Clone)]
-struct VerificationResult {
-    pub prover_id: String,
-    pub receipt_cid: String,
-    pub item_id: String,
-    pub receipt_file_path: String,
-    pub receipt_blob: Vec<u8>
-}
+// #[derive(Debug, Clone)]
+// struct VerificationResult {
+//     pub prover_id: String,
+//     pub receipt_cid: String,
+//     pub item_id: String,
+//     pub receipt_file_path: String,
+//     pub receipt_blob: Vec<u8>
+// }
 
-#[derive(Debug, Clone)]
-struct VerificationError {
-    pub receipt_cid: String,
-    pub item_id: String,
-    pub err_msg: String,
-}
+// #[derive(Debug, Clone)]
+// struct VerificationError {
+//     pub receipt_cid: String,
+//     pub item_id: String,
+//     pub err_msg: String,
+// }
 
-// verify the final join proof
-async fn verify_join_proof(
-    proof_blob: Vec<u8>,
-    journal: Vec<u8>,
-    image_id: String,
-) -> anyhow::Result<()> {
-    let sr: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(&proof_blob)?;
-    let journal: Journal = bincode::deserialize(&journal)?;
-    let proof = Receipt::new(
-        InnerReceipt::Succinct(sr),
-        journal.bytes
-    );        
-    let now = Instant::now();
-    proof.verify(
-        <[u8; 32]>::from_hex(&image_id)?
-    )?;
-    let verification_dur = now.elapsed().as_millis();
-    info!("Verification of join proof took `{verification_dur} msecs`.");
-    Ok(())
-}
+// // verify the final join proof
+// async fn verify_join_proof(
+//     proof_blob: Vec<u8>,
+//     journal: Vec<u8>,
+//     image_id: String,
+// ) -> anyhow::Result<()> {
+//     let sr: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(&proof_blob)?;
+//     let journal: Journal = bincode::deserialize(&journal)?;
+//     let proof = Receipt::new(
+//         InnerReceipt::Succinct(sr),
+//         journal.bytes
+//     );        
+//     let now = Instant::now();
+//     proof.verify(
+//         <[u8; 32]>::from_hex(&image_id)?
+//     )?;
+//     let verification_dur = now.elapsed().as_millis();
+//     info!("Verification of join proof took `{verification_dur} msecs`.");
+//     Ok(())
+// }

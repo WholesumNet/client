@@ -1,31 +1,13 @@
 
 use serde::Deserialize;
-use crate::recursion;
-
-#[derive(Debug, Deserialize)]
-pub struct ProveConfig {        
-    pub num_segments: u32,
-
-    // e.g. "/home/foo/b22000/21"
-    pub segment_path: String,
-
-    // e.g. "segment-"
-    pub segment_filename_prefix: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct VerificationConfig {
-    pub journal_filepath: String,
-    // image_id as in risc0, it's a hash digest
-    pub image_id: String,
-}
+use crate::pipeline;
 
 // job template as read in(e.g. from disk)
 #[derive(Debug, Deserialize)]
 pub struct Schema {    
-    pub prove: ProveConfig,
-    
-    pub verification: VerificationConfig,
+    pub redis_url: String,
+
+    pub image_id: String
 }
 
 // maintains lifecycle for a job
@@ -37,8 +19,6 @@ pub struct Job {
    
     pub schema: Schema,
 
-    pub recursion: recursion::Recursion,
-
-    pub journal: Vec<u8>,
+    pub pipeline: pipeline::Pipeline
 }
 

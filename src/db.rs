@@ -6,20 +6,17 @@ use serde::{
 // mongodb database models for the job data
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Verification {
-    
-    pub image_id: String,
-
-    pub journal_blob: Vec<u8>,
+pub struct Verification {    
+    pub image_id: String
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Proof {    
     pub prover: String,
 
-    pub blob: Vec<u8>,
+    pub blob: Option<Vec<u8>>,
 
-    pub hash: u64,
+    pub hash: u128,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,13 +50,8 @@ pub struct Groth16 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Job {
-    
+pub struct Job {    
     pub id: String,
-    
-    pub num_segments: u32,
-
-    pub stage: Bson,
 
     pub verification: Verification,
 
