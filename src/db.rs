@@ -6,18 +6,17 @@ use serde::{
 // mongodb database models for the job data
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Verification {
-    pub image_id: String,
+pub struct Verification {    
+    pub image_id: String
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Proof {    
-    //@ how about decoding cids into vec<u8> binary using multibase(cid)
-
-    pub cid: String,
-
-    // the prover
     pub prover: String,
+
+    pub blob: Option<Vec<u8>>,
+
+    pub hash: u128,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,18 +26,26 @@ pub struct Segment {
     //@ rename to job_oid: ObjectId
     pub job_id: Bson,
 
-    // proved, lifted, and verified succinct receipt
+    // a succinct receipt(proved & lifted)
     pub proof: Proof,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Join {
+    pub pair_id: u32,
+
     pub job_id: Bson,
 
     pub round: u32,
 
-    pub left_input_proof: String,
-    pub right_input_proof: String,
+
+    pub proof: Proof,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Groth16 {
+    pub job_id: Bson,
+
     pub proof: Proof,
 }
 
@@ -46,13 +53,7 @@ pub struct Join {
 pub struct Job {    
     pub id: String,
 
-    pub po2: u32,
-    pub segments_cid: String,
-    pub num_segments: u32,
-
-    pub stage: Bson,
-
     pub verification: Verification,
 
-    pub snark_receipt: Option<Proof>,
+    pub snark_proof: Option<Proof>,
 }
