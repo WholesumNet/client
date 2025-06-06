@@ -3,7 +3,7 @@
 
 ## Overview
 
-Wholesum network is a p2p prover network `tailored for ETH block`. It builds on top of [Risc0](https://risczero.com/) and [Libp2p](https://libp2p.io). The design of the network follows a p2p parallel proving scheme where Risc0 jobs are passed around, proved, and finally combined into a final proof ready for L1 verification.
+Wholesum is a p2p prover network `tailored for ETH L1 block proving`. It builds on top of [Risc0](https://risczero.com/) and [Libp2p](https://libp2p.io). The design of the network follows a p2p distributed proving scheme where Risc0 jobs are passed around, proved, and finally combined into a final Groth16 proof ready for L1 verification.
 
 ### Prerequisites
 
@@ -25,27 +25,17 @@ Install the MongoDB from [here](https://www.mongodb.com/docs/manual/tutorial/ins
 
 To run a client agent, you would first need to fork the following libraries and put them in the parent("..") directory of the client:
 
-- [comms](https://github.com/WholesumNet/comms)
+- [peyk](https://github.com/WholesumNet/peyk)
 
 ### The job file
 
 You would need a job file to engage with the network. Here's a sample job file for the SHA example:
 <pre>
-# schema of a tyipcal ETH block proving job
+# schema of a typical L1 block proving job
 
-[prove]
+redis_url = "redis://127.0.0.1"
 
-# number of segments
-num_segments = 19
-
-segment_path = "foo/block/1150000/21"
-segment_filename_prefix = "segment-"
-
-[verification]
-
-journal_filepath = "foo/block/1150000/journal"
-
-image_id = "foobarbazkekw" 
+image_id = "foobarbaz" 
 
 </pre>
 
