@@ -31,11 +31,7 @@ pub struct Proof {
 }
 
 #[derive(Debug)]
-pub struct Segment {   
-    pub po2: u32,
-    
-    pub num_cycles: u32,
-    
+pub struct Segment {    
     pub blob: Vec<u8>,
 
     pub hash: u128
@@ -111,7 +107,7 @@ impl Round {
         if self.inputs.contains_key(&index) {
             return
         }
-        info!("New input with index `{index}` has arrived: `{input:?}`");
+        info!("New input with index `{index}` has arrived.");
         self.inputs.insert(index, input);
         //@ handle 0th proof in join
         let batch_index = index / self.batch_size;
@@ -140,16 +136,18 @@ impl Round {
                 );
             }
         }
+        info!("partial-batches: {:?}", self.partial_batches);
+        info!("batches: {:?}", self.batches);
     }
 
     // no new input is expected, so upgrade the partial batch into a full batch
-    pub fn stop_segment_feeding(&mut self) {
+    pub fn stop_feeding(&mut self) {
         info!("Partial batches: {:?}", self.partial_batches);
         if self.partial_batches.is_empty() {
             return
         }
         if self.partial_batches.len() > 1 {
-            warn!("Too many partial batches, excpected just one.");
+            warn!("Too many partial batches, expected just one.");
             return            
         }
         let (index, batch) = self.partial_batches.first_key_value().unwrap();
@@ -157,8 +155,8 @@ impl Round {
             .iter()
             .filter_map(|item| if *item != 0 { Some(*item) } else { None })
             .collect();
-        info!("last batch: {last_batch:?}");
         self.batches.insert(*index, last_batch);
+        info!("batches: {:?}", self.batches);
     }
 
     // assign a batch to prover
@@ -304,7 +302,7 @@ impl Pipeline {
     pub fn new(image_id: Vec<u8>) -> Self {
         Self {
             stage: Stage::Aggregate,            
-            rounds: vec![Round::new(0, 2)], // round 0 with batch_size 4
+            rounds: vec![Round::new(0, 3)], // round 0 with batch_size 4
             keccak_assumptions: HashMap::new(),
             zkr_assumptions: HashMap::new(),
             assumption_proofs: HashMap::new(),
@@ -389,8 +387,16 @@ impl Pipeline {
         if self.rounds.len() > 1 {
             warn!("Received segment but we are aggregating proofs.");
             return
-        }        
+        }
         self.rounds[0].feed_input(index, Input::SegmentInput(segment));
+    }
+
+    pub fn stop_segment_feeding(&mut self) {
+        if self.rounds.len() > 1 {
+            warn!("Received stop segment feeding in the wrong round.");
+            return
+        }
+        self.rounds[0].stop_feeding();
     }
 
     pub fn add_proof(
@@ -429,26 +435,58 @@ impl Pipeline {
 
     pub fn feed_keccak_assumption(
         &mut self,
-        claim_digest: Digest,
-        keccak_request_object: KeccakRequestObject
+        blob: &[u8]
     ) {
+        let keccak_req_obj = match bincode::deserialize::<KeccakRequestObject>(blob) {
+            Ok(k) => k,
+
+            Err(err_msg) => {
+                warn!("Invalid keccak feed: `{err_msg}`");
+                return
+            }
+        };
+        let claim_digest: Digest = match keccak_req_obj.claim_digest.try_into() {
+            Ok(cd) => cd,
+            
+            Err(err_msg) => {
+                warn!("Invalid keccak feed: `{err_msg}`");
+                return
+            }
+        };
+        info!("Received keccak assumption with claim digest: `{claim_digest:?}`");
         if !self.keccak_assumptions.contains_key(&claim_digest) {
             self.keccak_assumptions.insert(
                 claim_digest,
-                keccak_request_object
+                keccak_req_obj
             );
         }
     }
 
     pub fn feed_zkr_assumption(
         &mut self,
-        claim_digest: Digest,
-        zkr_request_object: ZkrRequestObject
+        blob: &[u8]
     ) {
+        let zkr_req_obj = match bincode::deserialize::<ZkrRequestObject>(blob) {
+            Ok(k) => k,
+
+            Err(err_msg) => {
+                warn!("Invalid zkr feed: `{err_msg}`");
+                return
+            }
+        };
+        let claim_digest: Digest = match zkr_req_obj.claim_digest.try_into() {
+            Ok(cd) => cd,
+            
+            Err(err_msg) => {
+                warn!("Invalid zkr feed: `{err_msg}`");
+                return
+            }
+        };
+        info!("Received zkr assumption with claim digest: `{claim_digest:?}`");
         if !self.zkr_assumptions.contains_key(&claim_digest) {
             self.zkr_assumptions.insert(
                 claim_digest,
-                zkr_request_object
+                zkr_req_obj
             );
         }
     }

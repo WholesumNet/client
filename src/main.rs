@@ -1,14 +1,17 @@
 #![doc = include_str!("../README.md")]
-
 use futures::{
     select,
     stream::{
-        FuturesUnordered,
+        // FuturesUnordered,
         StreamExt,
     },
+    channel::{mpsc},
+    prelude::sink::SinkExt
 };
-
-use async_std::stream;
+use async_std::{
+    task,
+    stream
+};
 use libp2p::{
     gossipsub, mdns, request_response,
     identity, identify,  
@@ -53,7 +56,6 @@ use mongodb::{
         ServerApiVersion
     },
 };
-
 use peyk::{
     p2p::{MyBehaviourEvent},
     protocol,
@@ -117,7 +119,15 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // setup mongodb
-    let db_client = mongodb_setup("mongodb://localhost:27017").await?;
+    // let db_client = mongodb_setup("mongodb://localhost:27017").await?;
+
+    // setup redis
+    let redis_client = redis::Client::open("redis://127.0.0.1:6379/")?;
+    let redis_con = redis_client.get_multiplexed_async_connection().await?;    
+    let mut zeth_segment_stream = subscribe_to_zeth_segment_stream(redis_con.clone()).await;
+    let mut zeth_keccak_stream = subscribe_to_zeth_keccak_stream(redis_con.clone()).await;
+    let mut zeth_zkr_stream = subscribe_to_zeth_zkr_stream(redis_con.clone()).await;
+
 
     // local libp2p key 
     let local_key = {
@@ -139,9 +149,9 @@ async fn main() -> anyhow::Result<()> {
     // let mut succinct_proof_verification_futures = FuturesUnordered::new();
     // let mut join_proof_verification_futures = FuturesUnordered::new();
 
-    let col_jobs = db_client
-        .database("wholesum_client")
-        .collection::<db::Job>("jobs");
+    // let col_jobs = db_client
+    //     .database("wholesum_client")
+    //     .collection::<db::Job>("jobs");
     // let col_segments = db_client
     //     .database("wholesum_client")
     //     .collection::<db::Segment>("segments");
@@ -157,21 +167,22 @@ async fn main() -> anyhow::Result<()> {
     // let mut db_update_futures = FuturesUnordered::new();
 
     // the job
-    let (mut job, db_job_oid) = match &cli.job {
+    let mut job = match &cli.job {
         Some(Commands::New{ job_file }) => {
             let job = new_job(job_file)?;            
-            let oid = col_jobs.insert_one(
-                db::Job {
-                    id: job.id.clone(),
-                    verification: db::Verification {
-                        image_id: job.schema.image_id.clone(),
-                    },
-                    snark_proof: None,
-                }
-            )
-            .await?
-            .inserted_id;
-            (job, oid)
+            // let oid = col_jobs.insert_one(
+            //     db::Job {
+            //         id: job.id.clone(),
+            //         verification: db::Verification {
+            //             image_id: job.schema.image_id.clone(),
+            //         },
+            //         snark_proof: None,
+            //     }
+            // )
+            // .await?
+            // .inserted_id;
+            // (job, oid)
+            job
         },
 
         // Some(Commands::Resume{ job_id }) => {
@@ -188,7 +199,7 @@ async fn main() -> anyhow::Result<()> {
             panic!("Missing command, not sure what you meant.");
         },
     };
-    info!("Job's progress will be recorded to the DB with Id: `{db_job_oid:?}`");
+    // info!("Job's progress will be recorded to the DB with Id: `{db_job_oid:?}`");
 
     // swarm 
     let mut swarm = peyk::p2p::setup_swarm(&local_key).await?;
@@ -274,6 +285,119 @@ async fn main() -> anyhow::Result<()> {
                     )
                 {            
                     warn!("Need compute gossip failed, error: `{err_msg:?}`");
+                }                
+            },
+
+            // zeth segments are ready
+            value = zeth_segment_stream.select_next_some() => {
+                for stream in value.as_sequence().unwrap() {
+                    let data = stream.as_sequence().unwrap();
+                    // let _stream_name = &data[0];
+                    let contents = data[1].as_sequence().unwrap();
+                    for object in contents { 
+                        let segments = object.as_sequence().unwrap();                        
+                        // object[1] is valkey generated id
+                        let segment_data  = segments[1].as_sequence().unwrap();
+                        let id = if let redis::Value::BulkString(bs) =  &segment_data[0] {
+                            let str_id = String::from_utf8_lossy(&bs).to_string();
+                            match u32::from_str_radix(&str_id, 10) {
+                                Ok(id) => id,
+
+                                Err(err_msg) => {
+                                    if str_id.eq_ignore_ascii_case("<DONE>") {
+                                        info!("All segments have been received from the ValKey server.");
+                                        job.pipeline.stop_segment_feeding();
+                                    } else {
+                                        warn!("Invalid segment id `{str_id}` from the ValKey server: `{err_msg}");
+                                    }
+                                    continue
+                                }
+                            }
+                        } else {
+                            continue
+                        };
+                        let blob = if let redis::Value::BulkString(blob) = &segment_data[1] {
+                            blob.to_owned()
+                        } else {
+                            continue
+                        };
+                        job.pipeline.feed_segment(
+                            id as usize, 
+                            pipeline::Segment {
+                                hash: xxh3_128(&blob),
+                                blob: blob,
+                            }
+                        );                        
+                    }
+                }                
+            },
+
+            // zeth keccak items are ready
+            value = zeth_keccak_stream.select_next_some() => {
+                for stream in value.as_sequence().unwrap() {                    
+                    let contents = stream.as_sequence().unwrap();
+                    // let _stream_name = &contents[0];
+                    let objects = &contents[1]
+                        .as_sequence()
+                        .unwrap()
+                        [0]
+                        .as_sequence()
+                        .unwrap();
+                    //let _last_id = &objects[0];
+                    let assumptions = objects[1].as_sequence().unwrap();
+                    let num_assumptions = objects[1].as_sequence().unwrap().len() / 2;
+                    for i in 0..num_assumptions {
+                        if let redis::Value::BulkString(bs) = &assumptions[i * 2] {                            
+                            let cd_str = String::from_utf8_lossy(&bs).to_string();
+                            if cd_str.eq_ignore_ascii_case("<DONE>") {
+                                info!("All keccak assumptions have been received from the ValKey server.");
+                                continue
+                            }
+                        } else {
+                            warn!("Invalid keccak assumption from the ValKey server.");
+                            continue
+                        };
+                        let blob = if let redis::Value::BulkString(blob) = &assumptions[i * 2 + 1] {
+                            blob
+                        } else {
+                            continue
+                        };
+                        job.pipeline.feed_keccak_assumption(blob);
+                    }                    
+                }                
+            },
+
+            value = zeth_zkr_stream.select_next_some() => {
+                for stream in value.as_sequence().unwrap() {                    
+                    let contents = stream.as_sequence().unwrap();
+                    // let _stream_name = &contents[0];
+                    let objects = &contents[1]
+                        .as_sequence()
+                        .unwrap()
+                        [0]
+                        .as_sequence()
+                        .unwrap();
+                    //let _last_id = &objects[0];
+                    let assumptions = objects[1].as_sequence().unwrap();
+                    let num_assumptions = objects[1].as_sequence().unwrap().len() / 2;
+                    for i in 0..num_assumptions {
+                        if let redis::Value::BulkString(bs) = &assumptions[i * 2] {                            
+                            let cd_str = String::from_utf8_lossy(&bs).to_string();
+                            if cd_str.eq_ignore_ascii_case("<DONE>") {
+                                info!("All zkr assumptions have been received from the ValKey server.");
+                                continue
+                            }
+                        } else {
+                            warn!("Invalid zkr assumption from the ValKey server.");
+                            continue
+                        };
+                        let blob = if let redis::Value::BulkString(blob) = &assumptions[i * 2 + 1] {
+                            blob
+                        } else {
+                            continue
+                        };
+                        job.pipeline.feed_zkr_assumption(blob);
+                    }                                                
                 }                
             },
 
@@ -977,39 +1101,99 @@ pub fn new_job(
 //     Ok(join_btree)
 // }
 
-// #[derive(Debug, Clone)]
-// struct VerificationResult {
-//     pub prover_id: String,
-//     pub receipt_cid: String,
-//     pub item_id: String,
-//     pub receipt_file_path: String,
-//     pub receipt_blob: Vec<u8>
-// }
+async fn subscribe_to_zeth_segment_stream(
+    mut redis_con: redis::aio::MultiplexedConnection
+) -> mpsc::Receiver<redis::Value> {
+    let (mut tx, rx) = mpsc::channel(32);
+    let mut last_id = "0".to_string();
+    task::spawn(async move {
+        loop {
+            let result: redis::Value = redis::cmd("XREAD")
+                .arg("BLOCK").arg(0)
+                .arg("STREAMS").arg("zeth-segment-stream").arg(&last_id)
+                .query_async(&mut redis_con)
+                .await
+                .unwrap();
+            // update last_id
+            for stream in result.as_sequence().unwrap(){
+                let data = stream.as_sequence().unwrap();
+                let contents = data[1].as_sequence().unwrap();
+                let last_object = contents.last().unwrap();
+                let objects = last_object.as_sequence().unwrap();
+                last_id = if let redis::Value::BulkString(new_last_id) = &objects[0] {
+                    String::from_utf8_lossy(&new_last_id).to_string() 
+                } else {
+                    continue
+                };
+                info!("Last Zeth segment object read from ValKey: `{last_id}`");
+            }
+            let _ = tx.send(result).await;
+        }
+    });
+    rx
+}
 
-// #[derive(Debug, Clone)]
-// struct VerificationError {
-//     pub receipt_cid: String,
-//     pub item_id: String,
-//     pub err_msg: String,
-// }
 
-// // verify the final join proof
-// async fn verify_join_proof(
-//     proof_blob: Vec<u8>,
-//     journal: Vec<u8>,
-//     image_id: String,
-// ) -> anyhow::Result<()> {
-//     let sr: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(&proof_blob)?;
-//     let journal: Journal = bincode::deserialize(&journal)?;
-//     let proof = Receipt::new(
-//         InnerReceipt::Succinct(sr),
-//         journal.bytes
-//     );        
-//     let now = Instant::now();
-//     proof.verify(
-//         <[u8; 32]>::from_hex(&image_id)?
-//     )?;
-//     let verification_dur = now.elapsed().as_millis();
-//     info!("Verification of join proof took `{verification_dur} msecs`.");
-//     Ok(())
-// }
+async fn subscribe_to_zeth_keccak_stream(
+    mut redis_con: redis::aio::MultiplexedConnection
+) -> mpsc::Receiver<redis::Value> {
+    let (mut tx, rx) = mpsc::channel(32);
+    let mut last_id = "0".to_string();
+    task::spawn(async move {
+        loop {
+            let result: redis::Value = redis::cmd("XREAD")
+                .arg("BLOCK").arg(0)
+                .arg("STREAMS").arg("zeth-keccak-stream").arg(&last_id)
+                .query_async(&mut redis_con)
+                .await
+                .unwrap();
+            // update last_id
+            for stream in result.as_sequence().unwrap(){
+                let data = stream.as_sequence().unwrap();
+                let contents = data[1].as_sequence().unwrap();
+                let last_object = contents.last().unwrap();
+                let objects = last_object.as_sequence().unwrap();
+                last_id = if let redis::Value::BulkString(new_last_id) = &objects[0] {
+                    String::from_utf8_lossy(&new_last_id).to_string() 
+                } else {
+                    continue
+                };
+                info!("Last Zeth keccak read from ValKey: `{last_id}`");
+            }
+            let _ = tx.send(result).await;
+        }
+    });
+    rx
+}
+
+async fn subscribe_to_zeth_zkr_stream(
+    mut redis_con: redis::aio::MultiplexedConnection
+) -> mpsc::Receiver<redis::Value> {
+    let (mut tx, rx) = mpsc::channel(32);
+    let mut last_id = "0".to_string();
+    task::spawn(async move {
+        loop {
+            let result: redis::Value = redis::cmd("XREAD")
+                .arg("BLOCK").arg(0)
+                .arg("STREAMS").arg("zeth-zkr-stream").arg(&last_id)
+                .query_async(&mut redis_con)
+                .await
+                .unwrap();
+            // update last_id
+            for stream in result.as_sequence().unwrap(){
+                let data = stream.as_sequence().unwrap();
+                let contents = data[1].as_sequence().unwrap();
+                let last_object = contents.last().unwrap();
+                let objects = last_object.as_sequence().unwrap();
+                last_id = if let redis::Value::BulkString(new_last_id) = &objects[0] {
+                    String::from_utf8_lossy(&new_last_id).to_string() 
+                } else {
+                    continue
+                };
+                info!("Last Zeth zkr object read from ValKey: `{last_id}`");
+            }
+            let _ = tx.send(result).await;
+        }
+    });
+    rx
+}
