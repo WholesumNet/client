@@ -745,6 +745,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "attohttpc"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d9a9bf8b79a749ee0b911b91b671cc2b6c670bdbc7e3dfd537576ddc94bb2a2"
+dependencies = [
+ "http 0.2.12",
+ "log",
+ "url",
+]
+
+[[package]]
 name = "auto_ops"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1144,7 +1155,6 @@ name = "client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-std",
  "async-trait",
  "bincode",
  "bs58",
@@ -1166,6 +1176,8 @@ dependencies = [
  "risc0-zkvm",
  "serde",
  "serde_json",
+ "tokio",
+ "tokio-stream",
  "toml 0.7.8",
  "tracing",
  "tracing-subscriber 0.3.18",
@@ -2787,7 +2799,27 @@ dependencies = [
  "rtnetlink",
  "smol",
  "system-configuration",
+ "tokio",
  "windows",
+]
+
+[[package]]
+name = "igd-next"
+version = "0.14.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "064d90fec10d541084e7b39ead8875a5a80d9114a2b18791565253bae25f49e4"
+dependencies = [
+ "async-trait",
+ "attohttpc",
+ "bytes",
+ "futures",
+ "http 0.2.12",
+ "hyper 0.14.31",
+ "log",
+ "rand 0.8.5",
+ "tokio",
+ "url",
+ "xmltree",
 ]
 
 [[package]]
@@ -2991,9 +3023,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.162"
+version = "0.2.172"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18d287de67fe55fd7e1581fe933d965a5a9477b38e949cfa9f8574ef01506398"
+checksum = "d750af042f7ef4f724306de029d18836c26c1765a54a6a3f094cbd23a7267ffa"
 
 [[package]]
 name = "libm"
@@ -3028,6 +3060,7 @@ dependencies = [
  "libp2p-request-response",
  "libp2p-swarm",
  "libp2p-tcp",
+ "libp2p-upnp",
  "libp2p-yamux",
  "multiaddr",
  "pin-project",
@@ -3227,6 +3260,7 @@ dependencies = [
  "rand 0.8.5",
  "smallvec",
  "socket2 0.5.7",
+ "tokio",
  "tracing",
  "void",
 ]
@@ -3296,6 +3330,7 @@ dependencies = [
  "rustls 0.23.16",
  "socket2 0.5.7",
  "thiserror 1.0.69",
+ "tokio",
  "tracing",
 ]
 
@@ -3341,6 +3376,7 @@ dependencies = [
  "once_cell",
  "rand 0.8.5",
  "smallvec",
+ "tokio",
  "tracing",
  "void",
 ]
@@ -3371,6 +3407,7 @@ dependencies = [
  "libp2p-core",
  "libp2p-identity",
  "socket2 0.5.7",
+ "tokio",
  "tracing",
 ]
 
@@ -3391,6 +3428,22 @@ dependencies = [
  "thiserror 1.0.69",
  "x509-parser",
  "yasna",
+]
+
+[[package]]
+name = "libp2p-upnp"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cccf04b0e3ff3de52d07d5fd6c3b061d0e7f908ffc683c32d9638caedce86fc8"
+dependencies = [
+ "futures",
+ "futures-timer",
+ "igd-next",
+ "libp2p-core",
+ "libp2p-swarm",
+ "tokio",
+ "tracing",
+ "void",
 ]
 
 [[package]]
@@ -3895,6 +3948,7 @@ dependencies = [
  "futures",
  "libc",
  "log",
+ "tokio",
 ]
 
 [[package]]
@@ -4700,7 +4754,6 @@ version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bd673deb3d184140109c1e27b043c2354cb79399c3ef304c365fc628092ed773"
 dependencies = [
- "async-std",
  "bytes",
  "cfg-if",
  "combine",
@@ -5262,6 +5315,7 @@ dependencies = [
  "netlink-proto",
  "nix",
  "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]
@@ -6043,9 +6097,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.41.1"
+version = "1.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22cfb5bee7a6a52939ca9224d6ac897bb669134078daa8735560897f69de4d33"
+checksum = "75ef51a33ef1da925cea3e4eb122833cb377c61439ca401b770f54902b806779"
 dependencies = [
  "backtrace",
  "bytes",
@@ -6060,9 +6114,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-macros"
-version = "2.4.0"
+version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "693d596312e88961bc67d7f1f97af8a70227d9f90c31bba5806eec004978d752"
+checksum = "6e06d43f1345a3bcd39f6a56dbb7dcab2ba47e68e8ac134855e7e2bdbaf8cab8"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6097,6 +6151,17 @@ checksum = "0c7bc40d0e5a97695bb96e27995cd3a08538541b0a846f65bba7a359f36700d4"
 dependencies = [
  "rustls 0.23.16",
  "rustls-pki-types",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-stream"
+version = "0.1.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eca58d7bba4a75707817a2c44174253f9236b2d5fbd055602e9d5c07c139a047"
+dependencies = [
+ "futures-core",
+ "pin-project-lite",
  "tokio",
 ]
 
@@ -6954,6 +7019,21 @@ dependencies = [
  "rusticata-macros",
  "thiserror 1.0.69",
  "time",
+]
+
+[[package]]
+name = "xml-rs"
+version = "0.8.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a62ce76d9b56901b19a74f19431b0d8b3bc7ca4ad685a746dfd78ca8f4fc6bda"
+
+[[package]]
+name = "xmltree"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7d8a75eaf6557bb84a65ace8609883db44a29951042ada9b393151532e41fcb"
+dependencies = [
+ "xml-rs",
 ]
 
 [[package]]
