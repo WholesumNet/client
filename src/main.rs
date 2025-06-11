@@ -647,24 +647,21 @@ async fn main() -> anyhow::Result<()> {
                                             continue
                                         }
                                     };
-                                    //@ unify segment and join into one job
-                                    let job_kind = if job.pipeline.rounds.len() > 1 {
-                                        protocol::InputBlobKind::Proof
-                                    } else {
-                                        protocol::InputBlobKind::Segment
-                                    };
+                                    //@ unify segment and join into one job   
+                                    let blobs_are_segment = job.pipeline.rounds.len() == 1;                                 
                                     let compute_job = protocol::ComputeJob {
                                         id: job.id.clone(),
                                         kind: protocol::JobKind::Aggregate(
                                             protocol::AggregateDetails {
                                                 id: batch_index as u32,
-                                                kind: job_kind,
+                                                blobs_are_segment: blobs_are_segment,
                                                 batch: assignments
                                                     .into_iter()
                                                     .map(|ass| {
-                                                        protocol::InputBlob {
-                                                            blob: ass.blob.clone(),
-                                                            hash: ass.hash
+                                                        if blobs_are_segment {
+                                                            protocol::InputBlob::Blob(ass.blob.unwrap())
+                                                        } else {
+                                                            protocol::InputBlob::Token(ass.hash, ass.owners)
                                                         }
                                                     })
                                                 .collect()
