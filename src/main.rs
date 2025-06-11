@@ -8,10 +8,12 @@ use futures::{
     channel::{mpsc},
     prelude::sink::SinkExt
 };
-use async_std::{
+use tokio::{
     task,
-    stream
+    time::interval
 };
+use tokio_stream::wrappers::IntervalStream;
+
 use libp2p::{
     gossipsub, mdns, request_response,
     identity, identify,  
@@ -108,7 +110,7 @@ enum Commands {
     }
 }
 
-#[async_std::main]
+#[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(Env::default().default_filter_or("info"))
         .init();
@@ -245,14 +247,20 @@ async fn main() -> anyhow::Result<()> {
     swarm.listen_on("/ip6/::/udp/20201/quic-v1".parse()?)?;
 
     // used for networking
-    let mut timer_peer_discovery = stream::interval(Duration::from_secs(5 * 60)).fuse();
+    let mut timer_peer_discovery = IntervalStream::new(
+        interval(Duration::from_secs(5 * 60))
+    )
+    .fuse();
     // used for posting job needs
-    let mut timer_post_job = stream::interval(Duration::from_secs(5)).fuse();
+    let mut timer_post_job = IntervalStream::new(
+        interval(Duration::from_secs(5))
+    )
+    .fuse();
 
     loop {
         select! {
             // try to discover new peers
-            () = timer_peer_discovery.select_next_some() => {
+            _i = timer_peer_discovery.select_next_some() => {
                 if true == cli.dev {
                     continue;
                 }
@@ -265,7 +273,7 @@ async fn main() -> anyhow::Result<()> {
             },
 
             // post need prove
-            () = timer_post_job.select_next_some() => {
+            _i = timer_post_job.select_next_some() => {
                 let need = match job.pipeline.stage {
                     // request for groth16 proving
                     pipeline::Stage::Groth16 => protocol::NeedKind::Groth16(0),
@@ -362,7 +370,7 @@ async fn main() -> anyhow::Result<()> {
                         } else {
                             continue
                         };
-                        job.pipeline.feed_keccak_assumption(blob);
+                        job.pipeline.feed_keccak_assumption(&blob);
                     }                    
                 }                
             },
@@ -396,7 +404,7 @@ async fn main() -> anyhow::Result<()> {
                         } else {
                             continue
                         };
-                        job.pipeline.feed_zkr_assumption(blob);
+                        job.pipeline.feed_zkr_assumption(&blob);
                     }                                                
                 }                
             },
