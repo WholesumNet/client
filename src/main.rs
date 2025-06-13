@@ -35,7 +35,6 @@ use bincode;
 use xxhash_rust::xxh3::xxh3_128;
 
 use toml;
-// use tracing_subscriber::EnvFilter;
 use anyhow;
 // use reqwest;
 
@@ -141,7 +140,7 @@ async fn main() -> anyhow::Result<()> {
             let new_key = identity::Keypair::generate_ed25519();
             let bytes = new_key.to_protobuf_encoding().unwrap();
             let _bw = fs::write("./key.secret", bytes);
-            warn!("No keys were supplied, so one has been generated for you and saved to `./key.secret` file.");
+            warn!("No keys were supplied, so one is generated for you and saved to `./key.secret` file.");
             new_key
         }
     };    
@@ -256,6 +255,14 @@ async fn main() -> anyhow::Result<()> {
         interval(Duration::from_secs(5))
     )
     .fuse();
+    use rand::prelude::*;
+    let mut rng = rand::rng();
+    // use for retrieveing the stark proof
+    let mut timer_retrieve_stark_proof = IntervalStream::new(
+        interval(Duration::from_secs(5))
+    )
+    .fuse();   
+
 
     loop {
         select! {
@@ -279,12 +286,17 @@ async fn main() -> anyhow::Result<()> {
                     pipeline::Stage::Groth16 => protocol::NeedKind::Groth16(0),
 
                     // request for other kinds of proving
-                    _ => protocol::NeedKind::Prove(
-                        (job.pipeline.num_outstanding_aggregate_items() +
-                        job.pipeline.num_outstanding_resolve_items()) as u32
-                    ),
+                    _ => {
+                        let _outstanding_jobs = (
+                            job.pipeline.num_outstanding_aggregate_items() +
+                            job.pipeline.num_outstanding_resolve_items()
+                        ) as u32;
+                        let nonce = rng.random::<u32>();
+
+                        protocol::NeedKind::Prove(nonce)
+                    },
                 };
-                if let Err(err_msg) = swarm
+                if let Err(_e) = swarm
                     .behaviour_mut()
                     .gossipsub
                     .publish(
@@ -292,8 +304,29 @@ async fn main() -> anyhow::Result<()> {
                         bincode::serialize(&need)?
                     )
                 {            
-                    warn!("Need compute gossip failed, error: `{err_msg:?}`");
+                    // warn!("Need compute gossip failed, error: `{err_msg:?}`");
                 }                
+            },
+
+            //@ ask for the stark proof
+            _i = timer_retrieve_stark_proof.select_next_some() => {
+                if job.pipeline.stage == pipeline::Stage::Resolve &&
+                   job.pipeline.stark_proof.is_none()
+                {
+                    // job.pipeline.
+                    // let _req_id = swarm
+                    //     .behaviour_mut()
+                    //     .req_resp
+                    //     .send_request(
+                    //         &prover_peer_id,
+                    //         protocol::Request::TransferBlob(token.hash),
+                    //     );
+                    // info!(
+                    //     "Requested STARK proof `{}` transfer from prover `{}`.",
+                    //     token.hash,
+                    //     prover_peer_id
+                    // );
+                }
             },
 
             // zeth segments are ready
@@ -358,11 +391,11 @@ async fn main() -> anyhow::Result<()> {
                         if let redis::Value::BulkString(bs) = &assumptions[i * 2] {                            
                             let cd_str = String::from_utf8_lossy(&bs).to_string();
                             if cd_str.eq_ignore_ascii_case("<DONE>") {
-                                info!("All keccak assumptions have been received from the ValKey server.");
+                                info!("All Keccak assumptions have been received from the ValKey server.");
                                 continue
                             }
                         } else {
-                            warn!("Invalid keccak assumption from the ValKey server.");
+                            warn!("Invalid Keccak assumption from the ValKey server.");
                             continue
                         };
                         let blob = if let redis::Value::BulkString(blob) = &assumptions[i * 2 + 1] {
@@ -392,11 +425,11 @@ async fn main() -> anyhow::Result<()> {
                         if let redis::Value::BulkString(bs) = &assumptions[i * 2] {                            
                             let cd_str = String::from_utf8_lossy(&bs).to_string();
                             if cd_str.eq_ignore_ascii_case("<DONE>") {
-                                info!("All zkr assumptions have been received from the ValKey server.");
+                                info!("All Zkr assumptions have been received from the ValKey server.");
                                 continue
                             }
                         } else {
-                            warn!("Invalid zkr assumption from the ValKey server.");
+                            warn!("Invalid Zkr assumption from the ValKey server.");
                             continue
                         };
                         let blob = if let redis::Value::BulkString(blob) = &assumptions[i * 2 + 1] {
@@ -578,11 +611,11 @@ async fn main() -> anyhow::Result<()> {
                             match job.pipeline.stage {
                                 pipeline::Stage::Groth16 => {
                                     let blob = bincode::serialize(
-                                        job.pipeline.agg_proof.as_ref().unwrap()
+                                        job.pipeline.stark_proof.as_ref().unwrap()
                                     )
                                     .unwrap();
                                     let compute_job = protocol::ComputeJob {
-                                        id: job.id.clone(),
+                                        id: job.id,
                                         kind: protocol::JobKind::Groth16(
                                             protocol::Groth16Details {
                                                 blob: blob
@@ -632,7 +665,7 @@ async fn main() -> anyhow::Result<()> {
                                             .send_response(
                                                 channel,
                                                 protocol::Response::Job(protocol::ComputeJob {
-                                                    id: job.id.clone(),
+                                                    id: job.id,
                                                     kind: kind,
                                                 })
                                             )
@@ -643,7 +676,7 @@ async fn main() -> anyhow::Result<()> {
                                 },
 
                                 pipeline::Stage::Aggregate => {
-                                    let (batch_index, assignments) = match job
+                                    let (batch_id, assignments) = match job
                                         .pipeline
                                         .assign_agg_batch(&prover_id)
                                     {
@@ -658,10 +691,10 @@ async fn main() -> anyhow::Result<()> {
                                     //@ unify segment and join into one job   
                                     let blobs_are_segment = job.pipeline.rounds.len() == 1;                                 
                                     let compute_job = protocol::ComputeJob {
-                                        id: job.id.clone(),
+                                        id: job.id,
                                         kind: protocol::JobKind::Aggregate(
                                             protocol::AggregateDetails {
-                                                id: batch_index as u32,
+                                                id: batch_id,
                                                 blobs_are_segment: blobs_are_segment,
                                                 batch: assignments
                                                     .into_iter()
@@ -686,7 +719,7 @@ async fn main() -> anyhow::Result<()> {
                                     {
                                         warn!("Failed to send batch for proving: `{err_msg:?}`");
                                     } else {
-                                        job.pipeline.confirm_assignment(&prover_id, batch_index);
+                                        job.pipeline.confirm_assignment(&prover_id, batch_id);
                                     }
                                 }
                             };
@@ -710,8 +743,7 @@ async fn main() -> anyhow::Result<()> {
 
                                 ProofKind::Aggregate(batch_id) => {                                    
                                     job.pipeline.add_proof(
-                                        batch_id as usize,
-                                        None,
+                                        batch_id,
                                         token.hash,
                                         prover_id.clone()
                                     );
@@ -723,7 +755,11 @@ async fn main() -> anyhow::Result<()> {
                                                 &prover_peer_id,
                                                 protocol::Request::TransferBlob(token.hash),
                                             );
-                                        info!("Requested blob transfer from prover.");
+                                        info!(
+                                            "Requested STARK proof blob `{}` transfer from the `{}`.",
+                                            token.hash,
+                                            prover_peer_id
+                                        );
                                     }
                                 },                                    
 
@@ -772,8 +808,8 @@ async fn main() -> anyhow::Result<()> {
                     }
                 })) => {                
                     match response {
-                        protocol::Response::BlobIsReady(blob) => {
-                            job.pipeline.add_agg_proof(
+                        protocol::Response::BlobIsReady(blob) => {                            
+                            job.pipeline.add_stark_proof(
                                 &client_peer_id.to_string(),
                                 &blob
                             );
@@ -829,11 +865,11 @@ pub fn new_job(
         &fs::read_to_string(job_file)?
     )?;
 
-    let generated_job_id = Uuid::new_v4().simple().to_string()[..4].to_string();
+    let generated_job_id = Uuid::new_v4().as_u128();
     let working_dir = format!(
         "{}/.wholesum/client/jobs/{}",
         get_home_dir()?,
-        generated_job_id
+        generated_job_id.to_string()
     );
     // create folders for residues
     for action in ["prove", "join", "groth16"] {
@@ -844,7 +880,7 @@ pub fn new_job(
     let pipeline = pipeline::Pipeline::new(schema.image_id.clone().into());
     Ok(
         Job {
-            id: generated_job_id.clone(),
+            id: generated_job_id,
             working_dir: working_dir,
             schema: schema,
             pipeline: pipeline,

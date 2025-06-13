@@ -13,7 +13,8 @@ pub struct Schema {
 // maintains lifecycle for a job
 #[derive(Debug)]
 pub struct Job {
-    pub id: String,
+    // uuid v4
+    pub id: u128,
 
     pub working_dir: String,
    
