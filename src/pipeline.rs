@@ -12,10 +12,12 @@ use risc0_zkvm::{
     ApiClient, ProverOpts,
     Receipt, InnerReceipt,
     SuccinctReceipt, ReceiptClaim,
-    AssumptionReceipt,
+    Unknown,
+    Groth16Receipt,
     Asset, AssetRequest,
     Digest
 };
+use hex::FromHex;
 
 use peyk::protocol::{
     KeccakRequestObject, ZkrRequestObject,
@@ -312,11 +314,11 @@ pub struct Pipeline {
     // the groth16 proofs: <prover, proof>
     pub groth16_proof: Option<Proof>,
 
-    pub image_id: Vec<u8>,
+    pub image_id: Digest,
 }
 
 impl Pipeline {
-    pub fn new(image_id: Vec<u8>) -> Self {
+    pub fn new(image_id: &[u8]) -> Self {
         Self {
             stage: Stage::Aggregate,            
             rounds: vec![Round::new(0, 2)], 
@@ -325,7 +327,7 @@ impl Pipeline {
             assumption_proofs: HashMap::new(),
             stark_proof: None,
             groth16_proof: None,
-            image_id: image_id,
+            image_id: Digest::from_hex(image_id).unwrap(),
         }
     }
 
@@ -514,6 +516,9 @@ impl Pipeline {
     }
 
     pub fn assign_resolve_item(&self) -> Option<ResolveItem> {
+        if self.stark_proof.is_none() {
+            return None
+        }
         // 1: check keccak asumptions
         let outstanding_keccak_items: Vec<_> = self.keccak_assumptions
             .keys()
@@ -551,8 +556,9 @@ impl Pipeline {
 
     fn resolve_assumptions(&mut self) {        
         if self.stark_proof.is_none() {
-            warn!("STARK proof is missing.");
-        }        
+            warn!("Cannot resolve assumptions due to missing STARK proof.");
+            return
+        }                
         let r0_client = match ApiClient::from_env() {
             Ok(c) => c,
 
@@ -577,19 +583,19 @@ impl Pipeline {
             .assumptions
             .as_value()
             .unwrap();        
-        let total_assumptions = assumptions.len();
-        info!("There are `{}` assumptions(s) left to resolve.", total_assumptions);
+        if self.assumption_proofs.len() < assumptions.len() {
+            warn!(
+                "Not enough assumption proofs to begin resolve, need `{}` more proofs.",
+                assumptions.len() - self.assumption_proofs.len()
+            );
+            return
+        }
+        info!("Conditional receipt has `{}` assumptions(s) to resolve in total.", assumptions.len());
         let mut succinct_receipt = conditional_receipt.clone();
-        let mut resolved_count = 0;
         for a in assumptions.iter() {
             let assumption = a.as_value().unwrap();
-            info!("Resolving `{assumption:#?}`");
-            let claim_digest = assumption.claim;
-            if !self.assumption_proofs.contains_key(&claim_digest) {
-                continue;
-            }
             let assumption_receipt = self.assumption_proofs
-                .get(&claim_digest)
+                .get(&assumption.claim)
                 .unwrap()
                 .blob
                 .clone()
@@ -604,36 +610,33 @@ impl Pipeline {
             {
                 Ok(sr) => {
                     succinct_receipt = sr;
+                    info!("Assumpton {:?} resolved with success.", assumption.claim);
                 },
 
                 Err(err_msg) => {
                     warn!("Failed to resolve assumption: `{err_msg:?}`");
                     continue
                 }
-
             };
-            resolved_count += 1;
         }
-        info!("Resolved {resolved_count} out of {total_assumptions} successfully.");
-        if resolved_count == total_assumptions {
-            println!("All assumptions have been resolved. Let's verify the proof now.");
-            let receipt = Receipt::new(
-                InnerReceipt::Succinct(succinct_receipt.clone()),
-                journal,
-            );            
-            let image_id: Digest = self.image_id.clone().try_into().unwrap();
-            match r0_client.verify(
-                receipt.try_into().unwrap(),
-                image_id
-            ) {
-                Ok(_) => {
-                    self.stage = Stage::Groth16;
-                },
+        info!("All assumptions have been resolved, let's verify the STARK proof now.");
+        let receipt = Receipt::new(
+            InnerReceipt::Succinct(succinct_receipt.clone()),
+            journal,
+        );
+        match r0_client.verify(
+            receipt.try_into().unwrap(),
+            self.image_id
+        ) {
+            Ok(_) => {
+                self.stage = Stage::Groth16;
+                info!("STARK proof is verified, let's extract a Groth16 proof.");
+            },
 
-                Err(err_msg) => {
-                    warn!("Critical: aggregated proof failed to verify: `{err_msg:?}`");
-                } 
-            }
+            Err(err_msg) => {
+                warn!("Critical: aggregated proof failed to verify: `{err_msg:?}`");
+                return
+            } 
         }
         self.stark_proof = Some(succinct_receipt);
     }
@@ -650,28 +653,18 @@ impl Pipeline {
             warn!("Unsolicited assumption proof with claim `{claim_digest:?}` from `{prover}`.")
         }
         let hash = xxh3_128(&blob);
-        match bincode::deserialize::<AssumptionReceipt>(&blob) {
-            Ok(ass) => {
-                if let AssumptionReceipt::Unresolved(_) = ass {
-                    warn!("Assumption is unresolved and hence invalid.");
-                    return
-                }
-            },
-
-            Err(err_msg) => {
-                warn!("Assumption is corrupted: `{err_msg:?}`");
-                return                
-            }
-        };
+        if let Err(e) = bincode::deserialize::<SuccinctReceipt<Unknown>>(&blob) {            
+            warn!("Assumption proof is invalid: `{e:?}`");
+            return                
+        }
         self.assumption_proofs.entry(claim_digest)
             .and_modify(|proof| {
-                if hash != proof.hash {
-                    warn!("Existing assumption proof hash `{}` differs from the new hash `{}`.",
-                        proof.hash, hash
-                    );
-                    return
-                } 
                 let _ = proof.provers.insert(prover.clone());
+                warn!(
+                    "Replacing assumption proof with claim `{:?}` from `{}` with the existing one.",
+                    claim_digest,
+                    prover
+                );
             })
             .or_insert_with(|| {
                 Proof {
@@ -727,4 +720,77 @@ impl Pipeline {
     //         .last()
     //         .unwrap()
     // }
+
+    pub fn add_groth16_proof(
+        &mut self,
+        blob: Vec<u8>,
+        prover: &str
+    ) {
+        let hash = xxh3_128(&blob);
+        if self.stage != Stage::Groth16 {
+            warn!("Received unsolicited Groth16 proof `{hash}`.");
+            return
+        }
+        info!("Received Groth16 proof `{hash}` from `{prover}`");
+        let groth16_receipt = match bincode::deserialize::<Groth16Receipt<ReceiptClaim>>(&blob) {
+            Ok(g) => g,
+
+            Err(e) => {
+                warn!("Groth16 proof is invalid: `{e:?}`");
+                return
+            }
+
+        };
+        match self.groth16_proof {
+            None => {
+                self.groth16_proof = Some(
+                    Proof {                                                    
+                        provers: HashSet::from([prover.to_string()]),
+                        blob: Some(blob),
+                        hash: hash
+                    }
+                );
+            }
+
+            Some(ref mut proof) => {
+                if hash != proof.hash {
+                    warn!("Existing hash `{}` differs from the new hash `{}`",
+                        proof.hash, hash
+                    );
+                    return
+                }
+                proof.provers.insert(prover.to_string());
+            }
+        };
+        // on-chain verification baby!
+        let output = groth16_receipt
+            .claim
+            .as_value()
+            .unwrap()
+            .output
+            .as_value()
+            .unwrap()
+            .as_ref()
+            .unwrap();
+        let receipt = Receipt::new(
+            InnerReceipt::Groth16(groth16_receipt.clone()),
+            output.journal.as_value().unwrap().clone(),
+        );
+        let r0_client = match ApiClient::from_env() {
+            Ok(c) => c,
+
+            Err(err_msg) => {
+                warn!("Risc0 client is not available: `{err_msg:?}");
+                return
+            }
+        };
+        if let Ok(_) = r0_client
+            .verify(
+                receipt.try_into().unwrap(),
+                self.image_id
+            )
+        {
+            info!("Groth16 proof is verified, viola.");
+        }
+    }
 }

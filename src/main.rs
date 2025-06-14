@@ -622,7 +622,7 @@ async fn main() -> anyhow::Result<()> {
                                             }
                                         )
                                     };
-                                    if let Err(err_msg) = swarm
+                                    if let Err(e) = swarm
                                         .behaviour_mut()
                                         .req_resp
                                             .send_response(
@@ -630,7 +630,7 @@ async fn main() -> anyhow::Result<()> {
                                                 protocol::Response::Job(compute_job)
                                             )
                                     {
-                                        warn!("Failed to send Groth16 job: `{err_msg:?}`");
+                                        warn!("Failed to send Groth16 job.");
                                     }                                    
                                 },
 
@@ -756,41 +756,15 @@ async fn main() -> anyhow::Result<()> {
                                                 protocol::Request::TransferBlob(token.hash),
                                             );
                                         info!(
-                                            "Requested STARK proof blob `{}` transfer from the `{}`.",
+                                            "Requested STARK proof transfer of blob `{}` from `{}`.",
                                             token.hash,
                                             prover_peer_id
                                         );
                                     }
                                 },                                    
 
-                                ProofKind::Groth16(blob) => {
-                                    if job.pipeline.stage != pipeline::Stage::Groth16 {
-                                        continue
-                                    }
-                                    info!("A Groth16 proof has been generated, let's verify it on-chain!");
-                                    let hash = xxh3_128(&blob);
-                                    match job.pipeline.groth16_proof {
-                                        None => {
-                                            job.pipeline.groth16_proof = Some(
-                                                pipeline::Proof {                                                    
-                                                    provers: HashSet::from([prover_id]),
-                                                    blob: Some(blob),
-                                                    hash: hash
-                                                }
-                                            );
-                                        }
-
-                                        Some(ref mut proof) => {
-                                            if hash != proof.hash {
-                                                warn!("Existing hash `{}` differs from the new hash `{}`",
-                                                    proof.hash, hash
-                                                );
-                                                continue
-                                            }
-                                            proof.provers.insert(prover_id);
-                                        }
-                                    };
-                                    // on-chain verification!
+                                ProofKind::Groth16(blob) => {                                    
+                                    job.pipeline.add_groth16_proof(blob, &prover_id);                              
                                 },
                             };
                         },
@@ -877,7 +851,7 @@ pub fn new_job(
             format!("{working_dir}/{action}")
         )?;
     }    
-    let pipeline = pipeline::Pipeline::new(schema.image_id.clone().into());
+    let pipeline = pipeline::Pipeline::new(schema.image_id.as_bytes());
     Ok(
         Job {
             id: generated_job_id,
