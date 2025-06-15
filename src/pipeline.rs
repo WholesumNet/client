@@ -62,9 +62,8 @@ pub enum ResolveItem {
     Zkr(Digest, Vec<u8>)
 }
 
-
 #[derive(Debug)]
-pub struct Round {
+pub struct AggRound {
     pub number: usize,
     
     // <index, input>
@@ -92,7 +91,7 @@ pub struct Round {
     pub prover_proofs: HashMap<String, Vec<usize>>,
 }
 
-impl Round {
+impl AggRound {
     pub fn new(number: usize, batch_size: usize) -> Self {
         Self {
             number: number,
@@ -299,7 +298,7 @@ pub enum Stage {
 pub struct Pipeline {
     pub stage: Stage,
 
-    pub rounds: Vec<Round>,
+    pub rounds: Vec<AggRound>,
 
     // keccak assumptions: <claim_digest, obj>    
     keccak_assumptions: HashMap<Digest, KeccakRequestObject>,
@@ -308,8 +307,8 @@ pub struct Pipeline {
     // resolved assumptions: <claim_digest, proof i.e. SuccinctReceipt<Unknown>>
     assumption_proofs: HashMap<Digest, Proof>,
 
-    // the final aggregated aka STARK proof(a SuccinctReceipt)
-    pub stark_proof: Option<SuccinctReceipt<ReceiptClaim>>,
+    // the final aggregated proof(a SuccinctReceipt)
+    pub agg_proof: Option<SuccinctReceipt<ReceiptClaim>>,
     
     // the groth16 proofs: <prover, proof>
     pub groth16_proof: Option<Proof>,
@@ -321,11 +320,11 @@ impl Pipeline {
     pub fn new(image_id: &[u8]) -> Self {
         Self {
             stage: Stage::Aggregate,            
-            rounds: vec![Round::new(0, 2)], 
+            rounds: vec![AggRound::new(0, 2)], 
             keccak_assumptions: HashMap::new(),
             zkr_assumptions: HashMap::new(),
             assumption_proofs: HashMap::new(),
-            stark_proof: None,
+            agg_proof: None,
             groth16_proof: None,
             image_id: Digest::from_hex(image_id).unwrap(),
         }
@@ -366,7 +365,7 @@ impl Pipeline {
             return
         }
         if prev_round.proofs.len() == 1 {
-            warn!("Aggregation is finished and we have a STARK proof.");
+            warn!("Aggregation is finished and we have the final proof.");
             self.stage = Stage::Resolve;
             return
         }
@@ -387,7 +386,7 @@ impl Pipeline {
             17..=128 => 4,
             _ => 8,
         };
-        let mut new_round = Round::new(prev_round.number + 1, batch_size);
+        let mut new_round = AggRound::new(prev_round.number + 1, batch_size);
         info!(
             "A new round `{}` has begun, there will be up to `{}` batches in total.",            
             prev_round.number + 1,
@@ -402,12 +401,20 @@ impl Pipeline {
         self.rounds.push(new_round);
     }
 
-    pub fn feed_segment(&mut self, index: usize, segment: Segment) {
+    pub fn feed_segment(&mut self, index: usize, blob: Vec<u8>) {
         if self.rounds.len() > 1 {
             warn!("Received segment but we are aggregating proofs.");
             return
-        }
-        self.rounds[0].feed_input(index, Input::SegmentInput(segment));
+        }        
+        self.rounds[0].feed_input(
+            index,
+            Input::SegmentInput(
+                Segment{
+                    hash: xxh3_128(&blob),
+                    blob: blob
+                }
+            )
+        );
     }
 
     pub fn stop_segment_feeding(&mut self) {
@@ -464,16 +471,16 @@ impl Pipeline {
         let keccak_req_obj = match bincode::deserialize::<KeccakRequestObject>(blob) {
             Ok(k) => k,
 
-            Err(err_msg) => {
-                warn!("Invalid keccak feed: `{err_msg}`");
+            Err(e) => {
+                warn!("Invalid keccak feed: `{e}`");
                 return
             }
         };
         let claim_digest: Digest = match keccak_req_obj.claim_digest.try_into() {
             Ok(cd) => cd,
             
-            Err(err_msg) => {
-                warn!("Invalid keccak feed: `{err_msg}`");
+            Err(e) => {
+                warn!("Invalid keccak feed: `{e}`");
                 return
             }
         };
@@ -493,16 +500,16 @@ impl Pipeline {
         let zkr_req_obj = match bincode::deserialize::<ZkrRequestObject>(blob) {
             Ok(k) => k,
 
-            Err(err_msg) => {
-                warn!("Invalid zkr feed: `{err_msg}`");
+            Err(e) => {
+                warn!("Invalid zkr feed: `{e}`");
                 return
             }
         };
         let claim_digest: Digest = match zkr_req_obj.claim_digest.try_into() {
             Ok(cd) => cd,
             
-            Err(err_msg) => {
-                warn!("Invalid zkr feed: `{err_msg}`");
+            Err(e) => {
+                warn!("Invalid zkr feed: `{e}`");
                 return
             }
         };
@@ -516,7 +523,7 @@ impl Pipeline {
     }
 
     pub fn assign_resolve_item(&self) -> Option<ResolveItem> {
-        if self.stark_proof.is_none() {
+        if self.agg_proof.is_none() {
             return None
         }
         // 1: check keccak asumptions
@@ -555,20 +562,20 @@ impl Pipeline {
     }
 
     fn resolve_assumptions(&mut self) {        
-        if self.stark_proof.is_none() {
-            warn!("Cannot resolve assumptions due to missing STARK proof.");
+        if self.agg_proof.is_none() {
+            warn!("Cannot resolve assumptions due to missing aggregated proof.");
             return
         }                
         let r0_client = match ApiClient::from_env() {
             Ok(c) => c,
 
-            Err(err_msg) => {
-                warn!("Risc0 client is not available: `{err_msg:?}");
+            Err(e) => {
+                warn!("Risc0 client is not available: `{e:?}");
                 return
             }
         };
         let opts = ProverOpts::default();
-        let conditional_receipt = self.stark_proof.as_ref().unwrap();
+        let conditional_receipt = self.agg_proof.as_ref().unwrap();
         let output = conditional_receipt
             .claim
             .as_value()
@@ -613,13 +620,13 @@ impl Pipeline {
                     info!("Assumpton {:?} resolved with success.", assumption.claim);
                 },
 
-                Err(err_msg) => {
-                    warn!("Failed to resolve assumption: `{err_msg:?}`");
+                Err(e) => {
+                    warn!("Failed to resolve assumption: `{e:?}`");
                     continue
                 }
             };
         }
-        info!("All assumptions have been resolved, let's verify the STARK proof now.");
+        info!("All assumptions have been resolved, let's verify the aggregated proof now.");
         let receipt = Receipt::new(
             InnerReceipt::Succinct(succinct_receipt.clone()),
             journal,
@@ -630,15 +637,15 @@ impl Pipeline {
         ) {
             Ok(_) => {
                 self.stage = Stage::Groth16;
-                info!("STARK proof is verified, let's extract a Groth16 proof.");
+                info!("Verified! let's extract a Groth16 proof.");
             },
 
-            Err(err_msg) => {
-                warn!("Critical: aggregated proof failed to verify: `{err_msg:?}`");
+            Err(e) => {
+                warn!("Failed to verify: `{e:?}`");
                 return
             } 
         }
-        self.stark_proof = Some(succinct_receipt);
+        self.agg_proof = Some(succinct_receipt);
     }
 
     pub fn add_assumption_proof(
@@ -676,14 +683,14 @@ impl Pipeline {
         self.resolve_assumptions();
     }
 
-    pub fn add_stark_proof(
+    pub fn add_agg_proof(
         &mut self,
         prover_id: &str,
         blob: &Vec<u8>
     ) {
         let hash = xxh3_128(&blob);
         if self.stage != Stage::Resolve {
-            warn!("Received unsolicited STARK proof `{hash}`.");
+            warn!("Received unsolicited aggregated proof `{hash}`.");
             return
         }
         let last_round = self.rounds.last().unwrap();
@@ -695,15 +702,15 @@ impl Pipeline {
             );
             return
         }
-        info!("Received STARK proof `{hash}` from `{prover_id}`");
+        info!("Received aggregated proof `{hash}` from `{prover_id}`");
         if !proof.provers.contains(prover_id) {
             warn!("Prover is not among the provers who generated the proof.");
         }
-        self.stark_proof = match bincode::deserialize::<SuccinctReceipt<ReceiptClaim>>(&blob) {
+        self.agg_proof = match bincode::deserialize::<SuccinctReceipt<ReceiptClaim>>(&blob) {
             Ok(sr) => Some(sr),
 
             Err(e) => {
-                warn!("STARK proof is invalid: `{e:?}`");
+                warn!("Proof is invalid: `{e:?}`");
                 return
             }
 
@@ -711,7 +718,7 @@ impl Pipeline {
         self.resolve_assumptions();
     }
 
-    // pub fn stark_proof_owners() -> Vec<(String, u128) {
+    // pub fn agg_proof_owners() -> Vec<(String, u128) {
     //     self.rounds
     //         .last()
     //         .unwrap()
@@ -779,8 +786,8 @@ impl Pipeline {
         let r0_client = match ApiClient::from_env() {
             Ok(c) => c,
 
-            Err(err_msg) => {
-                warn!("Risc0 client is not available: `{err_msg:?}");
+            Err(e) => {
+                warn!("Risc0 client is not available: `{e:?}");
                 return
             }
         };

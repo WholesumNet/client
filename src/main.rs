@@ -20,9 +20,6 @@ use libp2p::{
     swarm::{SwarmEvent},
     PeerId,
 };
-use std::collections::{
-    HashSet
-};
 use std::{
     fs,
     time::{
@@ -32,7 +29,6 @@ use std::{
     // future::IntoFuture,
 };
 use bincode;
-use xxhash_rust::xxh3::xxh3_128;
 
 use toml;
 use anyhow;
@@ -258,7 +254,7 @@ async fn main() -> anyhow::Result<()> {
     use rand::prelude::*;
     let mut rng = rand::rng();
     // use for retrieveing the stark proof
-    let mut timer_retrieve_stark_proof = IntervalStream::new(
+    let mut timer_retrieve_agg_proof = IntervalStream::new(
         interval(Duration::from_secs(5))
     )
     .fuse();   
@@ -309,9 +305,9 @@ async fn main() -> anyhow::Result<()> {
             },
 
             //@ ask for the stark proof
-            _i = timer_retrieve_stark_proof.select_next_some() => {
+            _i = timer_retrieve_agg_proof.select_next_some() => {
                 if job.pipeline.stage == pipeline::Stage::Resolve &&
-                   job.pipeline.stark_proof.is_none()
+                   job.pipeline.agg_proof.is_none()
                 {
                     // job.pipeline.
                     // let _req_id = swarm
@@ -362,13 +358,7 @@ async fn main() -> anyhow::Result<()> {
                         } else {
                             continue
                         };
-                        job.pipeline.feed_segment(
-                            id as usize, 
-                            pipeline::Segment {
-                                hash: xxh3_128(&blob),
-                                blob: blob,
-                            }
-                        );                        
+                        job.pipeline.feed_segment(id as usize, blob);                        
                     }
                 }                
             },
@@ -611,7 +601,7 @@ async fn main() -> anyhow::Result<()> {
                             match job.pipeline.stage {
                                 pipeline::Stage::Groth16 => {
                                     let blob = bincode::serialize(
-                                        job.pipeline.stark_proof.as_ref().unwrap()
+                                        job.pipeline.agg_proof.as_ref().unwrap()
                                     )
                                     .unwrap();
                                     let compute_job = protocol::ComputeJob {
@@ -622,7 +612,7 @@ async fn main() -> anyhow::Result<()> {
                                             }
                                         )
                                     };
-                                    if let Err(e) = swarm
+                                    if let Err(_e) = swarm
                                         .behaviour_mut()
                                         .req_resp
                                             .send_response(
@@ -783,7 +773,7 @@ async fn main() -> anyhow::Result<()> {
                 })) => {                
                     match response {
                         protocol::Response::BlobIsReady(blob) => {                            
-                            job.pipeline.add_stark_proof(
+                            job.pipeline.add_agg_proof(
                                 &client_peer_id.to_string(),
                                 &blob
                             );
