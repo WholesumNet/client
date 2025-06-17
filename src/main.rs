@@ -279,7 +279,10 @@ async fn main() -> anyhow::Result<()> {
             _i = timer_post_job.select_next_some() => {
                 let need = match job.pipeline.stage {
                     // request for groth16 proving
-                    pipeline::Stage::Groth16 => protocol::NeedKind::Groth16(0),
+                    pipeline::Stage::Groth16 => {
+                        let nonce = rng.random::<u32>();
+                        protocol::NeedKind::Groth16(nonce)
+                    },
 
                     // request for other kinds of proving
                     _ => {
@@ -601,20 +604,47 @@ async fn main() -> anyhow::Result<()> {
                         protocol::Request::WouldProve => {
                             let prover_id = prover_peer_id.to_bytes();
                             match job.pipeline.stage {
-                                pipeline::Stage::Groth16 => {
-                                    let blob = bincode::serialize(
-                                        job.pipeline.agg_proof.as_ref().unwrap()
-                                    )
-                                    .unwrap();
+                                pipeline::Stage::Groth16 => {                                    
+                                    let (batch_id, assignments) = match job
+                                        .pipeline
+                                        .assign_groth16_batch(&prover_id)
+                                    {
+                                        Some((i, a)) => (i, a),
+
+                                        None => {                                    
+                                            warn!("No Groth16 jobs for `{prover_peer_id:?}` at this time.");
+                                            continue
+                                        }
+                                    };
                                     let compute_job = protocol::ComputeJob {
                                         id: job.id,
                                         kind: protocol::JobKind::Groth16(
                                             protocol::Groth16Details {
-                                                blob: blob
+                                                batch: assignments
+                                                    .into_iter()
+                                                    .map(|ass| {
+                                                        match ass {
+                                                            pipeline::Input::Blob(blob) => 
+                                                                (
+                                                                    batch_id,
+                                                                    protocol::InputBlob::Blob(blob)
+                                                                ),
+
+                                                            pipeline::Input::Token(proof) => 
+                                                                (
+                                                                    batch_id,
+                                                                    protocol::InputBlob::Token(
+                                                                        proof.hash,
+                                                                        proof.provers.iter().cloned().collect(),
+                                                                    )
+                                                                )
+                                                        }
+                                                    })
+                                                .collect()
                                             }
                                         )
                                     };
-                                    if let Err(_e) = swarm
+                                    if let Err(e) = swarm
                                         .behaviour_mut()
                                         .req_resp
                                             .send_response(
@@ -622,8 +652,9 @@ async fn main() -> anyhow::Result<()> {
                                                 protocol::Response::Job(compute_job)
                                             )
                                     {
-                                        warn!("Failed to send the Groth16 job.");
+                                        warn!("Failed to send the Groth16 job for proving: `{e:?}`");
                                     } else {
+                                        job.pipeline.confirm_groth16_assignment(&prover_id, batch_id);
                                         info!("Sent the Groth16 job for proving to `{prover_peer_id}`");
                                     }
                                 },
@@ -792,12 +823,12 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 },                                    
 
-                                ProofKind::Groth16(blob) => {
+                                ProofKind::Groth16(batch_id, blob) => {
                                     info!(
                                         "Received Groth16 proof for from `{}`",
                                         prover_peer_id,
                                     );
-                                    job.pipeline.add_groth16_proof(blob, prover_id);                              
+                                    job.pipeline.add_groth16_proof(batch_id, blob, prover_id);                              
                                 },
                             };
                         },

@@ -263,8 +263,7 @@ pub struct Pipeline {
 
     assumption_round: Round,
 
-    // the groth16 proofs: <prover, proof>
-    pub groth16_proof: Option<Proof>,
+    groth16_round: Round,
 
     pub image_id: Digest,
 }
@@ -276,7 +275,7 @@ impl Pipeline {
             agg_rounds: vec![Round::new(0, 2)], 
             agg_proof: None,
             assumption_round: Round::new(127, 1),
-            groth16_proof: None,
+            groth16_round: Round::new(8191, 1),
             image_id: Digest::from_hex(image_id).unwrap(),
         }
     }
@@ -512,6 +511,8 @@ impl Pipeline {
                 return
             } 
         }
+        let sr_blob = bincode::serialize(&succinct_receipt).unwrap();
+        self.groth16_round.feed_input(0, Input::Blob(sr_blob));
         self.agg_proof = Some(succinct_receipt);
     }
 
@@ -598,16 +599,23 @@ impl Pipeline {
             .clone()
     }
 
+    pub fn assign_groth16_batch(
+        &mut self,
+        prover: &Vec<u8>
+    ) -> Option<(u128, Vec<Input>)> {
+        self.groth16_round.assign_batch(prover)
+    }
+
+    pub fn confirm_groth16_assignment(&mut self, prover: &Vec<u8>, batch_id: u128) {
+        self.groth16_round.confirm_assignment(prover, batch_id);
+    }
+
     pub fn add_groth16_proof(
         &mut self,
+        batch_id: u128,
         blob: Vec<u8>,
         prover: Vec<u8>
     ) {
-        let hash = xxh3_128(&blob);
-        if self.stage != Stage::Groth16 {
-            warn!("Received unsolicited Groth16 proof `{hash}`.");
-            return
-        }
         let groth16_receipt = match bincode::deserialize::<Groth16Receipt<ReceiptClaim>>(&blob) {
             Ok(g) => g,
 
@@ -616,28 +624,36 @@ impl Pipeline {
                 return
             }
         };
-        match self.groth16_proof {
-            None => {
-                self.groth16_proof = Some(
-                    Proof {                                                    
-                        provers: HashSet::from([prover.clone()]),
-                        blob: Some(blob),
-                        hash: hash
-                    }
-                );
-            }
+        let batch_index = match self.groth16_round.batch_ids.get(&batch_id) {
+            Some(bi) => bi,
 
-            Some(ref mut proof) => {
-                if hash != proof.hash {
-                    warn!("Existing hash `{}` differs from the new hash `{}`",
+            None => {
+                //@ maybe its for previous rounds?
+                warn!("Unsolicited Groth16 proof with id `{batch_id}` from `{prover:?}`.");
+                return
+            }
+        };
+        let hash = xxh3_128(&blob);        
+        self.groth16_round.proofs
+        .entry(*batch_index)
+            .and_modify(|proof| {
+                //@ majority vote should be taken here, ie hold many hashes and reach consensus
+                if proof.hash != hash {
+                    warn!("Existing hash `{}` differs from the new hash `{}`.",
                         proof.hash, hash
                     );
                     return
                 }
-                proof.provers.insert(prover);
-            }
-        };
-        // on-chain verification baby!
+                let _ = proof.provers.insert(prover.clone());
+            })
+            .or_insert_with(|| {
+                Proof {
+                    provers: HashSet::from([prover]),
+                    blob: Some(blob),
+                    hash: hash                    
+                }
+            });
+        // off-chain verification baby!
         let output = groth16_receipt
             .claim
             .as_value()
@@ -655,6 +671,7 @@ impl Pipeline {
             Ok(c) => c,
 
             Err(e) => {
+                //@ wtd?
                 warn!("Risc0 client is not available: `{e:?}");
                 return
             }
@@ -665,7 +682,7 @@ impl Pipeline {
                 self.image_id
             )
         {
-            info!("Groth16 proof is verified, viola.");
+            info!("Groth16 proof is verified, viola!");
         }
     }
 }
