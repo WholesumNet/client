@@ -2,7 +2,6 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
 };
 
-use rand::prelude::IndexedRandom;
 use log::{
     info, warn
 };
@@ -14,56 +13,30 @@ use risc0_zkvm::{
     SuccinctReceipt, ReceiptClaim,
     Unknown,
     Groth16Receipt,
-    Asset, AssetRequest,
-    Digest
+    AssetRequest,
+    Digest,
+    sha::Digestible
 };
 use hex::FromHex;
 
-use peyk::protocol::{
-    KeccakRequestObject, ZkrRequestObject,
-};
-
 #[derive(Debug, Clone)]
 pub struct Proof {
-    pub provers: HashSet<String>,
+    pub provers: HashSet<Vec<u8>>,
 
     pub blob: Option<Vec<u8>>,
     
     pub hash: u128,
 }
 
-#[derive(Debug)]
-pub struct Segment {    
-    pub blob: Vec<u8>,
-
-    pub hash: u128
-}
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Input {    
-    SegmentInput(Segment),
+    Blob(Vec<u8>),
 
-    ProofInput(Proof)
+    Token(Proof)
 }
 
 #[derive(Debug)]
-pub struct Assignment {
-    pub owners: Vec<String>,
-
-    pub blob: Option<Vec<u8>>,
-
-    pub hash: u128,
-}
-
-#[derive(Debug)]
-pub enum ResolveItem {
-    Keccak(Digest, Vec<u8>),
-
-    Zkr(Digest, Vec<u8>)
-}
-
-#[derive(Debug)]
-pub struct AggRound {
+pub struct Round {
     pub number: usize,
     
     // <index, input>
@@ -81,17 +54,17 @@ pub struct AggRound {
 
     // prover p1 has been assigned batch b
     // <batch index, provers>
-    pub assigned_batches: HashMap<usize, Vec<String>>,
+    pub assigned_batches: HashMap<usize, Vec<Vec<u8>>>,
     // helper(^) reverse map to complement "assigned_batches": <prover, assigned batches>
-    pub prover_batch_assignements: HashMap<String, Vec<usize>>,
+    pub prover_batch_assignements: HashMap<Vec<u8>, Vec<usize>>,
 
     // <batch index, <proof, provers>>
     pub proofs: BTreeMap<usize, Proof>,
     // helper(^) reverse map to complement "proofs": <prover, batches>
-    pub prover_proofs: HashMap<String, Vec<usize>>,
+    pub prover_proofs: HashMap<Vec<u8>, Vec<usize>>,
 }
 
-impl AggRound {
+impl Round {
     pub fn new(number: usize, batch_size: usize) -> Self {
         Self {
             number: number,
@@ -172,7 +145,7 @@ impl AggRound {
     }
 
     // assign a batch to prover
-    pub fn assign_agg_batch(&self, prover: &str) -> Option<(u128, Vec<Assignment>)> {        
+    pub fn assign_batch(&self, prover: &Vec<u8>) -> Option<(u128, Vec<Input>)> {        
         let outstanding_batches: Vec<_> = self.batches.keys()
             .filter(|index| {
                 // filter already proved batches
@@ -237,23 +210,8 @@ impl AggRound {
         let assignment = self.batches[&selected_batch_index]
             .iter()
             .map(|i| {
-                let input = self.inputs.get(i).unwrap();            
-                match input {
-                    Input::SegmentInput(segment) => {
-                        Assignment {
-                            owners: vec![],
-                            blob: Some(segment.blob.clone()),
-                            hash: segment.hash
-                        }
-                    },
-                    
-                    Input::ProofInput(proof) => 
-                        Assignment {
-                            owners: proof.provers.iter().cloned().collect(),
-                            blob: None,
-                            hash: proof.hash
-                        }
-                }
+                let input = self.inputs.get(i).cloned().unwrap();
+                input
             })        
             .collect();
         let batch_id = self.inverse_batch_ids.get(&selected_batch_index).unwrap();
@@ -261,16 +219,16 @@ impl AggRound {
     }
 
     // batch has been uccessfully sent to prover
-    pub fn confirm_assignment(&mut self, prover: &str, batch_id: u128) {
+    pub fn confirm_assignment(&mut self, prover: &Vec<u8>, batch_id: u128) {
         let batch_index = self.batch_ids.get(&batch_id).unwrap();
         self.assigned_batches.entry(*batch_index)
             .and_modify(|batches| {
-                batches.push(prover.to_string());
+                batches.push(prover.clone());
             })
             .or_insert_with(|| {
-                vec![prover.to_string()]
+                vec![prover.clone()]
             });
-        self.prover_batch_assignements.entry(prover.to_string())
+        self.prover_batch_assignements.entry(prover.clone())
             .and_modify(|batches|{
                 batches.push(*batch_index);
             })
@@ -298,18 +256,13 @@ pub enum Stage {
 pub struct Pipeline {
     pub stage: Stage,
 
-    pub rounds: Vec<AggRound>,
-
-    // keccak assumptions: <claim_digest, obj>    
-    keccak_assumptions: HashMap<Digest, KeccakRequestObject>,
-    // zkr assumptions: <claim_digest, obj>
-    zkr_assumptions: HashMap<Digest, ZkrRequestObject>,
-    // resolved assumptions: <claim_digest, proof i.e. SuccinctReceipt<Unknown>>
-    assumption_proofs: HashMap<Digest, Proof>,
-
+    agg_rounds: Vec<Round>,
+    
     // the final aggregated proof(a SuccinctReceipt)
     pub agg_proof: Option<SuccinctReceipt<ReceiptClaim>>,
-    
+
+    assumption_round: Round,
+
     // the groth16 proofs: <prover, proof>
     pub groth16_proof: Option<Proof>,
 
@@ -320,47 +273,32 @@ impl Pipeline {
     pub fn new(image_id: &[u8]) -> Self {
         Self {
             stage: Stage::Aggregate,            
-            rounds: vec![AggRound::new(0, 2)], 
-            keccak_assumptions: HashMap::new(),
-            zkr_assumptions: HashMap::new(),
-            assumption_proofs: HashMap::new(),
+            agg_rounds: vec![Round::new(0, 2)], 
             agg_proof: None,
+            assumption_round: Round::new(127, 1),
             groth16_proof: None,
             image_id: Digest::from_hex(image_id).unwrap(),
         }
     }
 
-    // number of remaining items to be proved
-    pub fn num_outstanding_aggregate_items(&self) -> usize {
-        self.rounds
-        .last()
-        .and_then(|last_round|
-            Some(last_round.batches.len() - last_round.proofs.len())
-        )
-        .or_else(|| Some(0usize))
-        .unwrap()
+    pub fn num_agg_rounds(&self) -> usize {
+        self.agg_rounds.len()
     }
 
-    pub fn num_outstanding_resolve_items(&self) -> usize {
-        self.keccak_assumptions.len() +
-        self.zkr_assumptions.len() - 
-        self.assumption_proofs.len()
-    }
-
-    pub fn assign_agg_batch(&mut self, prover: &str) -> Option<(u128, Vec<Assignment>)> {
-        self.rounds
+    pub fn assign_agg_batch(&mut self, prover: &Vec<u8>) -> Option<(u128, Vec<Input>)> {
+        self.agg_rounds
             .last_mut()
-            .and_then(|cur_round| cur_round.assign_agg_batch(prover))        
+            .and_then(|cur_round| cur_round.assign_batch(prover))        
     }
 
-    pub fn confirm_assignment(&mut self, prover: &str, batch_id: u128) {
-        if let Some(cur_round) = self.rounds.last_mut() {
+    pub fn confirm_agg_assignment(&mut self, prover: &Vec<u8>, batch_id: u128) {
+        if let Some(cur_round) = self.agg_rounds.last_mut() {
             cur_round.confirm_assignment(prover, batch_id);
         }
     }
 
-    fn attempt_new_round(&mut self) {
-        let prev_round = self.rounds.last().unwrap();        
+    fn attempt_new_agg_round(&mut self) {
+        let prev_round = self.agg_rounds.last().unwrap();        
         if !prev_round.is_finished() {            
             return
         }
@@ -386,7 +324,7 @@ impl Pipeline {
             17..=128 => 4,
             _ => 8,
         };
-        let mut new_round = AggRound::new(prev_round.number + 1, batch_size);
+        let mut new_round = Round::new(prev_round.number + 1, batch_size);
         info!(
             "A new round `{}` has begun, there will be up to `{}` batches in total.",            
             prev_round.number + 1,
@@ -395,53 +333,44 @@ impl Pipeline {
         for (index, proof) in prev_round.proofs.iter() {
             new_round.feed_input(
                 *index,
-                Input::ProofInput(proof.clone())
+                Input::Token(proof.clone())
             );
         }
-        self.rounds.push(new_round);
+        self.agg_rounds.push(new_round);
     }
 
     pub fn feed_segment(&mut self, index: usize, blob: Vec<u8>) {
-        if self.rounds.len() > 1 {
+        if self.agg_rounds.len() > 1 {
             warn!("Received segment but we are aggregating proofs.");
             return
         }        
-        self.rounds[0].feed_input(
-            index,
-            Input::SegmentInput(
-                Segment{
-                    hash: xxh3_128(&blob),
-                    blob: blob
-                }
-            )
-        );
+        self.agg_rounds[0].feed_input(index, Input::Blob(blob));
     }
 
     pub fn stop_segment_feeding(&mut self) {
-        if self.rounds.len() > 1 {
+        if self.agg_rounds.len() > 1 {
             warn!("Received stop segment feeding in the wrong round.");
             return
         }
-        self.rounds[0].stop_feeding();
+        self.agg_rounds[0].stop_feeding();
     }
 
-    pub fn add_proof(
+    pub fn add_agg_proof(
         &mut self,
         batch_id: u128,
         hash: u128,
-        prover: String
+        prover: Vec<u8>
     ) {
-        let round = self.rounds.last_mut().unwrap();
+        let round = self.agg_rounds.last_mut().unwrap();
         let batch_index = match round.batch_ids.get(&batch_id) {
             Some(bi) => bi,
 
             None => {
                 //@ maybe its for previous rounds?
-                warn!("Unsolicited proof with id `{batch_id}` from `{prover}`.");
+                warn!("Unsolicited proof with id `{batch_id}` from `{prover:?}`.");
                 return
             }
         };
-        info!("proof `{hash}` for batch_index `{batch_index}`");
         round.proofs
         .entry(*batch_index)
             .and_modify(|proof| {
@@ -461,120 +390,36 @@ impl Pipeline {
                     hash: hash                    
                 }
             });
-        self.attempt_new_round(); 
+        self.attempt_new_agg_round(); 
     }
 
-    pub fn feed_keccak_assumption(
+    pub fn feed_assumption(
         &mut self,
         blob: &[u8]
-    ) {
-        let keccak_req_obj = match bincode::deserialize::<KeccakRequestObject>(blob) {
-            Ok(k) => k,
-
-            Err(e) => {
-                warn!("Invalid keccak feed: `{e}`");
-                return
-            }
-        };
-        let claim_digest: Digest = match keccak_req_obj.claim_digest.try_into() {
-            Ok(cd) => cd,
-            
-            Err(e) => {
-                warn!("Invalid keccak feed: `{e}`");
-                return
-            }
-        };
-        info!("Received keccak assumption with claim digest: `{claim_digest:?}`");
-        if !self.keccak_assumptions.contains_key(&claim_digest) {
-            self.keccak_assumptions.insert(
-                claim_digest,
-                keccak_req_obj
-            );
-        }
+    ) {            
+        info!("Received assumption feed.");
+        self.assumption_round.feed_input(
+            self.assumption_round.inputs.len(),
+            Input::Blob(blob.into())
+        );
     }
 
-    pub fn feed_zkr_assumption(
+    pub fn assign_assumption_batch(
         &mut self,
-        blob: &[u8]
-    ) {
-        let zkr_req_obj = match bincode::deserialize::<ZkrRequestObject>(blob) {
-            Ok(k) => k,
-
-            Err(e) => {
-                warn!("Invalid zkr feed: `{e}`");
-                return
-            }
-        };
-        let claim_digest: Digest = match zkr_req_obj.claim_digest.try_into() {
-            Ok(cd) => cd,
-            
-            Err(e) => {
-                warn!("Invalid zkr feed: `{e}`");
-                return
-            }
-        };
-        info!("Received zkr assumption with claim digest: `{claim_digest:?}`");
-        if !self.zkr_assumptions.contains_key(&claim_digest) {
-            self.zkr_assumptions.insert(
-                claim_digest,
-                zkr_req_obj
-            );
-        }
+        prover: &Vec<u8>
+    ) -> Option<(u128, Vec<Input>)> {
+        self.assumption_round.assign_batch(prover)
     }
 
-    pub fn assign_resolve_item(&self) -> Option<ResolveItem> {
-        if self.agg_proof.is_none() {
-            return None
-        }
-        // 1: check keccak asumptions
-        let outstanding_keccak_items: Vec<_> = self.keccak_assumptions
-            .keys()
-            .filter(|k|
-                !self.assumption_proofs.contains_key(*k)
-            )
-            .collect();
-        let mut rng = rand::rng();
-        if !outstanding_keccak_items.is_empty() {
-            let claim_digest = outstanding_keccak_items.choose(&mut rng).unwrap();
-            let keccak_req_obj = self.keccak_assumptions.get(claim_digest).unwrap();
-            let blob = bincode::serialize(keccak_req_obj).unwrap();
-            return Some(
-                ResolveItem::Keccak(**claim_digest, blob)
-            )
-        } else {
-            // or, 2: check zkr asumptions
-            let outstanding_zkr_items: Vec<_> = self.zkr_assumptions
-                .keys()
-                .filter(|k|
-                    !self.assumption_proofs.contains_key(*k)
-                )
-                .collect();
-            if !outstanding_zkr_items.is_empty() {
-                let claim_digest = outstanding_zkr_items.choose(&mut rng).unwrap();            
-                let zkr_req_obj = self.zkr_assumptions.get(claim_digest).unwrap();                
-                let blob = bincode::serialize(zkr_req_obj).unwrap();
-                return Some(
-                    ResolveItem::Zkr(**claim_digest, blob)
-                )
-            }
-        }
-        None
+    pub fn confirm_assumption_assignment(&mut self, prover: &Vec<u8>, batch_id: u128) {
+        self.assumption_round.confirm_assignment(prover, batch_id);
     }
 
     fn resolve_assumptions(&mut self) {        
         if self.agg_proof.is_none() {
             warn!("Cannot resolve assumptions due to missing aggregated proof.");
             return
-        }                
-        let r0_client = match ApiClient::from_env() {
-            Ok(c) => c,
-
-            Err(e) => {
-                warn!("Risc0 client is not available: `{e:?}");
-                return
-            }
-        };
-        let opts = ProverOpts::default();
+        }                        
         let conditional_receipt = self.agg_proof.as_ref().unwrap();
         let output = conditional_receipt
             .claim
@@ -590,28 +435,50 @@ impl Pipeline {
             .assumptions
             .as_value()
             .unwrap();        
-        if self.assumption_proofs.len() < assumptions.len() {
+        if self.assumption_round.proofs.len() < assumptions.len() {
             warn!(
                 "Not enough assumption proofs to begin resolve, need `{}` more proofs.",
-                assumptions.len() - self.assumption_proofs.len()
+                assumptions.len() - self.assumption_round.proofs.len()
             );
             return
         }
-        info!("Conditional receipt has `{}` assumptions(s) to resolve in total.", assumptions.len());
+        let r0_client = match ApiClient::from_env() {
+            Ok(c) => c,
+
+            Err(e) => {
+                warn!("Risc0 client is not available: `{e:?}");
+                return
+            }
+        };
+        let opts = ProverOpts::default();
+        info!("Need to resolve `{}` assumptions(s).", assumptions.len());
         let mut succinct_receipt = conditional_receipt.clone();
+        let mut assumption_receipts = HashMap::new();        
+        for p in self.assumption_round.proofs.values() {        
+            match bincode::deserialize::<SuccinctReceipt<Unknown>>(p.blob.as_ref().unwrap()) {
+                Ok(sr) => {
+                    assumption_receipts.insert(sr.claim.digest(), sr);
+                },
+
+                Err(e) => {
+                    warn!("Assumption receipt is invalid: `{e:?}`");
+                    continue
+                }
+            }
+        }
         for a in assumptions.iter() {
             let assumption = a.as_value().unwrap();
-            let assumption_receipt = self.assumption_proofs
-                .get(&assumption.claim)
-                .unwrap()
-                .blob
-                .clone()
-                .unwrap();
+            let sr = match assumption_receipts.get(&assumption.claim) {
+                None => continue,
+
+                Some(sr) => sr.clone()
+            };
+            
             match r0_client
                 .resolve(
                     &opts,
                     succinct_receipt.clone().try_into().unwrap(),
-                    Asset::Inline(assumption_receipt.clone().into()),
+                    sr.try_into().unwrap(),
                     AssetRequest::Inline
                 ) 
             {
@@ -650,42 +517,45 @@ impl Pipeline {
 
     pub fn add_assumption_proof(
         &mut self,
-        claim_digest: Digest,
+        batch_id: u128,
         blob: Vec<u8>,
-        prover: String
+        prover: Vec<u8>
     ) {
-        if !self.keccak_assumptions.contains_key(&claim_digest) &&
-           !self.zkr_assumptions.contains_key(&claim_digest)
-        {
-            warn!("Unsolicited assumption proof with claim `{claim_digest:?}` from `{prover}`.")
-        }
         let hash = xxh3_128(&blob);
-        if let Err(e) = bincode::deserialize::<SuccinctReceipt<Unknown>>(&blob) {            
-            warn!("Assumption proof is invalid: `{e:?}`");
-            return                
-        }
-        self.assumption_proofs.entry(claim_digest)
+        let batch_index = match self.assumption_round.batch_ids.get(&batch_id) {
+            Some(bi) => bi,
+
+            None => {
+                //@ maybe its for previous rounds?
+                warn!("Unsolicited assumption proof with id `{batch_id}` from `{prover:?}`.");
+                return
+            }
+        };
+        self.assumption_round.proofs
+        .entry(*batch_index)
             .and_modify(|proof| {
+                //@ majority vote should be taken here, ie hold many hashes and reach consensus
+                if proof.hash != hash {
+                    warn!("Existing hash `{}` differs from the new hash `{}`.",
+                        proof.hash, hash
+                    );
+                    return
+                }
                 let _ = proof.provers.insert(prover.clone());
-                warn!(
-                    "Replacing assumption proof with claim `{:?}` from `{}` with the existing one.",
-                    claim_digest,
-                    prover
-                );
             })
             .or_insert_with(|| {
                 Proof {
                     provers: HashSet::from([prover]),
                     blob: Some(blob),
-                    hash: hash 
+                    hash: hash                    
                 }
             });
         self.resolve_assumptions();
     }
 
-    pub fn add_agg_proof(
+    pub fn add_final_agg_proof(
         &mut self,
-        prover_id: &str,
+        prover: Vec<u8>,
         blob: &Vec<u8>
     ) {
         let hash = xxh3_128(&blob);
@@ -693,7 +563,7 @@ impl Pipeline {
             warn!("Received unsolicited aggregated proof `{hash}`.");
             return
         }
-        let last_round = self.rounds.last().unwrap();
+        let last_round = self.agg_rounds.last().unwrap();
         let proof = last_round.proofs.values().nth(0).unwrap();
         if proof.hash != hash {
             warn!("STARK proof's hash `{}` differs from the expected one `{}`",
@@ -702,8 +572,7 @@ impl Pipeline {
             );
             return
         }
-        info!("Received aggregated proof `{hash}` from `{prover_id}`");
-        if !proof.provers.contains(prover_id) {
+        if !proof.provers.contains(&prover) {
             warn!("Prover is not among the provers who generated the proof.");
         }
         self.agg_proof = match bincode::deserialize::<SuccinctReceipt<ReceiptClaim>>(&blob) {
@@ -718,27 +587,27 @@ impl Pipeline {
         self.resolve_assumptions();
     }
 
-    // pub fn agg_proof_owners() -> Vec<(String, u128) {
-    //     self.rounds
-    //         .last()
-    //         .unwrap()
-    //         .proofs
-    //         .values()
-    //         .last()
-    //         .unwrap()
-    // }
+    pub fn agg_proof_token(&self) -> Proof {
+        self.agg_rounds
+            .last()
+            .unwrap()
+            .proofs
+            .values()
+            .last()
+            .unwrap()
+            .clone()
+    }
 
     pub fn add_groth16_proof(
         &mut self,
         blob: Vec<u8>,
-        prover: &str
+        prover: Vec<u8>
     ) {
         let hash = xxh3_128(&blob);
         if self.stage != Stage::Groth16 {
             warn!("Received unsolicited Groth16 proof `{hash}`.");
             return
         }
-        info!("Received Groth16 proof `{hash}` from `{prover}`");
         let groth16_receipt = match bincode::deserialize::<Groth16Receipt<ReceiptClaim>>(&blob) {
             Ok(g) => g,
 
@@ -746,13 +615,12 @@ impl Pipeline {
                 warn!("Groth16 proof is invalid: `{e:?}`");
                 return
             }
-
         };
         match self.groth16_proof {
             None => {
                 self.groth16_proof = Some(
                     Proof {                                                    
-                        provers: HashSet::from([prover.to_string()]),
+                        provers: HashSet::from([prover.clone()]),
                         blob: Some(blob),
                         hash: hash
                     }
@@ -766,7 +634,7 @@ impl Pipeline {
                     );
                     return
                 }
-                proof.provers.insert(prover.to_string());
+                proof.provers.insert(prover);
             }
         };
         // on-chain verification baby!

@@ -140,8 +140,8 @@ async fn main() -> anyhow::Result<()> {
             new_key
         }
     };    
-    info!("Peer id: `{:?}`", PeerId::from_public_key(&local_key.public()));  
-    
+    let my_peer_id = PeerId::from_public_key(&local_key.public());
+    info!("My PeerId: `{:?}`", my_peer_id); 
     // futures for local verification of succinct proofs
     // let mut succinct_proof_verification_futures = FuturesUnordered::new();
     // let mut join_proof_verification_futures = FuturesUnordered::new();
@@ -283,12 +283,11 @@ async fn main() -> anyhow::Result<()> {
 
                     // request for other kinds of proving
                     _ => {
-                        let _outstanding_jobs = (
-                            job.pipeline.num_outstanding_aggregate_items() +
-                            job.pipeline.num_outstanding_resolve_items()
-                        ) as u32;
+                        // let _outstanding_jobs = (
+                        //     job.pipeline.num_outstanding_aggregate_items() +
+                        //     job.pipeline.num_outstanding_resolve_items()
+                        // ) as u32;
                         let nonce = rng.random::<u32>();
-
                         protocol::NeedKind::Prove(nonce)
                     },
                 };
@@ -309,19 +308,22 @@ async fn main() -> anyhow::Result<()> {
                 if job.pipeline.stage == pipeline::Stage::Resolve &&
                    job.pipeline.agg_proof.is_none()
                 {
-                    // job.pipeline.
-                    // let _req_id = swarm
-                    //     .behaviour_mut()
-                    //     .req_resp
-                    //     .send_request(
-                    //         &prover_peer_id,
-                    //         protocol::Request::TransferBlob(token.hash),
-                    //     );
-                    // info!(
-                    //     "Requested STARK proof `{}` transfer from prover `{}`.",
-                    //     token.hash,
-                    //     prover_peer_id
-                    // );
+                    let token = job.pipeline.agg_proof_token();
+                    for prover in token.provers.iter() {
+                        let prover_peer_id = PeerId::from_bytes(prover).unwrap();
+                        let _req_id = swarm
+                            .behaviour_mut()
+                            .req_resp
+                            .send_request(
+                                &prover_peer_id,
+                                protocol::Request::TransferBlob(token.hash),
+                            );
+                        info!(
+                            "Requested the aggregated proof `{}` transfer from prover `{}`.",
+                            token.hash,
+                            prover_peer_id
+                        );
+                    }
                 }
             },
 
@@ -393,7 +395,7 @@ async fn main() -> anyhow::Result<()> {
                         } else {
                             continue
                         };
-                        job.pipeline.feed_keccak_assumption(&blob);
+                        job.pipeline.feed_assumption(&blob);
                     }                    
                 }                
             },
@@ -427,7 +429,7 @@ async fn main() -> anyhow::Result<()> {
                         } else {
                             continue
                         };
-                        job.pipeline.feed_zkr_assumption(&blob);
+                        job.pipeline.feed_assumption(&blob);
                     }                                                
                 }                
             },
@@ -597,7 +599,7 @@ async fn main() -> anyhow::Result<()> {
                     match request {
                         // prover indicates her interest to compute                        
                         protocol::Request::WouldProve => {
-                            let prover_id = prover_peer_id.to_string();
+                            let prover_id = prover_peer_id.to_bytes();
                             match job.pipeline.stage {
                                 pipeline::Stage::Groth16 => {
                                     let blob = bincode::serialize(
@@ -620,48 +622,69 @@ async fn main() -> anyhow::Result<()> {
                                                 protocol::Response::Job(compute_job)
                                             )
                                     {
-                                        warn!("Failed to send Groth16 job.");
-                                    }                                    
+                                        warn!("Failed to send the Groth16 job.");
+                                    } else {
+                                        info!("Sent the Groth16 job for proving to `{prover_peer_id}`");
+                                    }
                                 },
 
                                 pipeline::Stage::Resolve => {
                                     //@ ask for agg proof blob here too?
-                                    if job.pipeline.num_outstanding_resolve_items() == 0 {
-                                        continue
-                                    }                                    
-                                    if let Some(resolve_item) = job.pipeline.assign_resolve_item() {
-                                        let kind = match resolve_item {
-                                            pipeline::ResolveItem::Keccak(claim_digest, blob) => {
-                                                protocol::JobKind::Keccak(
-                                                    protocol::KeccakDetails {
-                                                        claim_digest: claim_digest.into(),
-                                                        blob: blob
-                                                    }
-                                                )
-                                            },
+                                    // if job.pipeline.num_outstanding_resolve_items() == 0 {
+                                    //     continue
+                                    // }                                    
+                                    let (batch_id, assignments) = match job
+                                        .pipeline
+                                        .assign_assumption_batch(&prover_id)
+                                    {
+                                        Some((i, a)) => (i, a),
 
-                                            pipeline::ResolveItem::Zkr(claim_digest, blob) => {
-                                                protocol::JobKind::Zkr(
-                                                    protocol::ZkrDetails {
-                                                        claim_digest: claim_digest.into(),
-                                                        blob: blob
-                                                    }
-                                                )
-                                            },
-                                        };
-                                        if let Err(err_msg) = swarm
-                                            .behaviour_mut()
-                                            .req_resp
+                                        None => {                                    
+                                            warn!("No assumption jobs for `{prover_peer_id:?}` at this time.");
+                                            //@ send resolve jobs if possible
+                                            continue
+                                        }
+                                    };
+                                    let compute_job = protocol::ComputeJob {
+                                        id: job.id,
+                                        kind: protocol::JobKind::Assumption(
+                                            protocol::AssumptionDetails {
+                                                batch: assignments
+                                                    .into_iter()
+                                                    .map(|ass| {
+                                                        match ass {
+                                                            pipeline::Input::Blob(blob) => 
+                                                                (
+                                                                    batch_id,
+                                                                    protocol::InputBlob::Blob(blob)
+                                                                ),
+
+                                                            pipeline::Input::Token(proof) => 
+                                                                (
+                                                                    batch_id,
+                                                                    protocol::InputBlob::Token(
+                                                                        proof.hash,
+                                                                        proof.provers.iter().cloned().collect(),
+                                                                    )
+                                                                )
+                                                        }
+                                                    })
+                                                .collect()
+                                            }
+                                        )
+                                    };
+                                    if let Err(e) = swarm
+                                        .behaviour_mut()
+                                        .req_resp
                                             .send_response(
                                                 channel,
-                                                protocol::Response::Job(protocol::ComputeJob {
-                                                    id: job.id,
-                                                    kind: kind,
-                                                })
+                                                protocol::Response::Job(compute_job)
                                             )
-                                        {
-                                            warn!("Failed to send prove keccak/zkr job: `{err_msg:?}`");
-                                        }
+                                    {
+                                        warn!("Failed to send the assumption job for proving: `{e:?}`");
+                                    } else {
+                                        job.pipeline.confirm_assumption_assignment(&prover_id, batch_id);
+                                        info!("Sent the assumption job for proving to `{prover_peer_id}`");
                                     }
                                 },
 
@@ -673,33 +696,37 @@ async fn main() -> anyhow::Result<()> {
                                         Some((i, a)) => (i, a),
 
                                         None => {                                    
-                                            warn!("No jobs for `{prover_peer_id:?}` at this time.");
+                                            warn!("No aggregate jobs for `{prover_peer_id:?}` at this time.");
                                             //@ send resolve jobs if possible
                                             continue
                                         }
                                     };
                                     //@ unify segment and join into one job   
-                                    let blobs_are_segment = job.pipeline.rounds.len() == 1;                                 
                                     let compute_job = protocol::ComputeJob {
                                         id: job.id,
                                         kind: protocol::JobKind::Aggregate(
                                             protocol::AggregateDetails {
                                                 id: batch_id,
-                                                blobs_are_segment: blobs_are_segment,
+                                                blobs_are_segment: job.pipeline.num_agg_rounds() == 1,
                                                 batch: assignments
                                                     .into_iter()
                                                     .map(|ass| {
-                                                        if blobs_are_segment {
-                                                            protocol::InputBlob::Blob(ass.blob.unwrap())
-                                                        } else {
-                                                            protocol::InputBlob::Token(ass.hash, ass.owners)
-                                                        }
+                                                        match ass {
+                                                            pipeline::Input::Blob(blob) => 
+                                                                protocol::InputBlob::Blob(blob),
+
+                                                            pipeline::Input::Token(proof) => 
+                                                                protocol::InputBlob::Token(
+                                                                    proof.hash,
+                                                                    proof.provers.iter().cloned().collect(),
+                                                                )
+                                                        }                                                        
                                                     })
                                                 .collect()
                                             }
                                         )
                                     };
-                                    if let Err(err_msg) = swarm
+                                    if let Err(e) = swarm
                                         .behaviour_mut()
                                         .req_resp
                                             .send_response(
@@ -707,9 +734,10 @@ async fn main() -> anyhow::Result<()> {
                                                 protocol::Response::Job(compute_job)
                                             )
                                     {
-                                        warn!("Failed to send batch for proving: `{err_msg:?}`");
+                                        warn!("Failed to send the aggregate job for proving: `{e:?}`");
                                     } else {
-                                        job.pipeline.confirm_assignment(&prover_id, batch_id);
+                                        job.pipeline.confirm_agg_assignment(&prover_id, batch_id);
+                                        info!("Sent the aggregate job for proving to `{prover_peer_id}`");
                                     }
                                 }
                             };
@@ -721,21 +749,32 @@ async fn main() -> anyhow::Result<()> {
                                 warn!("Ignored unknown proof token: `{token:?}`");
                                 continue;
                             }
-                            let prover_id = prover_peer_id.to_string();
+
+                            let prover_id = prover_peer_id.to_bytes();
                             match token.kind {
-                                ProofKind::Assumption(claim_digest, blob) => {
+                                ProofKind::Assumption(batch_id, blob) => {
+                                    info!(
+                                        "Received assumption proof for batch index `{}` from `{}`",
+                                        batch_id,
+                                        prover_peer_id
+                                    );
                                     job.pipeline.add_assumption_proof(
-                                        claim_digest.into(),
+                                        batch_id,
                                         blob,
                                         prover_id
                                     );
                                 },                                 
 
-                                ProofKind::Aggregate(batch_id) => {                                    
-                                    job.pipeline.add_proof(
+                                ProofKind::Aggregate(batch_id) => {
+                                    info!(
+                                        "Received agg proof for batch index `{}` from `{}`",
+                                        batch_id,
+                                        prover_peer_id
+                                    );
+                                    job.pipeline.add_agg_proof(
                                         batch_id,
                                         token.hash,
-                                        prover_id.clone()
+                                        prover_id
                                     );
                                     if job.pipeline.stage == pipeline::Stage::Resolve {
                                         let _req_id = swarm
@@ -746,15 +785,19 @@ async fn main() -> anyhow::Result<()> {
                                                 protocol::Request::TransferBlob(token.hash),
                                             );
                                         info!(
-                                            "Requested STARK proof transfer of blob `{}` from `{}`.",
+                                            "Requested transfer of the aggregated proof blob `{}` from `{}`.",
                                             token.hash,
                                             prover_peer_id
                                         );
                                     }
                                 },                                    
 
-                                ProofKind::Groth16(blob) => {                                    
-                                    job.pipeline.add_groth16_proof(blob, &prover_id);                              
+                                ProofKind::Groth16(blob) => {
+                                    info!(
+                                        "Received Groth16 proof for from `{}`",
+                                        prover_peer_id,
+                                    );
+                                    job.pipeline.add_groth16_proof(blob, prover_id);                              
                                 },
                             };
                         },
@@ -764,7 +807,7 @@ async fn main() -> anyhow::Result<()> {
                 },
 
                 SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
-                    peer: client_peer_id,
+                    peer: peer_id,
                     message: request_response::Message::Response {
                         response,
                         //response_id,
@@ -772,9 +815,13 @@ async fn main() -> anyhow::Result<()> {
                     }
                 })) => {                
                     match response {
-                        protocol::Response::BlobIsReady(blob) => {                            
-                            job.pipeline.add_agg_proof(
-                                &client_peer_id.to_string(),
+                        protocol::Response::BlobIsReady(blob) => {
+                            info!(
+                                "Received the final aggregated proof from `{}`",
+                                peer_id,
+                            );
+                            job.pipeline.add_final_agg_proof(
+                                peer_id.to_bytes(),
                                 &blob
                             );
                         },
@@ -1130,7 +1177,7 @@ async fn subscribe_to_zeth_segment_stream(
                 } else {
                     continue
                 };
-                info!("Last Zeth segment object read from ValKey: `{last_id}`");
+                info!("Last segment item read from the ValKey server: `{last_id}`");
             }
             let _ = tx.send(result).await;
         }
@@ -1163,7 +1210,7 @@ async fn subscribe_to_zeth_keccak_stream(
                 } else {
                     continue
                 };
-                info!("Last Zeth keccak read from ValKey: `{last_id}`");
+                info!("Last Keccak item read from the ValKey server: `{last_id}`");
             }
             let _ = tx.send(result).await;
         }
@@ -1195,7 +1242,7 @@ async fn subscribe_to_zeth_zkr_stream(
                 } else {
                     continue
                 };
-                info!("Last Zeth zkr object read from ValKey: `{last_id}`");
+                info!("Last Zkr item read from the ValKey server: `{last_id}`");
             }
             let _ = tx.send(result).await;
         }
