@@ -1,5 +1,5 @@
 use std::{ 
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
 };
 
 use log::{
@@ -21,10 +21,8 @@ use hex::FromHex;
 
 #[derive(Debug, Clone)]
 pub struct Proof {
-    pub provers: HashSet<Vec<u8>>,
-
     pub blob: Option<Vec<u8>>,
-    
+
     pub hash: u128,
 }
 
@@ -32,7 +30,7 @@ pub struct Proof {
 pub enum Input {    
     Blob(Vec<u8>),
 
-    Token(Proof)
+    Token(Vec<u8>, Proof)
 }
 
 #[derive(Debug)]
@@ -58,8 +56,8 @@ pub struct Round {
     // helper(^) reverse map to complement "assigned_batches": <prover, assigned batches>
     pub prover_batch_assignements: HashMap<Vec<u8>, Vec<usize>>,
 
-    // <batch index, <proof, provers>>
-    pub proofs: BTreeMap<usize, Proof>,
+    // <batch index, <prover, proof>>
+    pub proofs: BTreeMap<usize, HashMap<Vec<u8>, Proof>>,
     // helper(^) reverse map to complement "proofs": <prover, batches>
     pub prover_proofs: HashMap<Vec<u8>, Vec<usize>>,
 }
@@ -218,7 +216,7 @@ impl Round {
         Some((*batch_id, assignment))
     }
 
-    // batch has been uccessfully sent to prover
+    // batch has been successfully sent to prover
     pub fn confirm_assignment(&mut self, prover: &Vec<u8>, batch_id: u128) {
         let batch_index = self.batch_ids.get(&batch_id).unwrap();
         self.assigned_batches.entry(*batch_index)
@@ -259,6 +257,7 @@ pub struct Pipeline {
     agg_rounds: Vec<Round>,
     
     // the final aggregated proof(a SuccinctReceipt)
+    //@ the prover?
     pub agg_proof: Option<SuccinctReceipt<ReceiptClaim>>,
 
     assumption_round: Round,
@@ -329,11 +328,13 @@ impl Pipeline {
             prev_round.number + 1,
             prev_round.proofs.len() / batch_size + 1
         );
-        for (index, proof) in prev_round.proofs.iter() {
-            new_round.feed_input(
-                *index,
-                Input::Token(proof.clone())
-            );
+        for (index, proofs) in prev_round.proofs.iter() {
+            // use the first proof
+            let (prover, proof) = proofs
+                .iter()
+                .next()
+                .unwrap();
+            new_round.feed_input(*index, Input::Token(prover.clone(), proof.clone()));
         }
         self.agg_rounds.push(new_round);
     }
@@ -370,25 +371,25 @@ impl Pipeline {
                 return
             }
         };
+        let proof = Proof {
+            blob: None,
+            hash: hash
+        };
         round.proofs
         .entry(*batch_index)
-            .and_modify(|proof| {
-                //@ majority vote should be taken here, ie hold many hashes and reach consensus
-                if proof.hash != hash {
-                    warn!("Existing hash `{}` differs from the new hash `{}`.",
-                        proof.hash, hash
-                    );
-                    return
-                }
-                let _ = proof.provers.insert(prover.clone());
+            .and_modify(|proofs| {
+                proofs.entry(prover.clone())
+                    .and_modify(|proof| {
+                        warn!(
+                            "Old proof `{}` is replaced by new proof `{}`",
+                            proof.hash,
+                            hash
+                        );
+                        proof.hash = hash;
+                    })
+                    .or_insert_with(|| proof.clone());                
             })
-            .or_insert_with(|| {
-                Proof {
-                    provers: HashSet::from([prover]),
-                    blob: None,
-                    hash: hash                    
-                }
-            });
+            .or_insert_with(|| HashMap::from([(prover, proof)]));
         self.attempt_new_agg_round(); 
     }
 
@@ -453,8 +454,12 @@ impl Pipeline {
         info!("Need to resolve `{}` assumptions(s).", assumptions.len());
         let mut succinct_receipt = conditional_receipt.clone();
         let mut assumption_receipts = HashMap::new();        
-        for p in self.assumption_round.proofs.values() {        
-            match bincode::deserialize::<SuccinctReceipt<Unknown>>(p.blob.as_ref().unwrap()) {
+        for ap in self.assumption_round.proofs.values() {
+            //@ pick the 1st proof for the time being
+            let chosen_proof = ap.values().nth(0).unwrap();
+            match bincode::deserialize::<SuccinctReceipt<Unknown>>(
+                chosen_proof.blob.as_ref().unwrap()
+            ) {
                 Ok(sr) => {
                     assumption_receipts.insert(sr.claim.digest(), sr);
                 },
@@ -522,7 +527,6 @@ impl Pipeline {
         blob: Vec<u8>,
         prover: Vec<u8>
     ) {
-        let hash = xxh3_128(&blob);
         let batch_index = match self.assumption_round.batch_ids.get(&batch_id) {
             Some(bi) => bi,
 
@@ -532,32 +536,33 @@ impl Pipeline {
                 return
             }
         };
+        let hash = xxh3_128(&blob);
+        let proof = Proof {
+            blob: Some(blob),
+            hash: hash
+        };
         self.assumption_round.proofs
         .entry(*batch_index)
-            .and_modify(|proof| {
-                //@ majority vote should be taken here, ie hold many hashes and reach consensus
-                if proof.hash != hash {
-                    warn!("Existing hash `{}` differs from the new hash `{}`.",
-                        proof.hash, hash
-                    );
-                    return
-                }
-                let _ = proof.provers.insert(prover.clone());
+            .and_modify(|proofs| {
+                proofs.entry(prover.clone())
+                    .and_modify(|proof| {
+                        warn!(
+                            "Old proof `{}` is replaced by new proof `{}`",
+                            proof.hash,
+                            hash
+                        );
+                        proof.hash = hash;
+                    })
+                    .or_insert_with(|| proof.clone());                
             })
-            .or_insert_with(|| {
-                Proof {
-                    provers: HashSet::from([prover]),
-                    blob: Some(blob),
-                    hash: hash                    
-                }
-            });
+            .or_insert_with(|| HashMap::from([(prover, proof)]));
         self.resolve_assumptions();
     }
 
     pub fn add_final_agg_proof(
         &mut self,
         prover: Vec<u8>,
-        blob: &Vec<u8>
+        blob: Vec<u8>
     ) {
         let hash = xxh3_128(&blob);
         if self.stage != Stage::Resolve {
@@ -565,16 +570,17 @@ impl Pipeline {
             return
         }
         let last_round = self.agg_rounds.last().unwrap();
-        let proof = last_round.proofs.values().nth(0).unwrap();
+        let proofs = last_round.proofs.values().nth(0).unwrap();
+        let proof = proofs.values().nth(0).unwrap();
         if proof.hash != hash {
-            warn!("STARK proof's hash `{}` differs from the expected one `{}`",
+            warn!("Received final agg proof `{}` differs from the requested one `{}`.",
                 hash,
                 proof.hash
             );
             return
         }
-        if !proof.provers.contains(&prover) {
-            warn!("Prover is not among the provers who generated the proof.");
+        if !proofs.contains_key(&prover) {
+            warn!("The peer is not among the provers who generated the proof.");
         }
         self.agg_proof = match bincode::deserialize::<SuccinctReceipt<ReceiptClaim>>(&blob) {
             Ok(sr) => Some(sr),
@@ -588,15 +594,18 @@ impl Pipeline {
         self.resolve_assumptions();
     }
 
-    pub fn agg_proof_token(&self) -> Proof {
+    pub fn agg_proof_token(&self) -> (Vec<u8>, u128) {
         self.agg_rounds
             .last()
             .unwrap()
             .proofs
             .values()
-            .last()
+            .nth(0)
             .unwrap()
-            .clone()
+            .iter()
+            .nth(0)
+            .map(|(prover, proof)| (prover.clone(), proof.hash))
+            .unwrap()
     }
 
     pub fn assign_groth16_batch(
@@ -634,24 +643,26 @@ impl Pipeline {
             }
         };
         let hash = xxh3_128(&blob);        
+        let proof = Proof {
+            blob: Some(blob),
+            hash: hash
+        };
         self.groth16_round.proofs
         .entry(*batch_index)
-            .and_modify(|proof| {
-                //@ majority vote should be taken here, ie hold many hashes and reach consensus
-                if proof.hash != hash {
-                    warn!("Existing hash `{}` differs from the new hash `{}`.",
-                        proof.hash, hash
-                    );
-                    return
-                }
-                let _ = proof.provers.insert(prover.clone());
+            .and_modify(|proofs| {
+                proofs.entry(prover.clone())
+                    .and_modify(|op| {
+                        warn!(
+                            "Replaced the old agg proof `{}` with a new one `{}`.",                        
+                            op.hash, 
+                            hash
+                        );
+                        *op = proof.clone();
+                    })
+                    .or_insert_with(|| proof.clone());
             })
             .or_insert_with(|| {
-                Proof {
-                    provers: HashSet::from([prover]),
-                    blob: Some(blob),
-                    hash: hash                    
-                }
+                HashMap::from([(prover, proof)])
             });
         // off-chain verification baby!
         let output = groth16_receipt

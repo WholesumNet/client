@@ -311,22 +311,20 @@ async fn main() -> anyhow::Result<()> {
                 if job.pipeline.stage == pipeline::Stage::Resolve &&
                    job.pipeline.agg_proof.is_none()
                 {
-                    let token = job.pipeline.agg_proof_token();
-                    for prover in token.provers.iter() {
-                        let prover_peer_id = PeerId::from_bytes(prover).unwrap();
-                        let _req_id = swarm
-                            .behaviour_mut()
-                            .req_resp
-                            .send_request(
-                                &prover_peer_id,
-                                protocol::Request::TransferBlob(token.hash),
-                            );
-                        info!(
-                            "Requested the aggregated proof `{}` transfer from prover `{}`.",
-                            token.hash,
-                            prover_peer_id
+                    let (prover, hash)  = job.pipeline.agg_proof_token();
+                    let peer_id = PeerId::from_bytes(&prover).unwrap();
+                    let _req_id = swarm
+                        .behaviour_mut()
+                        .req_resp
+                        .send_request(
+                            &peer_id,
+                            protocol::Request::TransferBlob(hash),
                         );
-                    }
+                    info!(
+                        "Requested transfer of the aggregated proof blob `{}` from `{}`.",
+                        hash,
+                        peer_id
+                    );
                 }
             },
 
@@ -630,12 +628,12 @@ async fn main() -> anyhow::Result<()> {
                                                                     protocol::InputBlob::Blob(blob)
                                                                 ),
 
-                                                            pipeline::Input::Token(proof) => 
+                                                            pipeline::Input::Token(prover, proof) => 
                                                                 (
                                                                     batch_id,
                                                                     protocol::InputBlob::Token(
                                                                         proof.hash,
-                                                                        proof.provers.iter().cloned().collect(),
+                                                                        prover,
                                                                     )
                                                                 )
                                                         }
@@ -644,7 +642,7 @@ async fn main() -> anyhow::Result<()> {
                                             }
                                         )
                                     };
-                                    if let Err(e) = swarm
+                                    if let Err(_e) = swarm
                                         .behaviour_mut()
                                         .req_resp
                                             .send_response(
@@ -652,10 +650,10 @@ async fn main() -> anyhow::Result<()> {
                                                 protocol::Response::Job(compute_job)
                                             )
                                     {
-                                        warn!("Failed to send the Groth16 job for proving: `{e:?}`");
+                                        warn!("Failed to send the Groth16 job for proving.");
                                     } else {
                                         job.pipeline.confirm_groth16_assignment(&prover_id, batch_id);
-                                        info!("Sent the Groth16 job for proving to `{prover_peer_id}`");
+                                        info!("Sent the Groth16 job to `{prover_peer_id}`.");
                                     }
                                 },
 
@@ -690,12 +688,12 @@ async fn main() -> anyhow::Result<()> {
                                                                     protocol::InputBlob::Blob(blob)
                                                                 ),
 
-                                                            pipeline::Input::Token(proof) => 
+                                                            pipeline::Input::Token(prover, proof) => 
                                                                 (
                                                                     batch_id,
                                                                     protocol::InputBlob::Token(
                                                                         proof.hash,
-                                                                        proof.provers.iter().cloned().collect(),
+                                                                        prover,
                                                                     )
                                                                 )
                                                         }
@@ -715,7 +713,7 @@ async fn main() -> anyhow::Result<()> {
                                         warn!("Failed to send the assumption job for proving: `{e:?}`");
                                     } else {
                                         job.pipeline.confirm_assumption_assignment(&prover_id, batch_id);
-                                        info!("Sent the assumption job for proving to `{prover_peer_id}`");
+                                        info!("Sent the assumption job to `{prover_peer_id}`.");
                                     }
                                 },
 
@@ -746,10 +744,10 @@ async fn main() -> anyhow::Result<()> {
                                                             pipeline::Input::Blob(blob) => 
                                                                 protocol::InputBlob::Blob(blob),
 
-                                                            pipeline::Input::Token(proof) => 
+                                                            pipeline::Input::Token(prover, proof) => 
                                                                 protocol::InputBlob::Token(
                                                                     proof.hash,
-                                                                    proof.provers.iter().cloned().collect(),
+                                                                    prover,
                                                                 )
                                                         }                                                        
                                                     })
@@ -768,7 +766,7 @@ async fn main() -> anyhow::Result<()> {
                                         warn!("Failed to send the aggregate job for proving: `{e:?}`");
                                     } else {
                                         job.pipeline.confirm_agg_assignment(&prover_id, batch_id);
-                                        info!("Sent the aggregate job for proving to `{prover_peer_id}`");
+                                        info!("Sent the aggregate job to `{prover_peer_id}`.");
                                     }
                                 }
                             };
@@ -853,7 +851,7 @@ async fn main() -> anyhow::Result<()> {
                             );
                             job.pipeline.add_final_agg_proof(
                                 peer_id.to_bytes(),
-                                &blob
+                                blob
                             );
                         },
 
