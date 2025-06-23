@@ -30,7 +30,6 @@ use std::{
 };
 use bincode;
 
-use toml;
 use anyhow;
 // use reqwest;
 
@@ -38,7 +37,6 @@ use clap::{
     Parser, Subcommand
 };
 
-use uuid::Uuid;
 use env_logger::Env;
 use log::{info, warn};
 use mongodb::{
@@ -61,10 +59,8 @@ use peyk::{
     }
 };
 
-mod job;
-use job::Job;
-
 mod pipeline;
+use pipeline::Pipeline;
 
 mod db;
 
@@ -163,13 +159,12 @@ async fn main() -> anyhow::Result<()> {
     // let mut db_insert_futures = FuturesUnordered::new();
     // let mut db_update_futures = FuturesUnordered::new();
 
-    // the job
-    let mut job = match &cli.job {
+    let mut pipeline = match &cli.job {
         Some(Commands::New{ job_file }) => {
-            let job = new_job(job_file)?;            
+            let pipeline = Pipeline::new(job_file)?;
             // let oid = col_jobs.insert_one(
             //     db::Job {
-            //         id: job.id.clone(),
+            //         id: pipeline.id.clone(),
             //         verification: db::Verification {
             //             image_id: job.schema.image_id.clone(),
             //         },
@@ -179,7 +174,7 @@ async fn main() -> anyhow::Result<()> {
             // .await?
             // .inserted_id;
             // (job, oid)
-            job
+            pipeline
         },
 
         // Some(Commands::Resume{ job_id }) => {
@@ -277,7 +272,7 @@ async fn main() -> anyhow::Result<()> {
 
             // post need prove
             _i = timer_post_job.select_next_some() => {
-                let need = match job.pipeline.stage {
+                let need = match pipeline.stage {
                     // request for groth16 proving
                     pipeline::Stage::Groth16 => {
                         let nonce = rng.random::<u32>();
@@ -287,8 +282,8 @@ async fn main() -> anyhow::Result<()> {
                     // request for other kinds of proving
                     _ => {
                         // let _outstanding_jobs = (
-                        //     job.pipeline.num_outstanding_aggregate_items() +
-                        //     job.pipeline.num_outstanding_resolve_items()
+                        //     pipeline.num_outstanding_aggregate_items() +
+                        //     pipeline.num_outstanding_resolve_items()
                         // ) as u32;
                         let nonce = rng.random::<u32>();
                         protocol::NeedKind::Prove(nonce)
@@ -308,10 +303,10 @@ async fn main() -> anyhow::Result<()> {
 
             //@ ask for the stark proof
             _i = timer_retrieve_agg_proof.select_next_some() => {
-                if job.pipeline.stage == pipeline::Stage::Resolve &&
-                   job.pipeline.agg_proof.is_none()
+                if pipeline.stage == pipeline::Stage::Resolve &&
+                   pipeline.agg_proof.is_none()
                 {
-                    let (prover, hash)  = job.pipeline.agg_proof_token();
+                    let (prover, hash)  = pipeline.agg_proof_token();
                     let peer_id = PeerId::from_bytes(&prover).unwrap();
                     let _req_id = swarm
                         .behaviour_mut()
@@ -346,7 +341,7 @@ async fn main() -> anyhow::Result<()> {
                                 Err(err_msg) => {
                                     if str_id.eq_ignore_ascii_case("<DONE>") {
                                         info!("All segments have been received from the ValKey server.");
-                                        job.pipeline.stop_segment_feeding();
+                                        pipeline.stop_segment_feeding();
                                     } else {
                                         warn!("Invalid segment id `{str_id}` from the ValKey server: `{err_msg}");
                                     }
@@ -361,7 +356,7 @@ async fn main() -> anyhow::Result<()> {
                         } else {
                             continue
                         };
-                        job.pipeline.feed_segment(id as usize, blob);                        
+                        pipeline.feed_segment(id as usize, blob);                        
                     }
                 }                
             },
@@ -396,7 +391,7 @@ async fn main() -> anyhow::Result<()> {
                         } else {
                             continue
                         };
-                        job.pipeline.feed_assumption(&blob);
+                        pipeline.feed_assumption(&blob);
                     }                    
                 }                
             },
@@ -430,7 +425,7 @@ async fn main() -> anyhow::Result<()> {
                         } else {
                             continue
                         };
-                        job.pipeline.feed_assumption(&blob);
+                        pipeline.feed_assumption(&blob);
                     }                                                
                 }                
             },
@@ -601,10 +596,9 @@ async fn main() -> anyhow::Result<()> {
                         // prover indicates her interest to compute                        
                         protocol::Request::WouldProve => {
                             let prover_id = prover_peer_id.to_bytes();
-                            match job.pipeline.stage {
+                            match pipeline.stage {
                                 pipeline::Stage::Groth16 => {                                    
-                                    let (batch_id, assignments) = match job
-                                        .pipeline
+                                    let (batch_id, assignments) = match pipeline
                                         .assign_groth16_batch(&prover_id)
                                     {
                                         Some((i, a)) => (i, a),
@@ -615,7 +609,7 @@ async fn main() -> anyhow::Result<()> {
                                         }
                                     };
                                     let compute_job = protocol::ComputeJob {
-                                        id: job.id,
+                                        id: pipeline.id,
                                         kind: protocol::JobKind::Groth16(
                                             protocol::Groth16Details {
                                                 batch: assignments
@@ -652,18 +646,17 @@ async fn main() -> anyhow::Result<()> {
                                     {
                                         warn!("Failed to send the Groth16 job for proving.");
                                     } else {
-                                        job.pipeline.confirm_groth16_assignment(&prover_id, batch_id);
+                                        pipeline.confirm_groth16_assignment(&prover_id, batch_id);
                                         info!("Sent the Groth16 job to `{prover_peer_id}`.");
                                     }
                                 },
 
                                 pipeline::Stage::Resolve => {
                                     //@ ask for agg proof blob here too?
-                                    // if job.pipeline.num_outstanding_resolve_items() == 0 {
+                                    // if pipeline.num_outstanding_resolve_items() == 0 {
                                     //     continue
                                     // }                                    
-                                    let (batch_id, assignments) = match job
-                                        .pipeline
+                                    let (batch_id, assignments) = match pipeline
                                         .assign_assumption_batch(&prover_id)
                                     {
                                         Some((i, a)) => (i, a),
@@ -675,7 +668,7 @@ async fn main() -> anyhow::Result<()> {
                                         }
                                     };
                                     let compute_job = protocol::ComputeJob {
-                                        id: job.id,
+                                        id: pipeline.id,
                                         kind: protocol::JobKind::Assumption(
                                             protocol::AssumptionDetails {
                                                 batch: assignments
@@ -712,14 +705,13 @@ async fn main() -> anyhow::Result<()> {
                                     {
                                         warn!("Failed to send the assumption job for proving: `{e:?}`");
                                     } else {
-                                        job.pipeline.confirm_assumption_assignment(&prover_id, batch_id);
+                                        pipeline.confirm_assumption_assignment(&prover_id, batch_id);
                                         info!("Sent the assumption job to `{prover_peer_id}`.");
                                     }
                                 },
 
                                 pipeline::Stage::Aggregate => {
-                                    let (batch_id, assignments) = match job
-                                        .pipeline
+                                    let (batch_id, assignments) = match pipeline
                                         .assign_agg_batch(&prover_id)
                                     {
                                         Some((i, a)) => (i, a),
@@ -732,11 +724,11 @@ async fn main() -> anyhow::Result<()> {
                                     };
                                     //@ unify segment and join into one job   
                                     let compute_job = protocol::ComputeJob {
-                                        id: job.id,
+                                        id: pipeline.id,
                                         kind: protocol::JobKind::Aggregate(
                                             protocol::AggregateDetails {
                                                 id: batch_id,
-                                                blobs_are_segment: job.pipeline.num_agg_rounds() == 1,
+                                                blobs_are_segment: pipeline.num_agg_rounds() == 1,
                                                 batch: assignments
                                                     .into_iter()
                                                     .map(|ass| {
@@ -765,7 +757,7 @@ async fn main() -> anyhow::Result<()> {
                                     {
                                         warn!("Failed to send the aggregate job for proving: `{e:?}`");
                                     } else {
-                                        job.pipeline.confirm_agg_assignment(&prover_id, batch_id);
+                                        pipeline.confirm_agg_assignment(&prover_id, batch_id);
                                         info!("Sent the aggregate job to `{prover_peer_id}`.");
                                     }
                                 }
@@ -774,7 +766,7 @@ async fn main() -> anyhow::Result<()> {
 
                         // prover has finished its job
                         protocol::Request::ProofIsReady(token) => {
-                            if job.id != token.job_id {
+                            if pipeline.id != token.job_id {
                                 warn!("Ignored unknown proof token: `{token:?}`");
                                 continue;
                             }
@@ -787,7 +779,7 @@ async fn main() -> anyhow::Result<()> {
                                         batch_id,
                                         prover_peer_id
                                     );
-                                    job.pipeline.add_assumption_proof(
+                                    pipeline.add_assumption_proof(
                                         batch_id,
                                         blob,
                                         prover_id
@@ -800,12 +792,12 @@ async fn main() -> anyhow::Result<()> {
                                         batch_id,
                                         prover_peer_id
                                     );
-                                    job.pipeline.add_agg_proof(
+                                    pipeline.add_agg_proof(
                                         batch_id,
                                         token.hash,
                                         prover_id
                                     );
-                                    if job.pipeline.stage == pipeline::Stage::Resolve {
+                                    if pipeline.stage == pipeline::Stage::Resolve {
                                         let _req_id = swarm
                                             .behaviour_mut()
                                             .req_resp
@@ -826,7 +818,7 @@ async fn main() -> anyhow::Result<()> {
                                         "Received Groth16 proof for from `{}`",
                                         prover_peer_id,
                                     );
-                                    job.pipeline.add_groth16_proof(batch_id, blob, prover_id);                              
+                                    pipeline.add_groth16_proof(batch_id, blob, prover_id);                              
                                 },
                             };
                         },
@@ -849,7 +841,7 @@ async fn main() -> anyhow::Result<()> {
                                 "Received the final aggregated proof from `{}`",
                                 peer_id,
                             );
-                            job.pipeline.add_final_agg_proof(
+                            pipeline.add_final_agg_proof(
                                 peer_id.to_bytes(),
                                 blob
                             );
@@ -866,15 +858,6 @@ async fn main() -> anyhow::Result<()> {
             },
         }
     }
-}
-
-fn get_home_dir() -> anyhow::Result<String> {
-    let err_msg = "Home dir is not available";
-    let binding = home::home_dir()
-        .ok_or_else(|| anyhow::Error::msg(err_msg))?;
-    let home_dir = binding.to_str()
-        .ok_or_else(|| anyhow::Error::msg(err_msg))?;
-    Ok(home_dir.to_string())
 }
 
 async fn mongodb_setup(
@@ -896,37 +879,6 @@ async fn mongodb_setup(
         .await?;
     println!("[info] Successfully connected to the MongoDB instance!");
     Ok(client)
-}
-
-pub fn new_job(
-    job_file: &str
-) -> anyhow::Result<job::Job> {
-    let schema: job::Schema = toml::from_str(
-        &fs::read_to_string(job_file)?
-    )?;
-
-    let generated_job_id = Uuid::new_v4().as_u128();
-    let working_dir = format!(
-        "{}/.wholesum/client/jobs/{}",
-        get_home_dir()?,
-        generated_job_id.to_string()
-    );
-    // create folders for residues
-    for action in ["prove", "join", "groth16"] {
-        fs::create_dir_all(
-            format!("{working_dir}/{action}")
-        )?;
-    }    
-    let pipeline = pipeline::Pipeline::new(schema.image_id.as_bytes());
-    Ok(
-        Job {
-            id: generated_job_id,
-            working_dir: working_dir,
-            schema: schema,
-            pipeline: pipeline,
-        }
-    )
-        
 }
 
 // async fn resume_job(
@@ -991,13 +943,13 @@ pub fn new_job(
 //     }
 //     println!("[info] Number of proved segments found: `{}`", db_proofs.len());
 //     for seg_id in db_proofs.keys() {
-//         job.pipeline.prove_and_lift.progress_map.set(*seg_id as usize, true);
+//         pipeline.prove_and_lift.progress_map.set(*seg_id as usize, true);
 //     }
-//     job.pipeline.prove_and_lift.proofs = db_proofs;
+//     pipeline.prove_and_lift.proofs = db_proofs;
 //     println!("[info] Prove stage is in sync with DB.");
-//     if true == job.pipeline.prove_and_lift.is_finished() {
+//     if true == pipeline.prove_and_lift.is_finished() {
 //         println!("[info] Prove stage is finished.");
-//         if true == job.pipeline.begin_join_stage() {
+//         if true == pipeline.begin_join_stage() {
 //             println!("[info] Attempting to verify the final join proof...");
 //             //@ todo: verify join proof
 //             return Ok(
@@ -1046,7 +998,7 @@ pub fn new_job(
 //     }
 //     for (round_number, db_joins) in join_btree.into_iter() {
 //         println!("[info] Checking join round {round_number}...");
-//         let round = job.pipeline.join_rounds.last_mut().unwrap();
+//         let round = pipeline.join_rounds.last_mut().unwrap();
 //         for db_join in db_joins.iter() {
 //             if let Some(pair_index) = round
 //                 .pairs
@@ -1102,7 +1054,7 @@ pub fn new_job(
 //         }
 //         println!("[info] Sync is complete for round {}.", round.number);
 //         if true == round.progress_map.all() {
-//             if true == job.pipeline.begin_next_join_round() {                
+//             if true == pipeline.begin_next_join_round() {                
 //             }
 //         }
 //     }

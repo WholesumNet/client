@@ -1,7 +1,8 @@
 use std::{ 
     collections::{BTreeMap, HashMap},
+    fs,
 };
-
+use serde::Deserialize;
 use log::{
     info, warn
 };
@@ -18,6 +19,12 @@ use risc0_zkvm::{
     sha::Digestible
 };
 use hex::FromHex;
+
+// job template as read in(e.g. from disk)
+#[derive(Debug, Deserialize)]
+pub struct Schema {    
+    pub image_id: String
+}
 
 #[derive(Debug, Clone)]
 pub struct Proof {
@@ -252,6 +259,9 @@ pub enum Stage {
 
 #[derive(Debug)]
 pub struct Pipeline {
+    // job id
+    pub id: u128,
+
     pub stage: Stage,
 
     agg_rounds: Vec<Round>,
@@ -268,15 +278,20 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    pub fn new(image_id: &[u8]) -> Self {
-        Self {
+    pub fn new(job_file: &str) -> anyhow::Result<Self> {
+        let schema: Schema = toml::from_str(
+            &fs::read_to_string(job_file)?
+        )?;   
+
+        Ok(Self {
+            id: Uuid::new_v4().as_u128(), 
             stage: Stage::Aggregate,            
             agg_rounds: vec![Round::new(0, 2)], 
             agg_proof: None,
             assumption_round: Round::new(127, 1),
             groth16_round: Round::new(8191, 1),
-            image_id: Digest::from_hex(image_id).unwrap(),
-        }
+            image_id: Digest::from_hex(schema.image_id.as_bytes()).unwrap(),
+        })
     }
 
     pub fn num_agg_rounds(&self) -> usize {
