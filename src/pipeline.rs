@@ -129,24 +129,31 @@ impl Round {
 
     // no new input is expected, so upgrade the partial batch into a full batch
     pub fn stop_feeding(&mut self) {
-        info!("Partial batches: {:?}", self.partial_batches);
+        info!("Received stop feeding command, Partial batches: `{:?}`", self.partial_batches);
         if self.partial_batches.is_empty() {
             return
         }
-        if self.partial_batches.len() > 1 {
-            warn!("Too many partial batches, expected just one.");
-            return            
-        }
         let (index, batch) = self.partial_batches.first_key_value().unwrap();
-        let last_batch = batch
+        let last_batch: Vec<_> = batch
             .iter()
             .filter_map(|item| if *item != 0 { Some(*item) } else { None })
             .collect();
-        self.batches.insert(*index, last_batch);
-        let batch_id = Uuid::new_v4().as_u128();
-        self.batch_ids.insert(batch_id, *index);
-        self.inverse_batch_ids.insert(*index, batch_id);
-        info!("batches: {:?}", self.batches);
+        if last_batch.len() == 1 && 
+           self.number > 0 &&
+           self.number < ASSUMPUTION_ROUND_NUMBER
+        {
+            // add it to the last batch
+            self.batches
+                .values_mut()
+                .last()
+                .unwrap()
+                .push(last_batch.into_iter().next().unwrap());
+        } else {
+            self.batches.insert(*index, last_batch);
+            let batch_id = Uuid::new_v4().as_u128();
+            self.batch_ids.insert(batch_id, *index);
+            self.inverse_batch_ids.insert(*index, batch_id);            
+        }
     }
 
     // assign a batch to prover
@@ -277,6 +284,9 @@ pub struct Pipeline {
     pub image_id: Digest,
 }
 
+const ASSUMPUTION_ROUND_NUMBER: usize = 127;
+const GROTH16_ROUND_NUMBER: usize = 8_191;
+
 impl Pipeline {
     pub fn new(job_file: &str) -> anyhow::Result<Self> {
         let schema: Schema = toml::from_str(
@@ -288,8 +298,8 @@ impl Pipeline {
             stage: Stage::Aggregate,            
             agg_rounds: vec![Round::new(0, 2)], 
             agg_proof: None,
-            assumption_round: Round::new(127, 1),
-            groth16_round: Round::new(8191, 1),
+            assumption_round: Round::new(ASSUMPUTION_ROUND_NUMBER, 1),
+            groth16_round: Round::new(GROTH16_ROUND_NUMBER, 1),
             image_id: Digest::from_hex(schema.image_id.as_bytes()).unwrap(),
         })
     }
