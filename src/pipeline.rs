@@ -351,6 +351,7 @@ impl Pipeline {
                 .unwrap();
             new_round.feed_input(*index, Input::Token(prover.clone(), proof.clone()));
         }
+        new_round.stop_feeding();
         self.agg_rounds.push(new_round);
     }
 

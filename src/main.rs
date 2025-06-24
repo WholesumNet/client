@@ -112,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // setup mongodb
-    // let db_client = mongodb_setup("mongodb://localhost:27017").await?;
+    let _db_client = mongodb_setup("mongodb://localhost:27017").await?;
 
     // setup redis
     let redis_client = redis::Client::open("redis://127.0.0.1:6379/")?;
@@ -573,7 +573,7 @@ async fn main() -> anyhow::Result<()> {
                 SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     // propagation_source: peer_id,
                     // message_id,
-                    message,
+                    // message,
                     ..
                 })) => {
                     // let msg_str = String::from_utf8_lossy(&message.data);
