@@ -51,7 +51,7 @@ pub struct Groth16 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {    
-    pub id: String,
+    pub id: u128,
 
     pub verification: Verification,
 

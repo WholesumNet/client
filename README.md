@@ -21,9 +21,13 @@ Docker runtime is needed as it is used to run `Risc0` containers. This awesome [
 
 Install the MongoDB from [here](https://www.mongodb.com/docs/manual/tutorial/install-mongodb-community-with-docker/). Make sure a Docker container runs and is listenning on `localhost:27017`
 
+#### Valkey
+
+A ValKey container is required to fetch segments and assumption blobs that are produced during Zeth execution. To run the latest version, type `docker run -d --name valkey-server -p 6379:6379 valkey/valkey:8.1`.
+
 ### Library dependencies
 
-To run a client agent, you would first need to fork the following libraries and put them in the parent("..") directory of the client:
+To run, download the the following libraries and put them in the parent("..") directory:
 
 - [peyk](https://github.com/WholesumNet/peyk)
 
@@ -32,8 +36,6 @@ To run a client agent, you would first need to fork the following libraries and 
 You would need a job file to engage with the network. Here's a sample job file for the SHA example:
 <pre>
 # schema of a typical L1 block proving job
-
-redis_url = "redis://127.0.0.1"
 
 image_id = "foobarbaz" 
 
