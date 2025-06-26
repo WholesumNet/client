@@ -119,8 +119,6 @@ async fn main() -> anyhow::Result<()> {
     let redis_con = redis_client.get_multiplexed_async_connection().await?;    
     let mut zeth_segment_stream = subscribe_to_zeth_segment_stream(redis_con.clone()).await;
     let mut zeth_keccak_stream = subscribe_to_zeth_keccak_stream(redis_con.clone()).await;
-    let mut zeth_zkr_stream = subscribe_to_zeth_zkr_stream(redis_con.clone()).await;
-
 
     // local libp2p key 
     let local_key = {
@@ -394,41 +392,7 @@ async fn main() -> anyhow::Result<()> {
                         pipeline.feed_assumption(&blob);
                     }                    
                 }                
-            },
-
-            value = zeth_zkr_stream.select_next_some() => {
-                for stream in value.as_sequence().unwrap() {                    
-                    let contents = stream.as_sequence().unwrap();
-                    // let _stream_name = &contents[0];
-                    let objects = &contents[1]
-                        .as_sequence()
-                        .unwrap()
-                        [0]
-                        .as_sequence()
-                        .unwrap();
-                    //let _last_id = &objects[0];
-                    let assumptions = objects[1].as_sequence().unwrap();
-                    let num_assumptions = objects[1].as_sequence().unwrap().len() / 2;
-                    for i in 0..num_assumptions {
-                        if let redis::Value::BulkString(bs) = &assumptions[i * 2] {                            
-                            let cd_str = String::from_utf8_lossy(&bs).to_string();
-                            if cd_str.eq_ignore_ascii_case("<DONE>") {
-                                info!("All Zkr assumptions have been received from the ValKey server.");
-                                continue
-                            }
-                        } else {
-                            warn!("Invalid Zkr assumption from the ValKey server.");
-                            continue
-                        };
-                        let blob = if let redis::Value::BulkString(blob) = &assumptions[i * 2 + 1] {
-                            blob
-                        } else {
-                            continue
-                        };
-                        pipeline.feed_assumption(&blob);
-                    }                                                
-                }                
-            },
+            },            
 
             // res = db_insert_futures.select_next_some() => {
             //     if let Err(err_msg) = res {
@@ -940,38 +904,6 @@ async fn subscribe_to_zeth_keccak_stream(
                     continue
                 };
                 info!("Last Keccak item read from the ValKey server: `{last_id}`");
-            }
-            let _ = tx.send(result).await;
-        }
-    });
-    rx
-}
-
-async fn subscribe_to_zeth_zkr_stream(
-    mut redis_con: redis::aio::MultiplexedConnection
-) -> mpsc::Receiver<redis::Value> {
-    let (mut tx, rx) = mpsc::channel(32);
-    let mut last_id = "0".to_string();
-    task::spawn(async move {
-        loop {
-            let result: redis::Value = redis::cmd("XREAD")
-                .arg("BLOCK").arg(0)
-                .arg("STREAMS").arg("zeth-zkr-stream").arg(&last_id)
-                .query_async(&mut redis_con)
-                .await
-                .unwrap();
-            // update last_id
-            for stream in result.as_sequence().unwrap(){
-                let data = stream.as_sequence().unwrap();
-                let contents = data[1].as_sequence().unwrap();
-                let last_object = contents.last().unwrap();
-                let objects = last_object.as_sequence().unwrap();
-                last_id = if let redis::Value::BulkString(new_last_id) = &objects[0] {
-                    String::from_utf8_lossy(&new_last_id).to_string() 
-                } else {
-                    continue
-                };
-                info!("Last Zkr item read from the ValKey server: `{last_id}`");
             }
             let _ = tx.send(result).await;
         }
