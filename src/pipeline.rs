@@ -35,8 +35,10 @@ pub struct Proof {
 
 #[derive(Debug, Clone)]
 pub enum Input {    
+    // blob, used for the first round(segments)
     Blob(Vec<u8>),
 
+    // (prover, proof)
     Token(Vec<u8>, Proof)
 }
 
@@ -304,8 +306,8 @@ impl Pipeline {
         })
     }
 
-    pub fn num_agg_rounds(&self) -> usize {
-        self.agg_rounds.len()
+    pub fn cur_agg_round_number(&self) -> usize {
+        self.agg_rounds.last().unwrap().number
     }
 
     pub fn assign_agg_batch(&mut self, prover: &Vec<u8>) -> Option<(u128, Vec<Input>)> {
