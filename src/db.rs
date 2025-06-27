@@ -6,54 +6,32 @@ use serde::{
 // mongodb database models for the job data
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Verification {    
-    pub image_id: String
+pub enum Kind {
+    Aggregate,
+
+    Assumption,
+
+    Groth16
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Proof {    
-    pub prover: String,
+    pub job_id: Bson,
 
+    pub prover: Vec<u8>,
     pub blob: Option<Vec<u8>>,
+    pub hash: String,
 
-    pub hash: u128,
-}
+    pub round_number: Option<u32>,
+    
+    pub kind: Kind,
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Segment {    
-    pub id: u32,
-
-    //@ rename to job_oid: ObjectId
-    pub job_id: Bson,
-
-    // a succinct receipt(proved & lifted)
-    pub proof: Proof,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Join {
-    pub pair_id: u32,
-
-    pub job_id: Bson,
-
-    pub round: u32,
-
-
-    pub proof: Proof,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Groth16 {
-    pub job_id: Bson,
-
-    pub proof: Proof,
+    pub batch_id: String
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {    
-    pub id: u128,
+    pub id: String,
 
-    pub verification: Verification,
-
-    pub snark_proof: Option<Proof>,
+    pub image_id: [u8; 32],
 }

@@ -2,7 +2,7 @@
 use futures::{
     select,
     stream::{
-        // FuturesUnordered,
+        FuturesUnordered,
         StreamExt,
     },
     channel::{mpsc},
@@ -26,7 +26,7 @@ use std::{
         // Instant, 
         Duration,
     },
-    // future::IntoFuture,
+    future::IntoFuture,
 };
 use bincode;
 
@@ -36,7 +36,7 @@ use anyhow;
 use clap::{
     Parser, Subcommand
 };
-
+use xxhash_rust::xxh3::xxh3_128;
 use env_logger::Env;
 use log::{info, warn};
 use mongodb::{
@@ -112,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // setup mongodb
-    let _db_client = mongodb_setup("mongodb://localhost:27017").await?;
+    let db_client = mongodb_setup("mongodb://localhost:27017").await?;
 
     // setup redis
     let redis_client = redis::Client::open("redis://127.0.0.1:6379/")?;
@@ -135,44 +135,31 @@ async fn main() -> anyhow::Result<()> {
         }
     };    
     let my_peer_id = PeerId::from_public_key(&local_key.public());
-    info!("My PeerId: `{:?}`", my_peer_id); 
-    // futures for local verification of succinct proofs
-    // let mut succinct_proof_verification_futures = FuturesUnordered::new();
-    // let mut join_proof_verification_futures = FuturesUnordered::new();
+    info!("My PeerId: `{my_peer_id}`");     
 
-    // let col_jobs = db_client
-    //     .database("wholesum_client")
-    //     .collection::<db::Job>("jobs");
-    // let col_segments = db_client
-    //     .database("wholesum_client")
-    //     .collection::<db::Segment>("segments");
-    // let col_joins = db_client
-    //     .database("wholesum_client")
-    //     .collection::<db::Join>("joins");
-    // let col_groth16 = db_client
-    //     .database("wholesum_client")
-    //     .collection::<db::Groth16>("groth16");
+    let col_jobs = db_client
+        .database("wholesum_client")
+        .collection::<db::Job>("jobs");
+    let col_proofs = db_client
+        .database("wholesum_client")
+        .collection::<db::Proof>("proofs");    
     
     // futures for mongodb progress saving 
-    // let mut db_insert_futures = FuturesUnordered::new();
+    let mut db_insert_futures = FuturesUnordered::new();
     // let mut db_update_futures = FuturesUnordered::new();
 
-    let mut pipeline = match &cli.job {
+    let (mut pipeline, db_job_oid) = match &cli.job {
         Some(Commands::New{ job_file }) => {
             let pipeline = Pipeline::new(job_file)?;
-            // let oid = col_jobs.insert_one(
-            //     db::Job {
-            //         id: pipeline.id.clone(),
-            //         verification: db::Verification {
-            //             image_id: job.schema.image_id.clone(),
-            //         },
-            //         snark_proof: None,
-            //     }
-            // )
-            // .await?
-            // .inserted_id;
-            // (job, oid)
-            pipeline
+            let oid = col_jobs.insert_one(
+                db::Job {
+                    id: pipeline.id.to_string(),
+                    image_id: pipeline.image_id.into()
+                }
+            )
+            .await?
+            .inserted_id;
+            (pipeline, oid)            
         },
 
         // Some(Commands::Resume{ job_id }) => {
@@ -189,7 +176,7 @@ async fn main() -> anyhow::Result<()> {
             panic!("Missing command, not sure what you meant.");
         },
     };
-    // info!("Job's progress will be recorded to the DB with Id: `{db_job_oid:?}`");
+    info!("Job's progress will be recorded to the DB with Id: `{db_job_oid:?}`");
 
     // swarm 
     let mut swarm = peyk::p2p::setup_swarm(&local_key).await?;
@@ -394,11 +381,17 @@ async fn main() -> anyhow::Result<()> {
                 }                
             },            
 
-            // res = db_insert_futures.select_next_some() => {
-            //     if let Err(err_msg) = res {
-            //         warn!("DB insert was failed: `{err_msg:?}`");
-            //     }                
-            // },
+            res = db_insert_futures.select_next_some() => {
+                match res {
+                    Ok(oid) => {
+                        info!("Successfull DB insert: `{oid:?}`");
+                    },
+
+                    Err(err_msg) => {
+                        warn!("Failed DB insert: `{err_msg:?}`");
+                    }
+                }                
+            },
 
             // res = db_update_futures.select_next_some() => {
             //     if let Err(err_msg) = res {
@@ -692,7 +685,7 @@ async fn main() -> anyhow::Result<()> {
                                         kind: protocol::JobKind::Aggregate(
                                             protocol::AggregateDetails {
                                                 id: batch_id,
-                                                blobs_are_segment: pipeline.num_agg_rounds() == 1,
+                                                blobs_are_segment: pipeline.cur_agg_round_number() == 0usize,
                                                 batch: assignments
                                                     .into_iter()
                                                     .map(|ass| {
@@ -745,8 +738,22 @@ async fn main() -> anyhow::Result<()> {
                                     );
                                     pipeline.add_assumption_proof(
                                         batch_id,
-                                        blob,
-                                        prover_id
+                                        blob.clone(),
+                                        prover_id.clone()
+                                    );
+                                    db_insert_futures.push(
+                                        col_proofs.insert_one(
+                                            db::Proof {
+                                                job_id: db_job_oid.clone(),
+                                                prover: prover_id,
+                                                blob: Some(blob),
+                                                hash: token.hash.to_string(),
+                                                round_number: None,
+                                                kind: db::Kind::Assumption,
+                                                batch_id: batch_id.to_string()
+                                            }
+                                        )
+                                        .into_future()
                                     );
                                 },                                 
 
@@ -759,7 +766,7 @@ async fn main() -> anyhow::Result<()> {
                                     pipeline.add_agg_proof(
                                         batch_id,
                                         token.hash,
-                                        prover_id
+                                        prover_id.clone()
                                     );
                                     if pipeline.stage == pipeline::Stage::Resolve {
                                         let _req_id = swarm
@@ -775,6 +782,21 @@ async fn main() -> anyhow::Result<()> {
                                             prover_peer_id
                                         );
                                     }
+
+                                    db_insert_futures.push(
+                                        col_proofs.insert_one(
+                                            db::Proof {
+                                                job_id: db_job_oid.clone(),
+                                                prover: prover_id.clone(),
+                                                blob: None,
+                                                hash: token.hash.to_string(),
+                                                round_number: Some(pipeline.cur_agg_round_number() as u32),
+                                                kind: db::Kind::Aggregate,
+                                                batch_id: batch_id.to_string()
+                                            }
+                                        )
+                                        .into_future()
+                                    );
                                 },                                    
 
                                 ProofKind::Groth16(batch_id, blob) => {
@@ -782,7 +804,21 @@ async fn main() -> anyhow::Result<()> {
                                         "Received Groth16 proof for from `{}`",
                                         prover_peer_id,
                                     );
-                                    pipeline.add_groth16_proof(batch_id, blob, prover_id);                              
+                                    pipeline.add_groth16_proof(batch_id, blob.clone(), prover_id.clone());
+                                    db_insert_futures.push(
+                                        col_proofs.insert_one(
+                                            db::Proof {
+                                                job_id: db_job_oid.clone(),
+                                                prover: prover_id,
+                                                blob: Some(blob),
+                                                hash: token.hash.to_string(),
+                                                round_number: None,
+                                                kind: db::Kind::Groth16,
+                                                batch_id: batch_id.to_string()
+                                            }
+                                        )
+                                        .into_future()
+                                    );
                                 },
                             };
                         },
@@ -807,7 +843,21 @@ async fn main() -> anyhow::Result<()> {
                             );
                             pipeline.add_final_agg_proof(
                                 peer_id.to_bytes(),
-                                blob
+                                blob.clone()
+                            );
+                            db_insert_futures.push(
+                                col_proofs.insert_one(
+                                    db::Proof {
+                                        job_id: db_job_oid.clone(),
+                                        prover: peer_id.to_bytes(),
+                                        hash: xxh3_128(&blob).to_string(),
+                                        blob: Some(blob),
+                                        round_number: Some(pipeline.cur_agg_round_number() as u32),
+                                        kind: db::Kind::Aggregate,
+                                        batch_id: 0u128.to_string()
+                                    }
+                                )
+                                .into_future()
                             );
                         },
 
