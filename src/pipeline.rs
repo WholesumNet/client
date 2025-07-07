@@ -16,7 +16,6 @@ use risc0_zkvm::{
     Groth16Receipt,
     AssetRequest,
     Digest,
-    sha::Digestible
 };
 use hex::FromHex;
 
@@ -91,7 +90,7 @@ impl Round {
         if self.inputs.contains_key(&index) {
             return
         }
-        info!("New input with index `{index}` has arrived.");
+        // info!("New input with index `{index}` has arrived.");
         self.inputs.insert(index, input);
         //@ handle 0th proof in join
         let batch_index = index / self.batch_size;
@@ -123,8 +122,8 @@ impl Round {
                 self.inverse_batch_ids.insert(batch_index, batch_id);
             }
         }
-        info!("partial-batches: {:?}", self.partial_batches);
-        info!("batches: {:?}", self.batches);
+        // info!("partial-batches: {:?}", self.partial_batches);
+        // info!("batches: {:?}", self.batches);
     }
 
     // no new input is expected, so upgrade the partial batch into a full batch
@@ -150,6 +149,12 @@ impl Round {
             self.batch_ids.insert(batch_id, *index);
             self.inverse_batch_ids.insert(*index, batch_id);            
         }
+        info!(
+            "No more feeds for round `{}`, inputs: `{}`, batches: `{}`",
+            self.number,
+            self.inputs.len(),
+            self.batches.len()
+        );
     }
 
     // assign a batch to prover
@@ -213,7 +218,7 @@ impl Round {
         } else {
             0
         };
-        info!("outstanding: {outstanding_batches:?}, sbi: {selected_batch_index}, batches: {:?}", self.batches);
+        // info!("outstanding: {outstanding_batches:?}, sbi: {selected_batch_index}, batches: {:?}", self.batches);
         // let selected_batch = outstanding_batches[selected_batch_index];
         let assignment = self.batches[&selected_batch_index]
             .iter()
@@ -334,11 +339,11 @@ impl Pipeline {
             return
         }
         // batch blob size table
-        // a- segment round(max segment blob size ~1mb with po2=21)
+        // a- segment round(max segment blob size ~10mb with po2=21)
         // batch length    total blob size
-        // 2               2mb
-        // 4               4mb
-        // 8               8mb
+        // 2               20mb
+        // 4               40mb
+        // 8               80mb
         //
         // b- join rounds(max proof blob size ~256kb)
         // batch length    total blob size
@@ -351,11 +356,7 @@ impl Pipeline {
             _ => 8,
         };
         let mut new_round = Round::new(prev_round.number + 1, batch_size);
-        info!(
-            "A new round `{}` has begun, there will be up to `{}` batches in total.",            
-            prev_round.number + 1,
-            prev_round.proofs.len() / batch_size + 1
-        );
+        info!("A new round `{}` has begun", prev_round.number + 1);
         for (index, proofs) in prev_round.proofs.iter() {
             // use the first proof
             let (prover, proof) = proofs
@@ -369,18 +370,10 @@ impl Pipeline {
     }
 
     pub fn feed_segment(&mut self, index: usize, blob: Vec<u8>) {
-        if self.agg_rounds.len() > 1 {
-            warn!("Received segment but we are aggregating proofs.");
-            return
-        }        
         self.agg_rounds[0].feed_input(index, Input::Blob(blob));
     }
 
     pub fn stop_segment_feeding(&mut self) {
-        if self.agg_rounds.len() > 1 {
-            warn!("Received stop segment feeding in the wrong round.");
-            return
-        }
         self.agg_rounds[0].stop_feeding();
     }
 
@@ -425,7 +418,6 @@ impl Pipeline {
         &mut self,
         blob: &[u8]
     ) {            
-        info!("Received assumption feed.");
         let first_round = self.ass_rounds.first_mut().unwrap();
         first_round.feed_input(
             first_round.inputs.len(),
@@ -434,9 +426,10 @@ impl Pipeline {
     }
 
     pub fn stop_assumption_feeding(&mut self) {        
-        let first_round = self.ass_rounds.first_mut().unwrap();
-        first_round.stop_feeding();
-        info!("Total assumptions: `{}`", first_round.inputs.len());
+        self.ass_rounds
+            .first_mut()
+            .unwrap()
+            .stop_feeding();
     }
 
     pub fn assign_assumption_batch(

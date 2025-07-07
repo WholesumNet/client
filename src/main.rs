@@ -339,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
                     let data = stream.as_sequence().unwrap();
                     // let _stream_name = &data[0];
                     let contents = data[1].as_sequence().unwrap();
+                    let mut blob_lens = vec![];
                     for object in contents { 
                         let segments = object.as_sequence().unwrap();                        
                         // object[1] is valkey generated id
@@ -350,8 +351,7 @@ async fn main() -> anyhow::Result<()> {
 
                                 Err(err_msg) => {
                                     if str_id.eq_ignore_ascii_case("<DONE>") {
-                                        info!("All segments have been read from the ValKey server.");
-                                        pipeline.stop_segment_feeding();
+                                        continue
                                     } else {
                                         warn!("Invalid segment id `{str_id}` from the ValKey server: `{err_msg}");
                                     }
@@ -362,13 +362,21 @@ async fn main() -> anyhow::Result<()> {
                             continue
                         };
                         let blob = if let redis::Value::BulkString(blob) = &segment_data[1] {
+                            blob_lens.push(blob.len());
                             blob.to_owned()
                         } else {
                             continue
                         };
                         pipeline.feed_segment(id as usize, blob);                        
                     }
-                }                
+                    info!("All segments have been read from the ValKey server.");
+                    info!(
+                        "Largest blob size: `{}`, smallest blob size: `{}`",
+                        blob_lens.iter().max().unwrap(),
+                        blob_lens.iter().min().unwrap()
+                    );
+                    pipeline.stop_segment_feeding();
+                }
             },
 
             // zeth keccak items are ready
@@ -385,12 +393,11 @@ async fn main() -> anyhow::Result<()> {
                     //let _last_id = &objects[0];
                     let assumptions = objects[1].as_sequence().unwrap();
                     let num_assumptions = objects[1].as_sequence().unwrap().len() / 2;
+                    let mut blob_lens = vec![];
                     for i in 0..num_assumptions {
                         if let redis::Value::BulkString(bs) = &assumptions[i * 2] {                            
                             let cd_str = String::from_utf8_lossy(&bs).to_string();
-                            if cd_str.eq_ignore_ascii_case("<DONE>") {
-                                info!("All Keccak assumptions have been read from the ValKey server.");
-                                pipeline.stop_assumption_feeding();
+                            if cd_str.eq_ignore_ascii_case("<done>") {                                
                                 continue
                             }
                         } else {
@@ -398,14 +405,22 @@ async fn main() -> anyhow::Result<()> {
                             continue
                         };
                         let blob = if let redis::Value::BulkString(blob) = &assumptions[i * 2 + 1] {
+                            blob_lens.push(blob.len());
                             blob
                         } else {
                             continue
                         };
                         pipeline.feed_assumption(&blob);
                     }
-                }                
-            },            
+                    info!("All Keccak assumptions have been read from the ValKey server.");
+                    info!(
+                        "Largest blob size: `{}`, smallest blob size: `{}`",
+                        blob_lens.iter().max().unwrap(),
+                        blob_lens.iter().min().unwrap()
+                    );
+                    pipeline.stop_assumption_feeding();
+                }
+            },
 
             res = db_insert_futures.select_next_some() => {
                 match res {
