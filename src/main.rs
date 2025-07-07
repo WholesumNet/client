@@ -283,29 +283,54 @@ async fn main() -> anyhow::Result<()> {
                     )
                 {            
                     // warn!("Need compute gossip failed, error: `{err_msg:?}`");
-                }                
+                }
             },
 
-            //@ ask for the stark proof
+            // request transfer of final proofs periodically
             _i = timer_retrieve_agg_proof.select_next_some() => {
-                if pipeline.stage == pipeline::Stage::Assumption &&
-                   pipeline.agg_proof.is_none()
-                {
-                    let (prover, hash)  = pipeline.agg_proof_token();
-                    let peer_id = PeerId::from_bytes(&prover).unwrap();
-                    let _req_id = swarm
-                        .behaviour_mut()
-                        .req_resp
-                        .send_request(
-                            &peer_id,
-                            protocol::Request::TransferBlob(hash),
+                match pipeline.stage {
+                    pipeline::Stage::Assumption => {
+                        if pipeline.agg_proof.is_some() {
+                            continue
+                        }
+                        let (prover, hash)  = pipeline.final_agg_proof_token();
+                        let peer_id = PeerId::from_bytes(&prover).unwrap();
+                        let _req_id = swarm
+                            .behaviour_mut()
+                            .req_resp
+                            .send_request(
+                                &peer_id,
+                                protocol::Request::TransferBlob(hash),
+                            );
+                        info!(
+                            "Requested transfer of the final aggregated proof blob `{}` from `{}`.",
+                            hash,
+                            peer_id
                         );
-                    info!(
-                        "Requested transfer of the aggregated proof blob `{}` from `{}`.",
-                        hash,
-                        peer_id
-                    );
-                }
+                    },
+
+                    pipeline::Stage::Resolve => {
+                        if pipeline.ass_proof.is_some() {
+                            continue
+                        }
+                        let (prover, hash)  = pipeline.final_ass_proof_token();
+                        let peer_id = PeerId::from_bytes(&prover).unwrap();
+                        let _req_id = swarm
+                            .behaviour_mut()
+                            .req_resp
+                            .send_request(
+                                &peer_id,
+                                protocol::Request::TransferBlob(hash),
+                            );
+                        info!(
+                            "Requested transfer of the final assumption proof blob `{}` from `{}`.",
+                            hash,
+                            peer_id
+                        );                        
+                    },
+
+                    _ => {}
+                };
             },
 
             // zeth segments are ready

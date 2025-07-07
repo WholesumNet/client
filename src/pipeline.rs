@@ -281,7 +281,8 @@ pub struct Pipeline {
     pub agg_proof: Option<SuccinctReceipt<ReceiptClaim>>,
 
     ass_rounds: Vec<Round>,
-    ass_proof: Option<SuccinctReceipt<Unknown>>,
+    // the final assumption proof(a SuccinctReceipt)
+    pub ass_proof: Option<SuccinctReceipt<Unknown>>,
 
     groth16_round: Round,
 
@@ -667,10 +668,7 @@ impl Pipeline {
             warn!("The peer is not among the provers who generated the proof.");
         }
         self.agg_proof = match bincode::deserialize::<SuccinctReceipt<ReceiptClaim>>(&blob) {
-            Ok(sr) => {
-                info!("final proof: {sr:#?}");
-                Some(sr)
-            },
+            Ok(sr) => Some(sr),
 
             Err(e) => {
                 warn!("Proof is invalid: `{e:?}`");
@@ -681,8 +679,22 @@ impl Pipeline {
         // self.resolve_assumptions();
     }
 
-    pub fn agg_proof_token(&self) -> (Vec<u8>, u128) {
+    pub fn final_agg_proof_token(&self) -> (Vec<u8>, u128) {
         self.agg_rounds
+            .last()
+            .unwrap()
+            .proofs
+            .values()
+            .nth(0)
+            .unwrap()
+            .iter()
+            .nth(0)
+            .map(|(prover, proof)| (prover.clone(), proof.hash))
+            .unwrap()
+    }
+
+    pub fn final_ass_proof_token(&self) -> (Vec<u8>, u128) {
+        self.ass_rounds
             .last()
             .unwrap()
             .proofs
