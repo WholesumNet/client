@@ -842,7 +842,7 @@ async fn main() -> anyhow::Result<()> {
                                         "Received Groth16 proof for from `{}`",
                                         prover_peer_id,
                                     );
-                                    pipeline.add_groth16_proof(batch_id, blob.clone(), prover_id.clone());
+                                    pipeline.add_groth16_proof(batch_id, &blob, prover_id.clone());
                                     db_insert_futures.push(
                                         col_proofs.insert_one(
                                             db::Proof {

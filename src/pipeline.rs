@@ -28,8 +28,6 @@ pub struct Schema {
 
 #[derive(Debug, Clone)]
 pub struct Proof {
-    pub blob: Option<Vec<u8>>,
-
     pub hash: u128,
 }
 
@@ -403,7 +401,6 @@ impl Pipeline {
             }
         };
         let proof = Proof {
-            blob: None,
             hash: hash
         };
         round.proofs
@@ -582,7 +579,6 @@ impl Pipeline {
             }
         };
         let proof = Proof {
-            blob: None,
             hash: hash
         };
         last_round.proofs
@@ -721,10 +717,10 @@ impl Pipeline {
     pub fn add_groth16_proof(
         &mut self,
         batch_id: u128,
-        blob: Vec<u8>,
+        blob: &Vec<u8>,
         prover: Vec<u8>
     ) {
-        let groth16_receipt = match bincode::deserialize::<Groth16Receipt<ReceiptClaim>>(&blob) {
+        let groth16_receipt = match bincode::deserialize::<Groth16Receipt<ReceiptClaim>>(blob) {
             Ok(g) => g,
 
             Err(e) => {
@@ -741,9 +737,8 @@ impl Pipeline {
                 return
             }
         };
-        let hash = xxh3_128(&blob);        
+        let hash = xxh3_128(blob);        
         let proof = Proof {
-            blob: Some(blob),
             hash: hash
         };
         self.groth16_round.proofs
