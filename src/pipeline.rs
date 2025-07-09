@@ -776,11 +776,12 @@ impl Pipeline {
         };
         if let Ok(_) = r0_client
             .verify(
-                receipt.try_into().unwrap(),
+                receipt.clone().try_into().unwrap(),
                 self.image_id
             )
         {
             info!("Groth16 proof is verified, viola!");
+            fs::write("groth16.proof", bincode::serialize(&receipt).unwrap()).unwrap();
         }
     }
 }
