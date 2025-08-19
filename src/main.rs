@@ -283,29 +283,54 @@ async fn main() -> anyhow::Result<()> {
                     )
                 {            
                     // warn!("Need compute gossip failed, error: `{err_msg:?}`");
-                }                
+                }
             },
 
-            //@ ask for the stark proof
+            // request transfer of final proofs periodically
             _i = timer_retrieve_agg_proof.select_next_some() => {
-                if pipeline.stage == pipeline::Stage::Resolve &&
-                   pipeline.agg_proof.is_none()
-                {
-                    let (prover, hash)  = pipeline.agg_proof_token();
-                    let peer_id = PeerId::from_bytes(&prover).unwrap();
-                    let _req_id = swarm
-                        .behaviour_mut()
-                        .req_resp
-                        .send_request(
-                            &peer_id,
-                            protocol::Request::TransferBlob(hash),
+                match pipeline.stage {
+                    pipeline::Stage::Assumption => {
+                        if pipeline.agg_proof.is_some() {
+                            continue
+                        }
+                        let (prover, hash)  = pipeline.final_agg_proof_token();
+                        let peer_id = PeerId::from_bytes(&prover).unwrap();
+                        let _req_id = swarm
+                            .behaviour_mut()
+                            .req_resp
+                            .send_request(
+                                &peer_id,
+                                protocol::Request::TransferBlob(hash),
+                            );
+                        info!(
+                            "Requested transfer of the final aggregated proof blob `{}` from `{}`.",
+                            hash,
+                            peer_id
                         );
-                    info!(
-                        "Requested transfer of the aggregated proof blob `{}` from `{}`.",
-                        hash,
-                        peer_id
-                    );
-                }
+                    },
+
+                    pipeline::Stage::Resolve => {
+                        if pipeline.ass_proof.is_some() {
+                            continue
+                        }
+                        let (prover, hash)  = pipeline.final_ass_proof_token();
+                        let peer_id = PeerId::from_bytes(&prover).unwrap();
+                        let _req_id = swarm
+                            .behaviour_mut()
+                            .req_resp
+                            .send_request(
+                                &peer_id,
+                                protocol::Request::TransferBlob(hash),
+                            );
+                        info!(
+                            "Requested transfer of the final assumption proof blob `{}` from `{}`.",
+                            hash,
+                            peer_id
+                        );                        
+                    },
+
+                    _ => {}
+                };
             },
 
             // zeth segments are ready
@@ -314,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
                     let data = stream.as_sequence().unwrap();
                     // let _stream_name = &data[0];
                     let contents = data[1].as_sequence().unwrap();
+                    let mut blob_lens = vec![];
                     for object in contents { 
                         let segments = object.as_sequence().unwrap();                        
                         // object[1] is valkey generated id
@@ -325,8 +351,7 @@ async fn main() -> anyhow::Result<()> {
 
                                 Err(err_msg) => {
                                     if str_id.eq_ignore_ascii_case("<DONE>") {
-                                        info!("All segments have been received from the ValKey server.");
-                                        pipeline.stop_segment_feeding();
+                                        continue
                                     } else {
                                         warn!("Invalid segment id `{str_id}` from the ValKey server: `{err_msg}");
                                     }
@@ -337,13 +362,21 @@ async fn main() -> anyhow::Result<()> {
                             continue
                         };
                         let blob = if let redis::Value::BulkString(blob) = &segment_data[1] {
+                            blob_lens.push(blob.len());
                             blob.to_owned()
                         } else {
                             continue
                         };
                         pipeline.feed_segment(id as usize, blob);                        
                     }
-                }                
+                    info!("All segments have been read from the ValKey server.");
+                    info!(
+                        "Largest blob size: `{}`, smallest blob size: `{}`",
+                        blob_lens.iter().max().unwrap(),
+                        blob_lens.iter().min().unwrap()
+                    );
+                    pipeline.stop_segment_feeding();
+                }
             },
 
             // zeth keccak items are ready
@@ -360,11 +393,11 @@ async fn main() -> anyhow::Result<()> {
                     //let _last_id = &objects[0];
                     let assumptions = objects[1].as_sequence().unwrap();
                     let num_assumptions = objects[1].as_sequence().unwrap().len() / 2;
+                    let mut blob_lens = vec![];
                     for i in 0..num_assumptions {
                         if let redis::Value::BulkString(bs) = &assumptions[i * 2] {                            
                             let cd_str = String::from_utf8_lossy(&bs).to_string();
-                            if cd_str.eq_ignore_ascii_case("<DONE>") {
-                                info!("All Keccak assumptions have been received from the ValKey server.");
+                            if cd_str.eq_ignore_ascii_case("<done>") {                                
                                 continue
                             }
                         } else {
@@ -372,14 +405,22 @@ async fn main() -> anyhow::Result<()> {
                             continue
                         };
                         let blob = if let redis::Value::BulkString(blob) = &assumptions[i * 2 + 1] {
+                            blob_lens.push(blob.len());
                             blob
                         } else {
                             continue
                         };
                         pipeline.feed_assumption(&blob);
-                    }                    
-                }                
-            },            
+                    }
+                    info!("All Keccak assumptions have been read from the ValKey server.");
+                    info!(
+                        "Largest blob size: `{}`, smallest blob size: `{}`",
+                        blob_lens.iter().max().unwrap(),
+                        blob_lens.iter().min().unwrap()
+                    );
+                    pipeline.stop_assumption_feeding();
+                }
+            },
 
             res = db_insert_futures.select_next_some() => {
                 match res {
@@ -561,7 +602,7 @@ async fn main() -> anyhow::Result<()> {
                                         Some((i, a)) => (i, a),
 
                                         None => {                                    
-                                            warn!("No Groth16 jobs for `{prover_peer_id:?}` at this time.");
+                                            // warn!("No Groth16 jobs for `{prover_peer_id:?}` at this time.");
                                             continue
                                         }
                                     };
@@ -608,7 +649,7 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 },
 
-                                pipeline::Stage::Resolve => {
+                                pipeline::Stage::Assumption => {
                                     //@ ask for agg proof blob here too?
                                     // if pipeline.num_outstanding_resolve_items() == 0 {
                                     //     continue
@@ -619,7 +660,7 @@ async fn main() -> anyhow::Result<()> {
                                         Some((i, a)) => (i, a),
 
                                         None => {                                    
-                                            warn!("No assumption jobs for `{prover_peer_id:?}` at this time.");
+                                            // warn!("No assumption jobs for `{prover_peer_id:?}` at this time.");
                                             //@ send resolve jobs if possible
                                             continue
                                         }
@@ -628,25 +669,21 @@ async fn main() -> anyhow::Result<()> {
                                         id: pipeline.id,
                                         kind: protocol::JobKind::Assumption(
                                             protocol::AssumptionDetails {
+                                                id: batch_id,
+                                                blobs_are_keccak: pipeline.cur_ass_round_number() == 0usize,
                                                 batch: assignments
                                                     .into_iter()
                                                     .map(|ass| {
                                                         match ass {
                                                             pipeline::Input::Blob(blob) => 
-                                                                (
-                                                                    batch_id,
-                                                                    protocol::InputBlob::Blob(blob)
-                                                                ),
+                                                                protocol::InputBlob::Blob(blob),
 
                                                             pipeline::Input::Token(prover, proof) => 
-                                                                (
-                                                                    batch_id,
-                                                                    protocol::InputBlob::Token(
-                                                                        proof.hash,
-                                                                        prover,
-                                                                    )
+                                                                protocol::InputBlob::Token(
+                                                                    proof.hash,
+                                                                    prover,
                                                                 )
-                                                        }
+                                                        }                                                        
                                                     })
                                                 .collect()
                                             }
@@ -674,7 +711,7 @@ async fn main() -> anyhow::Result<()> {
                                         Some((i, a)) => (i, a),
 
                                         None => {                                    
-                                            warn!("No aggregate jobs for `{prover_peer_id:?}` at this time.");
+                                            // warn!("No aggregate jobs for `{prover_peer_id:?}` at this time.");
                                             //@ send resolve jobs if possible
                                             continue
                                         }
@@ -717,7 +754,9 @@ async fn main() -> anyhow::Result<()> {
                                         pipeline.confirm_agg_assignment(&prover_id, batch_id);
                                         info!("Sent the aggregate job to `{prover_peer_id}`.");
                                     }
-                                }
+                                },
+
+                                pipeline::Stage::Resolve => {},
                             };
                         },
 
@@ -730,7 +769,7 @@ async fn main() -> anyhow::Result<()> {
 
                             let prover_id = prover_peer_id.to_bytes();
                             match token.kind {
-                                ProofKind::Assumption(batch_id, blob) => {
+                                ProofKind::Assumption(batch_id) => {
                                     info!(
                                         "Received assumption proof for batch index `{}` from `{}`",
                                         batch_id,
@@ -738,15 +777,29 @@ async fn main() -> anyhow::Result<()> {
                                     );
                                     pipeline.add_assumption_proof(
                                         batch_id,
-                                        blob.clone(),
+                                        token.hash,
                                         prover_id.clone()
                                     );
+                                    if pipeline.stage == pipeline::Stage::Resolve {
+                                        let _req_id = swarm
+                                            .behaviour_mut()
+                                            .req_resp
+                                            .send_request(
+                                                &prover_peer_id,
+                                                protocol::Request::TransferBlob(token.hash),
+                                            );
+                                        info!(
+                                            "Requested transfer of the final assumption proof blob `{}` from `{}`.",
+                                            token.hash,
+                                            prover_peer_id
+                                        );
+                                    }
                                     db_insert_futures.push(
                                         col_proofs.insert_one(
                                             db::Proof {
                                                 job_id: db_job_oid.clone(),
                                                 prover: prover_id,
-                                                blob: Some(blob),
+                                                blob: None,
                                                 hash: token.hash.to_string(),
                                                 round_number: None,
                                                 kind: db::Kind::Assumption,
@@ -768,7 +821,7 @@ async fn main() -> anyhow::Result<()> {
                                         token.hash,
                                         prover_id.clone()
                                     );
-                                    if pipeline.stage == pipeline::Stage::Resolve {
+                                    if pipeline.stage == pipeline::Stage::Assumption {
                                         let _req_id = swarm
                                             .behaviour_mut()
                                             .req_resp
@@ -804,7 +857,7 @@ async fn main() -> anyhow::Result<()> {
                                         "Received Groth16 proof for from `{}`",
                                         prover_peer_id,
                                     );
-                                    pipeline.add_groth16_proof(batch_id, blob.clone(), prover_id.clone());
+                                    pipeline.add_groth16_proof(batch_id, &blob, prover_id.clone());
                                     db_insert_futures.push(
                                         col_proofs.insert_one(
                                             db::Proof {
@@ -837,28 +890,60 @@ async fn main() -> anyhow::Result<()> {
                 })) => {                
                     match response {
                         protocol::Response::BlobIsReady(blob) => {
-                            info!(
-                                "Received the final aggregated proof from `{}`",
-                                peer_id,
-                            );
-                            pipeline.add_final_agg_proof(
-                                peer_id.to_bytes(),
-                                blob.clone()
-                            );
-                            db_insert_futures.push(
-                                col_proofs.insert_one(
-                                    db::Proof {
-                                        job_id: db_job_oid.clone(),
-                                        prover: peer_id.to_bytes(),
-                                        hash: xxh3_128(&blob).to_string(),
-                                        blob: Some(blob),
-                                        round_number: Some(pipeline.cur_agg_round_number() as u32),
-                                        kind: db::Kind::Aggregate,
-                                        batch_id: 0u128.to_string()
-                                    }
-                                )
-                                .into_future()
-                            );
+                            match pipeline.stage {
+                                pipeline::Stage::Assumption => {
+                                    info!(
+                                        "Received the final aggregated proof from `{}`",
+                                        peer_id,
+                                    );
+                                    pipeline.add_final_agg_proof(
+                                        peer_id.to_bytes(),
+                                        blob.clone()
+                                    );
+                                    db_insert_futures.push(
+                                        col_proofs.insert_one(
+                                            db::Proof {
+                                                job_id: db_job_oid.clone(),
+                                                prover: peer_id.to_bytes(),
+                                                hash: xxh3_128(&blob).to_string(),
+                                                blob: Some(blob),
+                                                round_number: Some(pipeline.cur_agg_round_number() as u32),
+                                                kind: db::Kind::Aggregate,
+                                                batch_id: 0u128.to_string()
+                                            }
+                                        )
+                                        .into_future()
+                                    );
+                                },
+
+                                pipeline::Stage::Resolve => {
+                                    info!(
+                                        "Received the final assumption proof from `{}`",
+                                        peer_id,
+                                    );
+                                    pipeline.add_final_ass_proof(
+                                        peer_id.to_bytes(),
+                                        blob.clone()
+                                    );
+                                    db_insert_futures.push(
+                                        col_proofs.insert_one(
+                                            db::Proof {
+                                                job_id: db_job_oid.clone(),
+                                                prover: peer_id.to_bytes(),
+                                                hash: xxh3_128(&blob).to_string(),
+                                                blob: Some(blob),
+                                                round_number: Some(pipeline.cur_ass_round_number() as u32),
+                                                kind: db::Kind::Assumption,
+                                                batch_id: 0u128.to_string()
+                                            }
+                                        )
+                                        .into_future()
+                                    );
+                                },
+
+                                _ => {}
+                            }
+
                         },
 
                         _ => {},
