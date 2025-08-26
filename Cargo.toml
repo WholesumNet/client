@@ -1,11 +1,23 @@
-[package]
-name = "client"
+[workspace]
+members = [    
+    "bin"
+]
+exclude = []
+resolver = "2"
+
+[profile.release-with-debug]
+inherits = "release"
+debug-assertions = true
+debug = true
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[dependencies]
+[workspace.dependencies]
+
 serde = {version = "1.0", features = ["derive"]}
 toml = "0.7"
 async-trait = "0.1"
@@ -29,7 +41,7 @@ hex = "0.4.3"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 serde_json = "1.0.134"
 rand = "0.9.1"
-risc0-zkvm = { version = "^2.3", features = ["prove"] }
+risc0-zkvm = { version = "2.3.1", features = ["prove"] }
 mongodb = "3.1.0"
 redis = { version = "0.32", features = ["tokio-comp"] }
 tokio = "1.45.1"

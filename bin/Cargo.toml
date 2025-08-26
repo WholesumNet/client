@@ -1,0 +1,40 @@
+[package]
+name = "client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+libp2p.workspace = true
+num_enum.workspace = true
+clap.workspace = true
+log.workspace = true
+env_logger.workspace = true
+uuid.workspace = true
+home.workspace = true
+reqwest.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+bincode.workspace = true
+byteorder.workspace = true
+bs58.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+hex.workspace = true
+xxhash-rust.workspace = true
+serde_json.workspace = true
+rand.workspace = true
+risc0-zkvm.workspace = true
+mongodb.workspace = true
+redis.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+
+peyk.workspace = true
+
+# [[bin]]
+# name = "subblock"
+# path = "subblock.rs"
