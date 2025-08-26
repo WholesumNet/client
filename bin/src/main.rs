@@ -607,7 +607,7 @@ async fn main() -> anyhow::Result<()> {
                                     };
                                     let compute_job = protocol::ComputeJob {
                                         id: pipeline.id,
-                                        kind: protocol::JobKind::Groth16(
+                                        kind: protocol::JobKind::R0(protocol::R0Op::Groth16(
                                             protocol::Groth16Details {
                                                 batch: assignments
                                                     .into_iter()
@@ -631,7 +631,7 @@ async fn main() -> anyhow::Result<()> {
                                                     })
                                                 .collect()
                                             }
-                                        )
+                                        ))
                                     };
                                     if let Err(_e) = swarm
                                         .behaviour_mut()
@@ -666,7 +666,7 @@ async fn main() -> anyhow::Result<()> {
                                     };
                                     let compute_job = protocol::ComputeJob {
                                         id: pipeline.id,
-                                        kind: protocol::JobKind::Assumption(
+                                        kind: protocol::JobKind::R0(protocol::R0Op::Assumption(
                                             protocol::AssumptionDetails {
                                                 id: batch_id,
                                                 blobs_are_keccak: pipeline.cur_ass_round_number() == 0usize,
@@ -686,7 +686,7 @@ async fn main() -> anyhow::Result<()> {
                                                     })
                                                 .collect()
                                             }
-                                        )
+                                        ))
                                     };
                                     if let Err(e) = swarm
                                         .behaviour_mut()
@@ -718,7 +718,7 @@ async fn main() -> anyhow::Result<()> {
                                     //@ unify segment and join into one job   
                                     let compute_job = protocol::ComputeJob {
                                         id: pipeline.id,
-                                        kind: protocol::JobKind::Aggregate(
+                                        kind: protocol::JobKind::R0(protocol::R0Op::Aggregate(
                                             protocol::AggregateDetails {
                                                 id: batch_id,
                                                 blobs_are_segment: pipeline.cur_agg_round_number() == 0usize,
@@ -738,7 +738,7 @@ async fn main() -> anyhow::Result<()> {
                                                     })
                                                 .collect()
                                             }
-                                        )
+                                        ))
                                     };
                                     if let Err(e) = swarm
                                         .behaviour_mut()
