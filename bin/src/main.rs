@@ -68,10 +68,10 @@ mod db;
 #[command(name = "Client CLI for Wholesum")]
 #[command(author = "Wholesum team")]
 #[command(version = "1.0")]
-#[command(about = "Wholesum is a p2p prover network and \
-                   this program is a CLI for client nodes.",
-          long_about = None)
-]
+#[command(about = "Wholesum is a p2p prover network for ETH L1 block proving. \
+                   This program is a CLI for the unified client node.",
+          long_about = None
+)]
 struct Cli {
     #[arg(long, action)]
     dev: bool,
@@ -109,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Operating mode: `{}` network",
         if false == cli.dev {"global"} else {"local(development)"}
     );
+    info!("Proving blocks in a unified fasion.");
 
     // setup mongodb
     let db_client = mongodb_setup("mongodb://localhost:27017").await?;

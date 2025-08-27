@@ -35,6 +35,6 @@ tokio-stream.workspace = true
 
 peyk.workspace = true
 
-# [[bin]]
-# name = "subblock"
-# path = "subblock.rs"
+[[bin]]
+name = "subblock"
+path = "src/subblock.rs"
