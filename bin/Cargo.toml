@@ -33,6 +33,7 @@ redis.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 
+pipeline = { path = "../pipeline" }
 peyk.workspace = true
 
 [[bin]]

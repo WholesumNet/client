@@ -1,5 +1,6 @@
 [workspace]
 members = [    
+    "pipeline",
     "bin"
 ]
 exclude = []
@@ -46,7 +47,7 @@ rand = "0.9.1"
 risc0-zkvm = { version = "2.3.1", features = ["prove"] }
 
 # sp1
-sp1-sdk = { version = "4.1.7", features = ["verify"] }
+sp1-zkvm = { version = "=4.1.7", features = ["verify"] }
 
 mongodb = "3.1.0"
 redis = { version = "0.32", features = ["tokio-comp"] }

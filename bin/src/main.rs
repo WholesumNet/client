@@ -58,8 +58,10 @@ use peyk::{
     }
 };
 
-mod pipeline;
-use pipeline::Pipeline;
+use pipeline::{
+    r0_unified::Pipeline,
+    r0_unified::Stage,
+};
 
 mod db;
 
@@ -259,7 +261,7 @@ async fn main() -> anyhow::Result<()> {
             _i = timer_post_job.select_next_some() => {
                 let need = match pipeline.stage {
                     // request for groth16 proving
-                    pipeline::Stage::Groth16 => {
+                    Stage::Groth16 => {
                         let nonce = rng.random::<u32>();
                         protocol::NeedKind::Groth16(nonce)
                     },
@@ -289,7 +291,7 @@ async fn main() -> anyhow::Result<()> {
             // request transfer of final proofs periodically
             _i = timer_retrieve_agg_proof.select_next_some() => {
                 match pipeline.stage {
-                    pipeline::Stage::Assumption => {
+                    Stage::Assumption => {
                         if pipeline.agg_proof.is_some() {
                             continue
                         }
@@ -309,7 +311,7 @@ async fn main() -> anyhow::Result<()> {
                         );
                     },
 
-                    pipeline::Stage::Resolve => {
+                    Stage::Resolve => {
                         if pipeline.ass_proof.is_some() {
                             continue
                         }
@@ -595,7 +597,7 @@ async fn main() -> anyhow::Result<()> {
                         protocol::Request::WouldProve => {
                             let prover_id = prover_peer_id.to_bytes();
                             match pipeline.stage {
-                                pipeline::Stage::Groth16 => {                                    
+                                Stage::Groth16 => {                                    
                                     let (batch_id, assignments) = match pipeline
                                         .assign_groth16_batch(&prover_id)
                                     {
@@ -614,13 +616,13 @@ async fn main() -> anyhow::Result<()> {
                                                     .into_iter()
                                                     .map(|ass| {
                                                         match ass {
-                                                            pipeline::Input::Blob(blob) => 
+                                                            pipeline::r0_unified::Input::Blob(blob) => 
                                                                 (
                                                                     batch_id,
                                                                     protocol::InputBlob::Blob(blob)
                                                                 ),
 
-                                                            pipeline::Input::Token(prover, proof) => 
+                                                            pipeline::r0_unified::Input::Token(prover, proof) => 
                                                                 (
                                                                     batch_id,
                                                                     protocol::InputBlob::Token(
@@ -649,7 +651,7 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 },
 
-                                pipeline::Stage::Assumption => {
+                                Stage::Assumption => {
                                     //@ ask for agg proof blob here too?
                                     // if pipeline.num_outstanding_resolve_items() == 0 {
                                     //     continue
@@ -675,10 +677,10 @@ async fn main() -> anyhow::Result<()> {
                                                     .into_iter()
                                                     .map(|ass| {
                                                         match ass {
-                                                            pipeline::Input::Blob(blob) => 
+                                                            pipeline::r0_unified::Input::Blob(blob) => 
                                                                 protocol::InputBlob::Blob(blob),
 
-                                                            pipeline::Input::Token(prover, proof) => 
+                                                            pipeline::r0_unified::Input::Token(prover, proof) => 
                                                                 protocol::InputBlob::Token(
                                                                     proof.hash,
                                                                     prover,
@@ -704,7 +706,7 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 },
 
-                                pipeline::Stage::Aggregate => {
+                                Stage::Aggregate => {
                                     let (batch_id, assignments) = match pipeline
                                         .assign_agg_batch(&prover_id)
                                     {
@@ -727,10 +729,10 @@ async fn main() -> anyhow::Result<()> {
                                                     .into_iter()
                                                     .map(|ass| {
                                                         match ass {
-                                                            pipeline::Input::Blob(blob) => 
+                                                            pipeline::r0_unified::Input::Blob(blob) => 
                                                                 protocol::InputBlob::Blob(blob),
 
-                                                            pipeline::Input::Token(prover, proof) => 
+                                                            pipeline::r0_unified::Input::Token(prover, proof) => 
                                                                 protocol::InputBlob::Token(
                                                                     proof.hash,
                                                                     prover,
@@ -756,7 +758,7 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 },
 
-                                pipeline::Stage::Resolve => {},
+                                Stage::Resolve => {},
                             };
                         },
 
@@ -780,7 +782,7 @@ async fn main() -> anyhow::Result<()> {
                                         token.hash,
                                         prover_id.clone()
                                     );
-                                    if pipeline.stage == pipeline::Stage::Resolve {
+                                    if pipeline.stage == Stage::Resolve {
                                         let _req_id = swarm
                                             .behaviour_mut()
                                             .req_resp
@@ -821,7 +823,7 @@ async fn main() -> anyhow::Result<()> {
                                         token.hash,
                                         prover_id.clone()
                                     );
-                                    if pipeline.stage == pipeline::Stage::Assumption {
+                                    if pipeline.stage == Stage::Assumption {
                                         let _req_id = swarm
                                             .behaviour_mut()
                                             .req_resp
@@ -891,7 +893,7 @@ async fn main() -> anyhow::Result<()> {
                     match response {
                         protocol::Response::BlobIsReady(blob) => {
                             match pipeline.stage {
-                                pipeline::Stage::Assumption => {
+                                Stage::Assumption => {
                                     info!(
                                         "Received the final aggregated proof from `{}`",
                                         peer_id,
@@ -916,7 +918,7 @@ async fn main() -> anyhow::Result<()> {
                                     );
                                 },
 
-                                pipeline::Stage::Resolve => {
+                                Stage::Resolve => {
                                     info!(
                                         "Received the final assumption proof from `{}`",
                                         peer_id,
