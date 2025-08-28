@@ -59,8 +59,10 @@ use peyk::{
     }
 };
 
-// mod pipeline;
-// use pipeline::Pipeline;
+use pipeline::{
+    sp1_subblock::Pipeline,
+    sp1_subblock::Stage,
+};
 
 // mod db;
 
@@ -119,10 +121,7 @@ async fn main() -> anyhow::Result<()> {
     let redis_client = redis::Client::open("redis://127.0.0.1:6379/")?;
     let redis_con = redis_client.get_multiplexed_async_connection().await?;    
     let mut rsp_subblock_stdin_stream = subscribe_to_rsp_subblock_stdin_stream(redis_con.clone()).await;
-    let mut subblock_stdins = BTreeMap::new();
     let mut rsp_agg_stdin_stream = subscribe_to_rsp_agg_stdin_stream(redis_con.clone()).await;
-    let mut agg_stdin;
-
 
     // local libp2p key 
     let local_key = {
@@ -152,6 +151,7 @@ async fn main() -> anyhow::Result<()> {
     // let mut db_insert_futures = FuturesUnordered::new();
     // let mut db_update_futures = FuturesUnordered::new();
 
+    let mut pipeline = Pipeline::new()?;
     // let (mut pipeline, db_job_oid) = match &cli.job {
     //     Some(Commands::New{ job_file }) => {
     //         let pipeline = Pipeline::new(job_file)?;
@@ -258,8 +258,35 @@ async fn main() -> anyhow::Result<()> {
                     .get_closest_peers(random_peer_id);
             },
 
-            // post need prove
+            // post needs
             _i = timer_post_job.select_next_some() => {
+                let need = match pipeline.stage {
+                    // request for groth16 proving
+                    Stage::ExecuteSubblock => {
+                        let nonce = rng.random::<u32>();
+                        protocol::NeedKind::Execute(nonce)
+                    },
+
+                    // request for other kinds of proving
+                    // _ => {
+                    //     // let _outstanding_jobs = (
+                    //     //     pipeline.num_outstanding_aggregate_items() +
+                    //     //     pipeline.num_outstanding_resolve_items()
+                    //     // ) as u32;
+                    //     let nonce = rng.random::<u32>();
+                    //     protocol::NeedKind::Prove(nonce)
+                    // },
+                };
+                if let Err(_e) = swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(
+                        topic.clone(),
+                        bincode::serialize(&need)?
+                    )
+                {            
+                    // warn!("Need compute gossip failed, error: `{err_msg:?}`");
+                }
             },
 
             // request transfer of final proofs periodically
@@ -300,7 +327,7 @@ async fn main() -> anyhow::Result<()> {
                         } else {
                             continue
                         };
-                        subblock_stdins.insert(id as usize, blob);                        
+                        pipeline.feed_subblock_stdin(id as usize, blob);                        
                     }
                     info!("All subblock stdins have been read from the ValKey server.");
                     info!(
@@ -308,7 +335,7 @@ async fn main() -> anyhow::Result<()> {
                         blob_lens.iter().max().unwrap(),
                         blob_lens.iter().min().unwrap()
                     );
-                    // pipeline.stop_segment_feeding();
+                    pipeline.stop_subblock_stdin_feeding();
                 }
             },
 
@@ -346,7 +373,7 @@ async fn main() -> anyhow::Result<()> {
                         } else {
                             continue
                         };
-                        agg_stdin = blob;
+                        // pipeline.feed_aggregate_stdin(id as usize, blob);  
                     }
                     info!("Agg stdin has been read from the ValKey server.");
                     info!(
@@ -354,10 +381,215 @@ async fn main() -> anyhow::Result<()> {
                         blob_lens.iter().max().unwrap(),
                         blob_lens.iter().min().unwrap()
                     );
-                    // pipeline.stop_segment_feeding();
+                    // pipeline.stop_aggregate_stdin_feeding();
                 }
             },
 
+            // libp2p events
+            event = swarm.select_next_some() => match event {
+                
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    info!("Local node is listening on {address}");
+                },
+
+                // mdns events
+                SwarmEvent::Behaviour(
+                    MyBehaviourEvent::Mdns(
+                        mdns::Event::Discovered(list)
+                    )
+                ) => {
+                    for (peer_id, _multiaddr) in list {
+                        info!("mDNS discovered a new peer: {peer_id}");
+                        swarm
+                            .behaviour_mut()
+                            .gossipsub
+                            .add_explicit_peer(&peer_id);
+                    }                     
+                },
+
+                SwarmEvent::Behaviour(
+                    MyBehaviourEvent::Mdns(
+                        mdns::Event::Expired(list)
+                    )
+                ) => {
+                    for (peer_id, _multiaddr) in list {
+                        info!("mDNS discovered peer has expired: {peer_id}");
+                        swarm
+                            .behaviour_mut()
+                            .gossipsub
+                            .remove_explicit_peer(&peer_id);
+                    }
+                },
+
+                // identify events
+                SwarmEvent::Behaviour(MyBehaviourEvent::Identify(identify::Event::Received {
+                    peer_id,
+                    info,
+                    ..
+                })) => {
+                    // println!("Inbound identify event `{:#?}`", info);
+                    if false == cli.dev {
+                        for addr in info.listen_addrs {
+                            // if false == addr.iter().any(|item| item == &"127.0.0.1" || item == &"::1"){
+                            swarm
+                                .behaviour_mut()
+                                .kademlia
+                                .add_address(&peer_id, addr);
+                            // }
+                        }
+                    }
+                },
+
+                // gossipsub events
+                SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                    // propagation_source: peer_id,
+                    // message_id,
+                    // message,
+                    ..
+                })) => {
+                    // let msg_str = String::from_utf8_lossy(&message.data);
+                    // println!("Got message: '{}' with id: {id} from peer: {peer_id}",
+                    //          msg_str);
+                    // info!("received gossip message: {:#?}", message);                    
+                },
+
+                // requests
+                SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
+                    peer: prover_peer_id,
+                    message: request_response::Message::Request {
+                        request,
+                        channel,
+                        //request_id,
+                        ..
+                    }
+                })) => {                
+                    match request {
+                        // prover indicates her interest to compute                        
+                        protocol::Request::Would => {
+                            let prover_id = prover_peer_id.to_bytes();
+                            match pipeline.stage {                                
+                                
+                                Stage::ExecuteSubblock => {
+                                    let (batch_id, assignments) = match pipeline
+                                        .assign_execute_subblock_batch(&prover_id)
+                                    {
+                                        Some((i, a)) => (i, a),
+
+                                        None => {                                    
+                                            // warn!("No execute jobs for `{prover_peer_id:?}` at this time.");
+                                            continue
+                                        }
+                                    };  
+                                    let compute_job = protocol::ComputeJob {
+                                        id: pipeline.id,
+                                        kind: protocol::JobKind::SP1(protocol::SP1Op::Execute(
+                                            protocol::ExecuteDetails {
+                                                id: batch_id,
+                                                batch: assignments
+                                                    .into_iter()
+                                                    .map(|ass| {
+                                                        match ass {
+                                                            pipeline::sp1_subblock::Input::Blob(blob) => 
+                                                                protocol::InputBlob::Blob(blob),
+
+                                                            pipeline::sp1_subblock::Input::Token(prover, proof) => 
+                                                                protocol::InputBlob::Token(
+                                                                    proof.hash,
+                                                                    prover,
+                                                                )
+                                                        }                                                        
+                                                    })
+                                                .collect()
+                                            }
+                                        ))
+                                    };
+                                    if let Err(e) = swarm
+                                        .behaviour_mut()
+                                        .req_resp
+                                            .send_response(
+                                                channel,
+                                                protocol::Response::Job(compute_job)
+                                            )
+                                    {
+                                        warn!("Failed to send the subblock job for execution: `{e:?}`");
+                                    } else {
+                                        pipeline.confirm_execute_subblock_batch_assignment(
+                                            &prover_id,
+                                            batch_id
+                                        );
+                                        info!("Sent the subblock execute job to `{prover_peer_id}`.");
+                                    }
+                                },
+                            };
+                        },
+
+                        // prover has finished its job
+                        protocol::Request::ProofIsReady(token) => {
+                            if pipeline.id != token.job_id {
+                                warn!("Ignored unknown proof token: `{token:?}`");
+                                continue;
+                            }
+
+                            // let prover_id = prover_peer_id.to_bytes();
+                            // match token.kind {
+                                
+                            // };
+                        },
+
+                        protocol::Request::TransferBlob(_) => (),
+                    }
+                },
+
+                SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
+                    peer: peer_id,
+                    message: request_response::Message::Response {
+                        response,
+                        //response_id,
+                        ..
+                    }
+                })) => {                
+                    match response {
+                        protocol::Response::BlobIsReady(blob) => {
+                            match pipeline.stage {
+                                // Stage::Assumption => {
+                                //     info!(
+                                //         "Received the final aggregated proof from `{}`",
+                                //         peer_id,
+                                //     );
+                                //     pipeline.add_final_agg_proof(
+                                //         peer_id.to_bytes(),
+                                //         blob.clone()
+                                //     );
+                                //     db_insert_futures.push(
+                                //         col_proofs.insert_one(
+                                //             db::Proof {
+                                //                 job_id: db_job_oid.clone(),
+                                //                 prover: peer_id.to_bytes(),
+                                //                 hash: xxh3_128(&blob).to_string(),
+                                //                 blob: Some(blob),
+                                //                 round_number: Some(pipeline.cur_agg_round_number() as u32),
+                                //                 kind: db::Kind::Aggregate,
+                                //                 batch_id: 0u128.to_string()
+                                //             }
+                                //         )
+                                //         .into_future()
+                                //     );
+                                // },                               
+
+                                _ => {}
+                            }
+
+                        },
+
+                        _ => {},
+                    }
+                },
+
+                _ => {
+                    // println!("{:#?}", event)
+                },
+
+            },
         }
     }
 }
