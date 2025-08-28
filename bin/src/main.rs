@@ -594,7 +594,7 @@ async fn main() -> anyhow::Result<()> {
                 })) => {                
                     match request {
                         // prover indicates her interest to compute                        
-                        protocol::Request::WouldProve => {
+                        protocol::Request::Would => {
                             let prover_id = prover_peer_id.to_bytes();
                             match pipeline.stage {
                                 Stage::Groth16 => {                                    
