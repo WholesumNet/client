@@ -181,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Job's progress will be recorded to the DB with Id: `{db_job_oid:?}`");
 
     // swarm 
-    let mut swarm = peyk::p2p::setup_swarm(&local_key).await?;
+    let mut swarm = peyk::p2p::setup_swarm(&local_key)?;
     let topic = gossipsub::IdentTopic::new("<-- Wholesum p2p prover bazaar -->");
     let _ = swarm
         .behaviour_mut()

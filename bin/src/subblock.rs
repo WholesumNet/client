@@ -183,12 +183,12 @@ async fn main() -> anyhow::Result<()> {
     // info!("Job's progress will be recorded to the DB with Id: `{db_job_oid:?}`");
 
     // swarm 
-    let mut swarm = peyk::p2p::setup_swarm(&local_key).await?;
+    let mut swarm = peyk::p2p::setup_swarm(&local_key)?;
     let topic = gossipsub::IdentTopic::new("<-- Wholesum p2p prover bazaar -->");
     let _ = swarm
         .behaviour_mut()
         .gossipsub
-        .subscribe(&topic); 
+        .subscribe(&topic);     
 
     // bootstrap 
     if false == cli.dev {
@@ -242,7 +242,6 @@ async fn main() -> anyhow::Result<()> {
         interval(Duration::from_secs(5 * 60))
     )
     .fuse();   
-
     loop {
         select! {
             // try to discover new peers
@@ -485,6 +484,7 @@ async fn main() -> anyhow::Result<()> {
                                         kind: protocol::JobKind::SP1(protocol::SP1Op::Execute(
                                             protocol::ExecuteDetails {
                                                 id: batch_id,
+                                                elf_kind: protocol::ELFKind::Subblock,
                                                 batch: assignments
                                                     .into_iter()
                                                     .map(|ass| {
@@ -517,7 +517,7 @@ async fn main() -> anyhow::Result<()> {
                                             &prover_id,
                                             batch_id
                                         );
-                                        info!("Sent the subblock execute job to `{prover_peer_id}`.");
+                                        info!("Sent the subblock execute job `{batch_id}` to `{prover_peer_id}`.");
                                     }
                                 },
                             };
@@ -650,7 +650,7 @@ async fn subscribe_to_rsp_agg_stdin_stream(
                 } else {
                     continue
                 };
-                info!("Last rsp subblock stdin item read from the ValKey server: `{last_id}`");
+                info!("Last rsp agg stdin item read from the ValKey server: `{last_id}`");
             }
             let _ = tx.send(result).await;
         }
