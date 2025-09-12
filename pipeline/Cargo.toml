@@ -14,3 +14,4 @@ uuid.workspace = true
 risc0-zkvm.workspace = true
 sp1-zkvm.workspace = true
 hex.workspace = true
+rs_merkle.workspace = true

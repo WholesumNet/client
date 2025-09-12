@@ -4245,6 +4245,7 @@ dependencies = [
  "libp2p",
  "libp2p-quic",
  "serde",
+ "tokio",
 ]
 
 [[package]]
@@ -4288,6 +4289,7 @@ dependencies = [
  "hex",
  "log",
  "risc0-zkvm",
+ "rs_merkle",
  "serde",
  "sp1-zkvm",
  "toml 0.7.8",
@@ -5267,6 +5269,15 @@ checksum = "b4382d3af3a4ebdae7f64ba6edd9114fff92c89808004c4943b393377a25d001"
 dependencies = [
  "downcast-rs",
  "paste",
+]
+
+[[package]]
+name = "rs_merkle"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb09b49230ba22e8c676e7b75dfe2887dea8121f18b530ae0ba519ce442d2b21"
+dependencies = [
+ "sha2",
 ]
 
 [[package]]
