@@ -107,6 +107,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "45862d1c77f2228b9e10bc609d5bc203d86ebc9b87ad8d5d5167a6c9abf739d9"
 
 [[package]]
+name = "anbar"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "log",
+ "serde",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "android-tzdata"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4289,7 +4300,6 @@ dependencies = [
  "hex",
  "log",
  "risc0-zkvm",
- "rs_merkle",
  "serde",
  "sp1-zkvm",
  "toml 0.7.8",
@@ -5269,15 +5279,6 @@ checksum = "b4382d3af3a4ebdae7f64ba6edd9114fff92c89808004c4943b393377a25d001"
 dependencies = [
  "downcast-rs",
  "paste",
-]
-
-[[package]]
-name = "rs_merkle"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb09b49230ba22e8c676e7b75dfe2887dea8121f18b530ae0ba519ce442d2b21"
-dependencies = [
- "sha2",
 ]
 
 [[package]]
@@ -6440,6 +6441,7 @@ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 name = "unified"
 version = "0.1.0"
 dependencies = [
+ "anbar",
  "anyhow",
  "async-trait",
  "bincode",

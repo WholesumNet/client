@@ -54,11 +54,10 @@ use log::{info, warn};
 use peyk::{
     p2p::{MyBehaviourEvent},
     protocol,
-    protocol::{
-        ProofKind
-    },
     blob_transfer
 };
+
+use anbar;
 
 use pipeline::{
     sp1_subblock::Pipeline,
@@ -123,6 +122,9 @@ async fn main() -> anyhow::Result<()> {
     let redis_con = redis_client.get_multiplexed_async_connection().await?;    
     let mut rsp_subblock_stdin_stream = subscribe_to_rsp_subblock_stdin_stream(redis_con.clone()).await;
     let mut rsp_agg_stdin_stream = subscribe_to_rsp_agg_stdin_stream(redis_con.clone()).await;
+
+    // blob store
+    let mut blob_store = anbar::BlobStore::new();
 
     // local libp2p key 
     let local_key = {
@@ -260,22 +262,12 @@ async fn main() -> anyhow::Result<()> {
 
             // post needs
             _i = timer_post_job.select_next_some() => {
+                let nonce = rng.random::<u32>();
                 let need = match pipeline.stage {
                     // request for groth16 proving
-                    Stage::ExecuteSubblock | Stage::ExecuteAgg => {
-                        let nonce = rng.random::<u32>();
-                        protocol::NeedKind::Execute(nonce)
-                    },
-
-                    // request for other kinds of proving
-                    // _ => {
-                    //     // let _outstanding_jobs = (
-                    //     //     pipeline.num_outstanding_aggregate_items() +
-                    //     //     pipeline.num_outstanding_resolve_items()
-                    //     // ) as u32;
-                    //     let nonce = rng.random::<u32>();
-                    //     protocol::NeedKind::Prove(nonce)
-                    // },
+                    Stage::Subblock | Stage::Agg => {
+                        protocol::NeedKind::Prove(nonce)
+                    }
                 };
                 if let Err(_e) = swarm
                     .behaviour_mut()
@@ -327,7 +319,9 @@ async fn main() -> anyhow::Result<()> {
                         } else {
                             continue
                         };
-                        pipeline.feed_subblock_stdin(id as usize, blob);                        
+                        let blob_hash = xxh3_128(&blob);
+                        blob_store.store(blob);
+                        pipeline.feed_subblock_stdin(id as usize, blob_hash);
                     }
                     info!("All subblock stdins have been read from the ValKey server.");
                     info!(
@@ -373,7 +367,9 @@ async fn main() -> anyhow::Result<()> {
                         } else {
                             continue
                         };
-                        pipeline.feed_agg_stdin(id as usize, blob);  
+                        let blob_hash = xxh3_128(&blob);
+                        blob_store.store(blob);
+                        pipeline.feed_agg_stdin(id as usize, blob_hash);  
                     }
                     info!("Agg stdin has been read from the ValKey server.");
                     info!(
@@ -468,9 +464,9 @@ async fn main() -> anyhow::Result<()> {
                         protocol::Request::Would => {
                             let prover_id = prover_peer_id.to_bytes();
                             match pipeline.stage {
-                                Stage::ExecuteSubblock => {
+                                Stage::Subblock => {
                                     let (batch_id, assignments) = match pipeline
-                                        .assign_execute_subblock_batch(&prover_id)
+                                        .assign_subblock_batch(&prover_id)
                                     {
                                         Some((i, a)) => (i, a),
 
@@ -481,8 +477,8 @@ async fn main() -> anyhow::Result<()> {
                                     };  
                                     let compute_job = protocol::ComputeJob {
                                         id: pipeline.id,
-                                        kind: protocol::JobKind::SP1(protocol::SP1Op::Execute(
-                                            protocol::ExecuteDetails {
+                                        kind: protocol::JobKind::SP1(protocol::SP1Op::ProveCompressed(
+                                            protocol::ProveCompressedDetails {
                                                 id: batch_id,
                                                 elf_kind: protocol::ELFKind::Subblock,
                                                 batch: assignments
@@ -507,39 +503,50 @@ async fn main() -> anyhow::Result<()> {
                                     {
                                         warn!("Failed to send the subblock job for execution: `{e:?}`");
                                     } else {
-                                        pipeline.confirm_execute_subblock_batch_assignment(
+                                        pipeline.confirm_subblock_batch_assignment(
                                             &prover_id,
                                             batch_id
                                         );
                                         info!("Sent subblock execute job `{batch_id}` to `{prover_peer_id}`.");
                                     }
                                 },
-                                Stage::ExecuteAgg => {
+                                Stage::Agg => {
                                     let (batch_id, assignments) = match pipeline
-                                        .assign_execute_agg_batch(&prover_id)
+                                        .assign_agg_batch(&prover_id)
                                     {
                                         Some((i, a)) => (i, a),
 
-                                        None => {                                    
-                                            // warn!("No execute jobs for `{prover_peer_id:?}` at this time.");
+                                        None => {
                                             continue
                                         }
-                                    };  
+                                    };                                    
+                                    let stdin = assignments
+                                        .into_iter()
+                                        .next()
+                                        .map(|ass| {                                                        
+                                            protocol::InputBlob::Token(
+                                                ass.hash,
+                                                ass.owner_peer_id.unwrap_or_else(|| my_peer_id.to_bytes()),
+                                            )                                                                                                                
+                                        })
+                                        .unwrap();
+                                    let mut batch = Vec::new();
+                                    batch.push(stdin);
+                                    for proof in pipeline.subblock_proofs().into_iter() {
+                                        batch.push(
+                                            protocol::InputBlob::Token(
+                                                proof.hash,
+                                                proof.owner_peer_id.unwrap_or_else(|| my_peer_id.to_bytes()),
+                                            )
+                                        ); 
+                                    }
                                     let compute_job = protocol::ComputeJob {
                                         id: pipeline.id,
-                                        kind: protocol::JobKind::SP1(protocol::SP1Op::Execute(
-                                            protocol::ExecuteDetails {
+                                        kind: protocol::JobKind::SP1(protocol::SP1Op::ProveCompressed(
+                                            protocol::ProveCompressedDetails {
                                                 id: batch_id,
                                                 elf_kind: protocol::ELFKind::Agg,
-                                                batch: assignments
-                                                    .into_iter()
-                                                    .map(|ass| {                                                        
-                                                        protocol::InputBlob::Token(
-                                                            ass.hash,
-                                                            ass.owner_peer_id.unwrap_or_else(|| my_peer_id.to_bytes()),
-                                                        )                                                                                                                
-                                                    })
-                                                .collect::<Vec<protocol::InputBlob>>(),
+                                                batch: batch,
                                             }
                                         ))
                                     };
@@ -553,13 +560,13 @@ async fn main() -> anyhow::Result<()> {
                                     {
                                         warn!("Failed to send the agg job for execution: `{e:?}`");
                                     } else {
-                                        pipeline.confirm_execute_agg_batch_assignment(
+                                        pipeline.confirm_agg_batch_assignment(
                                             &prover_id,
                                             batch_id
                                         );
                                         info!("Sent the agg execute job `{batch_id}` to `{prover_peer_id}`.");
                                     }
-                                },
+                                }
                             };
                         },
 
@@ -570,17 +577,56 @@ async fn main() -> anyhow::Result<()> {
                                 continue;
                             }
                             match token.kind {
-                                protocol::ProofKind::SP1ExecuteSubblock(batch_id) => {
-                                    info!("Proof of subblock execution for: `{batch_id}`");
-                                    pipeline.add_execute_subblock_proof(
+                                // protocol::ProofKind::SP1ExecuteSubblock(batch_id) => {
+                                //     info!("Proof of subblock execution for: `{batch_id}`");
+                                //     pipeline.add_execute_subblock_proof(
+                                //         batch_id,
+                                //         token.hash,
+                                //         prover_peer_id.to_bytes()
+                                //     );              
+                                // },
+
+                                // protocol::ProofKind::SP1ExecuteAgg(batch_id) => {
+                                //     info!("Proof of agg execution for: `{batch_id}`");
+                                // },
+
+                                protocol::ProofKind::SP1ProveCompressedSubblock(batch_id) => {
+                                    info!("Subblock(`{batch_id}`) is proved.");
+                                    pipeline.add_subblock_proof(
                                         batch_id,
                                         token.hash,
                                         prover_peer_id.to_bytes()
-                                    );              
+                                    );
+                                    // blob_store.add_incomplete_blob(token.hash);
+                                    // let _req_id = swarm
+                                    //     .behaviour_mut()
+                                    //     .blob_transfer
+                                    //     .send_request(
+                                    //         &prover_peer_id,
+                                    //         blob_transfer::Request::GetInfo(token.hash)
+                                    //     );
+                                    // info!(
+                                    //     "Requested info of proof blob(`{}`) from `{}`",
+                                    //     token.hash,
+                                    //     prover_peer_id
+                                    // );
                                 },
 
-                                protocol::ProofKind::SP1ExecuteAgg(batch_id) => {
-                                    info!("Proof of agg execution for: `{batch_id}`");
+                                protocol::ProofKind::SP1ProveCompressedAgg(batch_id) => {
+                                    info!("Agg(`{batch_id}`) is proved.");
+                                    blob_store.add_incomplete_blob(token.hash);
+                                    let _req_id = swarm
+                                        .behaviour_mut()
+                                        .blob_transfer
+                                        .send_request(
+                                            &prover_peer_id,
+                                            blob_transfer::Request::GetInfo(token.hash)
+                                        );
+                                    info!(
+                                        "Requested info of agg proof blob(`{}`) from `{}`",
+                                        token.hash,
+                                        prover_peer_id
+                                    );
                                 },
 
                                 _ => {},                                
@@ -616,7 +662,7 @@ async fn main() -> anyhow::Result<()> {
                 })) => {                
                     match request {
                         blob_transfer::Request::GetInfo(hash) => {
-                            if let Some(num_chunks) = pipeline.get_blob_info(hash) {                                
+                            if let Some(num_chunks) = blob_store.get_blob_info(hash) {
                                 if let Err(e) = swarm
                                     .behaviour_mut()
                                     .blob_transfer
@@ -634,11 +680,10 @@ async fn main() -> anyhow::Result<()> {
                         },
 
                         blob_transfer::Request::GetChunk(blob_hash, req_chunk_index) => {
-                            if let Some((data, chunk_hash)) = pipeline.get_blob_chunk(
+                            if let Some((data, chunk_hash)) = blob_store.get_chunk(
                                 blob_hash, 
                                 req_chunk_index
                             ) {
-                                // info!("chunk {req_chunk_index}: {}", data.len());
                                 if let Err(e) = swarm
                                     .behaviour_mut()
                                     .blob_transfer
@@ -658,6 +703,63 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
                         },
+                    }
+                },
+
+                // blob transfer responses
+                SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::Message {
+                    peer: peer_id,
+                    message: request_response::Message::Response {
+                        response,
+                        //response_id,
+                        ..
+                    }
+                })) => {                
+                    match response {
+                        blob_transfer::Response::Info(blob_info) => {
+                            blob_store.add_blob_info(blob_info.hash, blob_info.num_chunks);
+                            // request first chunk
+                            let _req_id = swarm
+                                .behaviour_mut()
+                                .blob_transfer
+                                .send_request(
+                                    &peer_id,
+                                    blob_transfer::Request::GetChunk(blob_info.hash, 0)
+                                );
+                            info!(
+                                "Requested the first chunk of the blob(`{}`) from `{}`",
+                                blob_info.hash,
+                                peer_id
+                            );
+                        },
+
+                        blob_transfer::Response::Chunk(blob_chunk) => {                        
+                            //@ assumed owner === chunk sender
+                            blob_store.add_blob_chunk(
+                                blob_chunk.blob_hash,
+                                blob_chunk.index,
+                                blob_chunk.data,
+                                blob_chunk.chunk_hash
+                            );
+                            if blob_store.is_blob_complete(blob_chunk.blob_hash) {
+                                if pipeline.stage == Stage::Agg {
+                                    info!("block is proved!");
+                                    let proof = blob_store.get_blob(blob_chunk.blob_hash).unwrap();
+                                    pipeline.add_agg_proof(proof);
+                                }                                
+                            } else {
+                                // request next chunk
+                                if let Some(next_chunk_index) = blob_store.get_next_blob_chunk_index(blob_chunk.blob_hash) {
+                                    let _req_id = swarm
+                                        .behaviour_mut()
+                                        .blob_transfer
+                                        .send_request(
+                                            &peer_id,
+                                            blob_transfer::Request::GetChunk(blob_chunk.blob_hash, next_chunk_index)
+                                        );
+                                }                             
+                            }                            
+                        }
                     }
                 },
 

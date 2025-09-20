@@ -875,6 +875,8 @@ async fn main() -> anyhow::Result<()> {
                                         .into_future()
                                     );
                                 },
+
+                                _ => todo!(),
                             };
                         },
 

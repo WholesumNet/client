@@ -95,8 +95,6 @@ impl Round {
                 self.inverse_batch_ids.insert(batch_index, batch_id);
             }
         }
-        // info!("partial-batches: {:?}", self.partial_batches);
-        // info!("batches: {:?}", self.batches);
     }
 
     // no new input is expected, so upgrade the partial batch into a full batch
