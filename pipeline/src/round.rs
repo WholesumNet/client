@@ -129,7 +129,7 @@ impl Round {
     }
 
     // assign a batch to prover
-    pub fn assign_batch(&self, prover: &Vec<u8>) -> Option<(u128, Vec<Input>)> {        
+    pub fn assign_batch(&self, prover: &Vec<u8>) -> Option<(u128, usize, Vec<Input>)> {        
         let outstanding_batches: Vec<_> = self.batches.keys()
             .filter(|index| {
                 // filter already proved batches
@@ -199,7 +199,7 @@ impl Round {
             })        
             .collect();
         let batch_id = self.inverse_batch_ids.get(&selected_batch_index).unwrap();
-        Some((*batch_id, assignment))
+        Some((*batch_id, selected_batch_index, assignment))
     }
 
     // batch has been successfully sent to prover

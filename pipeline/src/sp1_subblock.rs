@@ -56,7 +56,7 @@ impl Pipeline {
     pub fn assign_subblock_batch(
         &mut self,
         prover: &Vec<u8>
-    ) -> Option<(u128, Vec<Input>)> {
+    ) -> Option<(u128, usize, Vec<Input>)> {
         self.subblock_round.assign_batch(prover)        
     }
 
@@ -132,7 +132,7 @@ impl Pipeline {
     pub fn assign_agg_batch(
         &mut self,
         prover: &Vec<u8>
-    ) -> Option<(u128, Vec<Input>)> {
+    ) -> Option<(u128, usize, Vec<Input>)> {
         self.agg_round.assign_batch(prover)        
     }
 

@@ -465,10 +465,10 @@ async fn main() -> anyhow::Result<()> {
                             let prover_id = prover_peer_id.to_bytes();
                             match pipeline.stage {
                                 Stage::Subblock => {
-                                    let (batch_id, assignments) = match pipeline
+                                    let (batch_id, batch_index, assignments) = match pipeline
                                         .assign_subblock_batch(&prover_id)
                                     {
-                                        Some((i, a)) => (i, a),
+                                        Some((id, index, a)) => (id, index, a),
 
                                         None => {                                    
                                             // warn!("No execute jobs for `{prover_peer_id:?}` at this time.");
@@ -501,20 +501,21 @@ async fn main() -> anyhow::Result<()> {
                                                 protocol::Response::Job(compute_job)
                                             )
                                     {
-                                        warn!("Failed to send the subblock job for execution: `{e:?}`");
+                                        warn!("Failed to send the subblock job for proving: `{e:?}`");
                                     } else {
                                         pipeline.confirm_subblock_batch_assignment(
                                             &prover_id,
                                             batch_id
                                         );
-                                        info!("Sent subblock execute job `{batch_id}` to `{prover_peer_id}`.");
+                                        info!("Sent subblock[`{batch_index}`] prove job(`{batch_id}`) to `{prover_peer_id}`.");
                                     }
                                 },
+
                                 Stage::Agg => {
-                                    let (batch_id, assignments) = match pipeline
+                                    let (batch_id, _batch_index, assignments) = match pipeline
                                         .assign_agg_batch(&prover_id)
                                     {
-                                        Some((i, a)) => (i, a),
+                                        Some((id, index, a)) => (id, index, a),
 
                                         None => {
                                             continue
@@ -564,7 +565,7 @@ async fn main() -> anyhow::Result<()> {
                                             &prover_id,
                                             batch_id
                                         );
-                                        info!("Sent the agg execute job `{batch_id}` to `{prover_peer_id}`.");
+                                        info!("Sent agg prove job (`{batch_id}`) to `{prover_peer_id}`.");
                                     }
                                 }
                             };
