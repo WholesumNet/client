@@ -1,5 +1,5 @@
 [package]
-name = "unified"
+name = "subblock"
 version.workspace = true
 edition.workspace = true
 

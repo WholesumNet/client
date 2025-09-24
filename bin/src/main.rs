@@ -720,7 +720,7 @@ async fn main() -> anyhow::Result<()> {
                             );
                             if blob_store.is_blob_complete(blob_chunk.blob_hash) {
                                 if pipeline.stage == Stage::Agg {
-                                    info!("block is proved!");
+                                    info!("Block is proved!");
                                     let proof = blob_store.get_blob(blob_chunk.blob_hash).unwrap();
                                     pipeline.add_agg_proof(proof);
                                 }                                

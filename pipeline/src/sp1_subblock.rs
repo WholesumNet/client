@@ -141,8 +141,8 @@ impl Pipeline {
     }
 
     pub fn add_agg_proof(&mut self, proof: Vec<u8>) {
-        let _ = fs::write("./agg_proof", &proof);
         //@ verify it!
+        let _ = fs::write("./agg_proof", &proof);
     }
 
 
