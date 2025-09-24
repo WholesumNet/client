@@ -570,20 +570,7 @@ async fn main() -> anyhow::Result<()> {
                                 warn!("Ignored unknown proof token: `{token:?}`");
                                 continue;
                             }
-                            match token.kind {
-                                // protocol::ProofKind::SP1ExecuteSubblock(batch_id) => {
-                                //     info!("Proof of subblock execution for: `{batch_id}`");
-                                //     pipeline.add_execute_subblock_proof(
-                                //         batch_id,
-                                //         token.hash,
-                                //         prover_peer_id.to_bytes()
-                                //     );              
-                                // },
-
-                                // protocol::ProofKind::SP1ExecuteAgg(batch_id) => {
-                                //     info!("Proof of agg execution for: `{batch_id}`");
-                                // },
-
+                            match token.kind {                          
                                 protocol::ProofKind::Subblock(batch_id) => {
                                     info!("Subblock(`{batch_id}`) is proved.");
                                     pipeline.add_subblock_proof(
@@ -621,13 +608,9 @@ async fn main() -> anyhow::Result<()> {
                                         token.hash,
                                         prover_peer_id
                                     );
-                                },
-
-                                _ => {},                                
+                                },                          
                             };
                         },
-
-                        protocol::Request::TransferBlob(_) => (),
                     }
                 },
 
