@@ -153,36 +153,7 @@ async fn main() -> anyhow::Result<()> {
     // let mut db_insert_futures = FuturesUnordered::new();
     // let mut db_update_futures = FuturesUnordered::new();
 
-    let mut pipeline = Pipeline::new()?;
-    // let (mut pipeline, db_job_oid) = match &cli.job {
-    //     Some(Commands::New{ job_file }) => {
-    //         let pipeline = Pipeline::new(job_file)?;
-    //         let oid = col_jobs.insert_one(
-    //             db::Job {
-    //                 id: pipeline.id.to_string(),
-    //                 image_id: pipeline.image_id.into()
-    //             }
-    //         )
-    //         .await?
-    //         .inserted_id;
-    //         (pipeline, oid)            
-    //     },
-
-    //     Some(Commands::Resume{ job_id }) => {
-    //         resume_job(
-    //             &db_client.database("wholesum_client").collection("jobs"),
-    //             &col_segments,
-    //             &col_joins,
-    //             job_id
-    //         )
-    //         .await?
-    //     },
-
-    //     _ => {
-    //         panic!("Missing command, not sure what you meant.");
-    //     },
-    // };
-    // info!("Job's progress will be recorded to the DB with Id: `{db_job_oid:?}`");
+    let mut pipeline = Pipeline::new()?;   
 
     // swarm 
     let mut swarm = peyk::p2p::setup_swarm(&local_key)?;
