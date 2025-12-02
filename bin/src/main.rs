@@ -12,7 +12,7 @@ use tokio::{
     time::interval
 };
 use tokio_stream::wrappers::IntervalStream;
-
+use redis::Value::BulkString;
 use libp2p::{
     gossipsub, mdns, request_response,
     identity, identify,  
@@ -26,14 +26,19 @@ use std::{
         Duration,
     },
     // future::IntoFuture,
+    collections::{
+        HashSet,
+        BTreeMap,
+        VecDeque
+    },
 };
 use bincode;
-
+use rand::prelude::*;
 use anyhow;
 // use reqwest;
 
 use clap::{
-    Parser, Subcommand
+    Parser
 };
 use xxhash_rust::xxh3::xxh3_128;
 use env_logger::Env;
@@ -80,27 +85,8 @@ struct Cli {
 
     #[arg(short, long)]
     key_file: Option<String>,
-    
-    #[command(subcommand)]
-    job: Option<Commands>,
 }
 
-#[derive(Subcommand, Debug)]
-enum Commands {
-    /// Start a new job
-    New {
-        /// The job file on disk
-        #[arg(short, long)]
-        job_file: String,
-    },
-
-    /// Resume the job
-    Resume {
-        /// The job id
-        #[arg(short, long)]
-        job_id: String,        
-    }
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -111,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Operating mode: `{}` network",
         if false == cli.dev {"global"} else {"local(development)"}
     );
-    info!("Proving blocks in a subblock fasion.");
+    info!("Proving blocks using block division logic.");
 
     // setup mongodb
     // let db_client = mongodb_setup("mongodb://localhost:27017").await?;
@@ -119,11 +105,18 @@ async fn main() -> anyhow::Result<()> {
     // setup redis
     let redis_client = redis::Client::open("redis://127.0.0.1:6379/")?;
     let redis_con = redis_client.get_multiplexed_async_connection().await?;    
-    let mut rsp_subblock_stdin_stream = subscribe_to_rsp_subblock_stdin_stream(redis_con.clone()).await;
-    let mut rsp_agg_stdin_stream = subscribe_to_rsp_agg_stdin_stream(redis_con.clone()).await;
+
+    // <block number, [stdins]>
+    let mut blocks = BTreeMap::<u32, Vec<u128>>::new();
+    let mut current_block: Option<u32> = None;
+    let mut outstanding_blocks = VecDeque::<u32>::new();
+    let mut block_stream = subscribe_to_block_stream(redis_con.clone()).await;    
 
     // blob store
     let mut blob_store = anbar::BlobStore::new();
+
+    // maintain prover liveliness
+    let mut active_provers = HashSet::<PeerId>::new();
 
     // local libp2p key 
     let local_key = {
@@ -198,23 +191,19 @@ async fn main() -> anyhow::Result<()> {
     swarm.listen_on("/ip6/::/tcp/20201".parse()?)?;
     swarm.listen_on("/ip6/::/udp/20201/quic-v1".parse()?)?;
 
-    // used for networking
+    // to update kademlia tables
     let mut timer_peer_discovery = IntervalStream::new(
         interval(Duration::from_secs(5 * 60))
     )
     .fuse();
-    // used for posting job needs
-    let mut timer_post_job = IntervalStream::new(
+    // to update prover list
+    let mut timer_update_prover_list = IntervalStream::new(
         interval(Duration::from_secs(5))
     )
-    .fuse();
-    use rand::prelude::*;
+    .fuse();    
+
     let mut rng = rand::rng();
-    // use for retrieveing the stark proof
-    let mut timer_retrieve_agg_proof = IntervalStream::new(
-        interval(Duration::from_secs(5 * 60))
-    )
-    .fuse();   
+
     loop {
         select! {
             // try to discover new peers
@@ -230,125 +219,58 @@ async fn main() -> anyhow::Result<()> {
                     .get_closest_peers(random_peer_id);
             },
 
-            // post needs
-            _i = timer_post_job.select_next_some() => {
+            // update prover list
+            _i = timer_update_prover_list.select_next_some() => {
                 let nonce = rng.random::<u32>();
-                let need = match pipeline.stage {
-                    // request for groth16 proving
-                    Stage::Subblock | Stage::Agg => {
-                        protocol::NeedKind::Prove(nonce)
-                    }
-                };
-                if let Err(_e) = swarm
+                let need = bincode::serialize(
+                    &protocol::NeedKind::Prove(nonce)
+                )
+                .unwrap();
+                if let Err(e) = swarm
                     .behaviour_mut()
                     .gossipsub
-                    .publish(
-                        topic.clone(),
-                        bincode::serialize(&need)?
-                    )
-                {            
-                    // warn!("Need compute gossip failed, error: `{err_msg:?}`");
+                    .publish(topic.clone(), need)
+                {
+                    warn!("Need compute gossip failed, error: `{e:?}`");
                 }
             },
 
-            // request transfer of final proofs periodically
-            _i = timer_retrieve_agg_proof.select_next_some() => {                
-            },
-
-            // subblock stdins are ready
-            value = rsp_subblock_stdin_stream.select_next_some() => {
-                for stream in value.as_sequence().unwrap() {
-                    let data = stream.as_sequence().unwrap();
-                    // let _stream_name = &data[0];
-                    let contents = data[1].as_sequence().unwrap();
-                    let mut blob_lens = vec![];
-                    for object in contents { 
-                        let segments = object.as_sequence().unwrap();                        
-                        // object[1] is valkey generated id
-                        let segment_data  = segments[1].as_sequence().unwrap();
-                        let id = if let redis::Value::BulkString(bs) =  &segment_data[0] {
-                            let str_id = String::from_utf8_lossy(&bs).to_string();
-                            match u32::from_str_radix(&str_id, 10) {
-                                Ok(id) => id,
-
-                                Err(err_msg) => {
-                                    if str_id.eq_ignore_ascii_case("<DONE>") {
-                                        continue
-                                    } else {
-                                        warn!("Invalid subblock stdin id `{str_id}` from the ValKey server: `{err_msg}");
-                                    }
-                                    continue
-                                }
-                            }
-                        } else {
-                            continue
-                        };
-                        let blob = if let redis::Value::BulkString(blob) = &segment_data[1] {
-                            blob_lens.push(blob.len());
-                            blob.to_owned()
-                        } else {
-                            continue
-                        };
-                        let blob_hash = xxh3_128(&blob);
-                        blob_store.store(blob);
-                        pipeline.feed_subblock_stdin(id as usize, blob_hash);
-                    }
-                    info!("All subblock stdins have been read from the ValKey server.");
-                    info!(
-                        "Largest blob size: `{}`, smallest blob size: `{}`",
-                        blob_lens.iter().max().unwrap(),
-                        blob_lens.iter().min().unwrap()
-                    );
-                    pipeline.stop_subblock_stdin_feeding();
+            // new blocks inbound
+            new_blocks = block_stream.select_next_some() => {                
+                info!(
+                    "Received a new batch of blocks to prove: `{:?}`",
+                    new_blocks.keys()
+                );
+                // prove blocks fifo
+                outstanding_blocks.extend(new_blocks.keys().cloned());
+                if outstanding_blocks.is_empty() {
+                    warn!("Detected an empty block stream.");
+                    continue;
                 }
-            },
-
-            // agg stdin is ready
-            value = rsp_agg_stdin_stream.select_next_some() => {
-                for stream in value.as_sequence().unwrap() {
-                    let data = stream.as_sequence().unwrap();
-                    // let _stream_name = &data[0];
-                    let contents = data[1].as_sequence().unwrap();
-                    let mut blob_lens = vec![];
-                    for object in contents { 
-                        let segments = object.as_sequence().unwrap();                        
-                        // object[1] is valkey generated id
-                        let segment_data  = segments[1].as_sequence().unwrap();
-                        let id = if let redis::Value::BulkString(bs) =  &segment_data[0] {
-                            let str_id = String::from_utf8_lossy(&bs).to_string();
-                            match u32::from_str_radix(&str_id, 10) {
-                                Ok(id) => id,
-
-                                Err(err_msg) => {
-                                    if str_id.eq_ignore_ascii_case("<DONE>") {
-                                        continue
-                                    } else {
-                                        warn!("Invalid agg stdin id `{str_id}` from the ValKey server: `{err_msg}");
-                                    }
-                                    continue
-                                }
-                            }
-                        } else {
-                            continue
-                        };
-                        let blob = if let redis::Value::BulkString(blob) = &segment_data[1] {
-                            blob_lens.push(blob.len());
-                            blob.to_owned()
-                        } else {
-                            continue
-                        };
-                        let blob_hash = xxh3_128(&blob);
-                        blob_store.store(blob);
-                        pipeline.feed_agg_stdin(id as usize, blob_hash);  
-                    }
-                    info!("Agg stdin has been read from the ValKey server.");
-                    info!(
-                        "Largest blob size: `{}`, smallest blob size: `{}`",
-                        blob_lens.iter().max().unwrap(),
-                        blob_lens.iter().min().unwrap()
-                    );
-                    pipeline.stop_agg_stdin_feeding();
+                for (block_number, stdin_map) in new_blocks.into_iter() {
+                    let mut blob_hashes = 
+                        Vec::<u128>::with_capacity(stdin_map.len());
+                    for (_i, blob) in stdin_map.into_iter() {
+                        blob_hashes.push(blob_store.store(blob));
+                    }                    
+                    blocks.insert(block_number, blob_hashes);
                 }
+                if current_block.is_some() {
+                    // wait until the current block is proved
+                    continue;
+                }
+                current_block = outstanding_blocks.pop_front();
+                let block_number = current_block.clone().unwrap();
+                let blob_hashes = blocks.get(&block_number).unwrap();
+                let (agg_hash, subblock_hashes) = 
+                    blob_hashes.split_last().unwrap();
+                for (index, hash) in subblock_hashes.into_iter().enumerate() {
+                    pipeline.feed_subblock_stdin(index, *hash);
+                }
+                pipeline.stop_subblock_stdin_feeding();
+                pipeline.feed_agg_stdin(*agg_hash);
+                pipeline.stop_agg_stdin_feeding();
+                info!("Started to prove block `{}`.", block_number);
             },
 
             // libp2p events
@@ -430,8 +352,12 @@ async fn main() -> anyhow::Result<()> {
                     }
                 })) => {                
                     match request {
-                        // prover indicates her interest to compute                        
+                        // prover indicates her interest to prove                        
                         protocol::Request::Would => {
+                            active_provers.insert(prover_peer_id);
+                            if current_block.is_none() {
+                                continue;
+                            }
                             let prover_id = prover_peer_id.to_bytes();
                             match pipeline.stage {
                                 Stage::Subblock => {
@@ -720,65 +646,68 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn subscribe_to_rsp_subblock_stdin_stream(
+async fn subscribe_to_block_stream(
     mut redis_con: redis::aio::MultiplexedConnection
-) -> mpsc::Receiver<redis::Value> {
+) -> mpsc::Receiver<BTreeMap<u32, BTreeMap<u32, Vec<u8>>>> {
     let (mut tx, rx) = mpsc::channel(32);
     let mut last_id = "0".to_string();
     task::spawn(async move {
         loop {
             let result: redis::Value = redis::cmd("XREAD")
                 .arg("BLOCK").arg(0)
-                .arg("STREAMS").arg("rsp-subblock-stdin-stream").arg(&last_id)
+                .arg("STREAMS").arg("blocks").arg(&last_id)
                 .query_async(&mut redis_con)
                 .await
-                .unwrap();
-            // update last_id
-            for stream in result.as_sequence().unwrap(){
-                let data = stream.as_sequence().unwrap();
-                let contents = data[1].as_sequence().unwrap();
-                let last_object = contents.last().unwrap();
-                let objects = last_object.as_sequence().unwrap();
-                last_id = if let redis::Value::BulkString(new_last_id) = &objects[0] {
-                    String::from_utf8_lossy(&new_last_id).to_string() 
+                .unwrap();        
+            let streams = result.as_sequence().unwrap();
+            let contents = streams[0].as_sequence().unwrap();
+            let _stream_name = &contents[0];
+            let entries = contents[1].as_sequence().unwrap();
+            let mut blocks: BTreeMap<u32, BTreeMap<u32, Vec<u8>>> = BTreeMap::new();
+            for entry in entries {
+                let items = &entry.as_sequence().unwrap();
+                if let BulkString(bs) = &items[0] {
+                    last_id = String::from_utf8_lossy(&bs).into_owned();
+                }
+                let (block_number, stdin_id) = 
+                    if let BulkString(bs) = &items[1].as_sequence().unwrap()[0] {
+                        let blob_id = String::from_utf8_lossy(&bs).into_owned();
+                        let tokens: Vec<_> = blob_id.split("-")
+                            .filter_map(|e| e.parse::<u32>().ok())
+                            .collect();
+                        (tokens[0], tokens[1])
                 } else {
-                    continue
+                    warn!("Failed to parse block number and subblock id.");
+                    continue;
                 };
-                info!("Last rsp subblock stdin item read from the ValKey server: `{last_id}`");
-            }
-            let _ = tx.send(result).await;
-        }
-    });
-    rx
-}
-
-async fn subscribe_to_rsp_agg_stdin_stream(
-    mut redis_con: redis::aio::MultiplexedConnection
-) -> mpsc::Receiver<redis::Value> {
-    let (mut tx, rx) = mpsc::channel(32);
-    let mut last_id = "0".to_string();
-    task::spawn(async move {
-        loop {
-            let result: redis::Value = redis::cmd("XREAD")
-                .arg("BLOCK").arg(0)
-                .arg("STREAMS").arg("rsp-agg-stdin-stream").arg(&last_id)
-                .query_async(&mut redis_con)
-                .await
-                .unwrap();
-            // update last_id
-            for stream in result.as_sequence().unwrap(){
-                let data = stream.as_sequence().unwrap();
-                let contents = data[1].as_sequence().unwrap();
-                let last_object = contents.last().unwrap();
-                let objects = last_object.as_sequence().unwrap();
-                last_id = if let redis::Value::BulkString(new_last_id) = &objects[0] {
-                    String::from_utf8_lossy(&new_last_id).to_string() 
+                if let BulkString(blob) = &items[1].as_sequence().unwrap()[1] {
+                    blocks.entry(block_number)
+                        .and_modify(|stdins| {
+                            if stdins.contains_key(&stdin_id) {
+                                warn!(
+                                    "Ignnored duplicate subblock for blob({}-{}).",
+                                    block_number,
+                                    stdin_id
+                                );
+                            } else {
+                                stdins.insert(stdin_id, blob.to_owned());
+                            }
+                        })
+                        .or_insert_with(||
+                            BTreeMap::from([
+                                (stdin_id, blob.to_owned())
+                            ])
+                        );
                 } else {
-                    continue
-                };
-                info!("Last rsp agg stdin item read from the ValKey server: `{last_id}`");
-            }
-            let _ = tx.send(result).await;
+                    warn!(
+                        "Failed to retrieve subblock blob(`{}-{}`) from Redis.",
+                        block_number,
+                        stdin_id
+                    );
+                    continue;
+                }
+            }   
+            let _ = tx.send(blocks).await;
         }
     });
     rx

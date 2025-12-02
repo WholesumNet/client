@@ -115,9 +115,9 @@ impl Pipeline {
     }
 
     // agg round
-    pub fn feed_agg_stdin(&mut self, index: usize, blob_hash: u128) {
+    pub fn feed_agg_stdin(&mut self, blob_hash: u128) {
         self.agg_round.feed_input(
-            index,
+            0usize,
             Input {
                 owner_peer_id: None,
                 hash: blob_hash
