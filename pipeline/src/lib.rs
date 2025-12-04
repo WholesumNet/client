@@ -1,2 +1,3 @@
-pub mod sp1_subblock;
+pub mod pipeline;
 pub mod round;
+pub mod verify;
