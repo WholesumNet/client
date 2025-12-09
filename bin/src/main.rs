@@ -104,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
     // let db_client = mongodb_setup("mongodb://localhost:27017").await?;
 
     // setup redis
-    let redis_client = redis::Client::open("redis://127.0.0.1:6379/")?;
+    let redis_client = redis::Client::open("redis://:redispassword@localhost:6379/0")?;
     let redis_con = redis_client.get_multiplexed_async_connection().await?;    
 
     let mut active_provers = HashSet::<PeerId>::new();
@@ -352,6 +352,9 @@ async fn main() -> anyhow::Result<()> {
                         // prover indicates her interest to prove                        
                         protocol::Request::Would => {
                             active_provers.insert(prover.clone());
+                            if current_block.is_none() {
+                                continue;
+                            }
                             if pipeline.stage == Stage::Verify {
                                 continue;
                             }                            
