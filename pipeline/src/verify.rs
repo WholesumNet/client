@@ -2,6 +2,7 @@ use std::{
     fs,
     // time::Instant,
 };
+use log::info;
 use anyhow;
 use bincode;
 use sp1_sdk::{
@@ -19,6 +20,7 @@ pub struct SP1Handle {
 
 impl SP1Handle {
     pub fn new() -> anyhow::Result<Self> {
+        info!("Initializing SP1.");
         let cpu_client = ProverClient::builder().cpu().build();
         // subblock
         let subblock_elf = fs::read("../elfs/subblock_elf.bin")?;
@@ -35,7 +37,9 @@ impl SP1Handle {
     }
 
     pub fn verify_agg(&self, proof_blob: &[u8]) -> anyhow::Result<()> {
-        let proof: SP1ProofWithPublicValues = bincode::deserialize(&proof_blob)?;
+        //@ temporary
+        fs::write("./temp-agg-proof.bin", proof_blob)?;
+        let proof = SP1ProofWithPublicValues::load("./temp-agg-proof.bin")?;
         self.client.verify(&proof, &self.agg_vk)?;
         Ok(())
     }

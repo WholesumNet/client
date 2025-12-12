@@ -360,10 +360,10 @@ async fn main() -> anyhow::Result<()> {
                             }                            
                             let ass = pipeline.assign(&prover);
                             if ass.is_none() {
-                                warn!(
-                                    "No assignments for `{:?}` at this time.",
-                                    prover
-                                );
+                                // warn!(
+                                //     "No assignments for `{:?}` at this time.",
+                                //     prover
+                                // );
                                 continue;
                             }                 
                             let (batch_id, tokens) = ass.unwrap();
