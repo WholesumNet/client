@@ -38,7 +38,7 @@ impl Pipeline {
         Ok(Self {
             id: 0u128,
             block_number: 0u32,
-            stage: Stage::Subblock,
+            stage: Stage::Verify,
             subblock_round: Round::new(0usize, 1usize),
             agg_round: Round::new(127usize, 1usize),
             sp1_handle: SP1Handle::new()?,
@@ -57,6 +57,7 @@ impl Pipeline {
                 "Stage must be `Verify` to begin next block: {:?}",
                 self.stage
             );
+            return;
         }
 
         self.archive();

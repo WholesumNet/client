@@ -367,19 +367,11 @@ async fn main() -> anyhow::Result<()> {
                                 continue;
                             }                 
                             let (batch_id, tokens) = ass.unwrap();
-                            let elf_kind = match pipeline.stage {
-                                Stage::Subblock => {
-                                    protocol::ELFKind::Subblock
-                                },
-
-                                Stage::Agg => {
-                                    protocol::ELFKind::Agg
-                                },
-
-                                Stage::Verify => {
-                                    todo!();
-                                }
-                            };
+                            let elf_kind = if pipeline.stage == Stage::Subblock {
+                                protocol::ELFKind::Subblock
+                            } else {
+                                protocol::ELFKind::Agg
+                            };                                
                             let compute_job = protocol::ComputeJob {
                                 id: pipeline.id,
                                 kind: protocol::JobKind::SP1(protocol::SP1Op::Prove(
