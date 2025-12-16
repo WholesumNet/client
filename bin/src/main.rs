@@ -146,7 +146,10 @@ async fn main() -> anyhow::Result<()> {
     // let mut db_insert_futures = FuturesUnordered::new();
     // let mut db_update_futures = FuturesUnordered::new();
 
-    let mut pipeline = Pipeline::new()?;   
+    let mut pipeline = tokio::task::spawn_blocking(||
+        Pipeline::new().unwrap()
+    )
+    .await?;    
 
     // swarm 
     let mut swarm = peyk::p2p::setup_swarm(&local_key)?;
@@ -234,6 +237,10 @@ async fn main() -> anyhow::Result<()> {
                     warn!("Need compute gossip failed, error: `{e:?}`");
                 }
             },
+
+            // p = pipeline_init_future.select_next_some() => {
+            //     self.pipeline = Some(p?);
+            // }
 
             // new blocks inbound
             new_blocks = block_stream.select_next_some() => {                
@@ -623,12 +630,12 @@ async fn subscribe_to_block_stream(
                 .arg("STREAMS").arg("blocks").arg(&last_id)
                 .query_async(&mut redis_con)
                 .await
-                .unwrap();        
+                .unwrap();
             let streams = result.as_sequence().unwrap();
             let contents = streams[0].as_sequence().unwrap();
             let _stream_name = &contents[0];
             let entries = contents[1].as_sequence().unwrap();
-            let mut blocks: BTreeMap<u32, BTreeMap<u32, Vec<u8>>> = BTreeMap::new();
+            let mut blocks: BTreeMap<u32, BTreeMap<u32, Vec<u8>>> = BTreeMap::new();            
             for entry in entries {
                 let items = &entry.as_sequence().unwrap();
                 if let BulkString(bs) = &items[0] {
