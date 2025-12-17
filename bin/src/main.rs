@@ -178,15 +178,38 @@ async fn main() -> anyhow::Result<()> {
                     bootnode_ip_addr
                 )
                 .parse()?
-            );        
+            );
+        let bootstrap_result = swarm.behaviour_mut()
+            .kademlia
+            .add_address(
+                &bootnode_peer_id.parse()?,
+                format!(
+                    "/ip4/{}/tcp/20201",
+                    bootnode_ip_addr
+                )
+                .parse()?
+            );
+        match bootstrap_result {
+            Ok(query_id) => {
+                info!(
+                    "Bootstrap is initiated, query id: {:?}"
+                    query_id
+                );
+            },
+
+            Err(e) => {
+                warn!(
+                    "Bootstrap failed, error: {:?}"
+                    e
+                );
+            }
+        }
+
     }
     
-    // listen on all interfaces and whatever port the os assigns
-    //@ should read from the config file
+    // listen on all interfaces
     swarm.listen_on("/ip4/0.0.0.0/udp/20201/quic-v1".parse()?)?;
     swarm.listen_on("/ip4/0.0.0.0/tcp/20201".parse()?)?;
-    swarm.listen_on("/ip6/::/tcp/20201".parse()?)?;
-    swarm.listen_on("/ip6/::/udp/20201/quic-v1".parse()?)?;
 
     // to update kademlia tables
     let mut timer_peer_discovery = IntervalStream::new(
