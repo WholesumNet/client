@@ -21,8 +21,9 @@ use libp2p::{
 };
 use std::{
     fs,
+    env,
     time::{
-        // Instant, 
+        Instant, 
         Duration,
     },
     // future::IntoFuture,
@@ -34,7 +35,9 @@ use std::{
 };
 use bincode;
 use rand::prelude::*;
-use anyhow;
+use anyhow::{
+    Context
+};
 // use reqwest;
 
 use clap::{
@@ -159,33 +162,42 @@ async fn main() -> anyhow::Result<()> {
         .gossipsub
         .subscribe(&topic);     
 
-    // bootstrap 
-    if false == cli.dev {
-        // get to know bootnodes
-        const BOOTNODES: [&str; 1] = [
-            "TBD",
-        ];
-        for peer in &BOOTNODES {
-            swarm.behaviour_mut()
-                .kademlia
-                .add_address(&peer.parse()?, "/ip4/W.X.Y.Z/tcp/20201".parse()?);
-        }
+    // bootstrap kademlia
+    if !cli.dev {
+        let bootnode_peer_id = env::var("BOOTNODE_PEER_ID")
+            .context("`BOOTNODE_PEER_ID` environment variable does not exist.")?;
+        let bootnode_ip_addr = env::var("BOOTNODE_IP_ADDR")
+            .context("`BOOTNODE_IP_ADDR` environment variable does not exist.")?;
+        // get to know bootnodes        
+        swarm.behaviour_mut()
+            .kademlia
+            .add_address(
+                &bootnode_peer_id.parse()?,
+                format!(
+                    "/ip4/{}/tcp/20201",
+                    bootnode_ip_addr
+                )
+                .parse()?
+            );
         // find myself
         if let Err(e) = 
             swarm
                 .behaviour_mut()
                 .kademlia
                 .bootstrap() {
-            warn!("Failed to bootstrap Kademlia: `{:?}`", e);
+            warn!(
+                "Failed to bootstrap Kademlia: `{:?}`",
+                e
+            );
 
         } else {
-            info!("Self-bootstraping is initiated.");
+            info!(
+                "Kademlia bootstraping is initiated. Bootnode PeerId: `{}`, IP: `{}`",
+                bootnode_peer_id,
+                bootnode_ip_addr
+            );
         }
     }
-
-    // if let Err(e) = swarm.behaviour_mut().kademlia.bootstrap() {
-    //     eprintln!("[warn] Failed to bootstrap Kademlia: `{:?}`", e);
-    // }
     
     // listen on all interfaces and whatever port the os assigns
     //@ should read from the config file
@@ -196,7 +208,7 @@ async fn main() -> anyhow::Result<()> {
 
     // to update kademlia tables
     let mut timer_peer_discovery = IntervalStream::new(
-        interval(Duration::from_secs(5 * 60))
+        interval(Duration::from_secs(60))
     )
     .fuse();
     // to update prover list
@@ -206,6 +218,8 @@ async fn main() -> anyhow::Result<()> {
     .fuse();    
 
     let mut rng = rand::rng();
+
+    let mut recent_insufficient_peers_cry_time = Instant::now();
 
     loop {
         select! {
@@ -234,7 +248,11 @@ async fn main() -> anyhow::Result<()> {
                     .gossipsub
                     .publish(topic.clone(), need)
                 {
-                    warn!("Need compute gossip failed, error: `{e:?}`");
+                    let now = Instant::now();
+                    if now.duration_since(recent_insufficient_peers_cry_time).as_secs() > 120u64 {
+                        warn!("Need compute gossip failed, error: `{e:?}`");
+                        recent_insufficient_peers_cry_time = now;
+                    }
                 }
             },
 
@@ -319,31 +337,23 @@ async fn main() -> anyhow::Result<()> {
                     info,
                     ..
                 })) => {
-                    // println!("Inbound identify event `{:#?}`", info);
-                    if false == cli.dev {
+                    info!(
+                        "Inbound identify event from {:?}: {:?}`",
+                        peer_id,
+                        info
+                    );
+                    if !cli.dev {
                         for addr in info.listen_addrs {
-                            // if false == addr.iter().any(|item| item == &"127.0.0.1" || item == &"::1"){
                             swarm
                                 .behaviour_mut()
                                 .kademlia
                                 .add_address(&peer_id, addr);
-                            // }
                         }
                     }
                 },
 
                 // gossipsub events
-                SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message {
-                    // propagation_source: peer_id,
-                    // message_id,
-                    // message,
-                    ..
-                })) => {
-                    // let msg_str = String::from_utf8_lossy(&message.data);
-                    // println!("Got message: '{}' with id: {id} from peer: {peer_id}",
-                    //          msg_str);
-                    // info!("received gossip message: {:#?}", message);                    
-                },
+                SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message{..})) => {},
 
                 // requests
                 SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
@@ -610,7 +620,7 @@ async fn main() -> anyhow::Result<()> {
                 },
 
                 _ => {
-                    // println!("{:#?}", event)
+                    // info!("{:#?}", event);
                 },
 
             },
