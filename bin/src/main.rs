@@ -178,25 +178,7 @@ async fn main() -> anyhow::Result<()> {
                     bootnode_ip_addr
                 )
                 .parse()?
-            );
-        // find myself
-        if let Err(e) = 
-            swarm
-                .behaviour_mut()
-                .kademlia
-                .bootstrap() {
-            warn!(
-                "Failed to bootstrap Kademlia: `{:?}`",
-                e
-            );
-
-        } else {
-            info!(
-                "Kademlia bootstraping is initiated. Bootnode PeerId: `{}`, IP: `{}`",
-                bootnode_peer_id,
-                bootnode_ip_addr
-            );
-        }
+            );        
     }
     
     // listen on all interfaces and whatever port the os assigns
