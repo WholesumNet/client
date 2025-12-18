@@ -14,9 +14,16 @@ use tokio::{
 use tokio_stream::wrappers::IntervalStream;
 use redis::Value::BulkString;
 use libp2p::{
-    gossipsub, mdns, request_response,
-    identity, identify,  
-    swarm::{SwarmEvent},
+    core::ConnectedPoint,
+    identity,
+    identify,  
+    gossipsub,
+    mdns,
+    kad,
+    request_response,
+    swarm::{
+        SwarmEvent
+    },
     PeerId,
 };
 use std::{
@@ -162,7 +169,7 @@ async fn main() -> anyhow::Result<()> {
         .gossipsub
         .subscribe(&topic);     
 
-    // bootstrap kademlia
+    // init kademlia
     if !cli.dev {
         let bootnode_peer_id = env::var("BOOTNODE_PEER_ID")
             .context("`BOOTNODE_PEER_ID` environment variable does not exist.")?;
@@ -179,37 +186,28 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .parse()?
             );
-        let bootstrap_result = swarm.behaviour_mut()
-            .kademlia
-            .add_address(
-                &bootnode_peer_id.parse()?,
-                format!(
-                    "/ip4/{}/tcp/20201",
-                    bootnode_ip_addr
-                )
-                .parse()?
-            );
-        match bootstrap_result {
-            Ok(query_id) => {
+        match swarm.behaviour_mut().kademlia.bootstrap() {
+            Ok(query_id) => {            
                 info!(
-                    "Bootstrap is initiated, query id: {:?}"
+                    "Bootstrap is initiated, query id: {:?}",
                     query_id
                 );
             },
-
             Err(e) => {
-                warn!(
-                    "Bootstrap failed, error: {:?}"
+                info!(
+                    "Bootstrap failed: {:?}",
                     e
                 );
             }
-        }
-
+        };
     }
-    
     // listen on all interfaces
-    swarm.listen_on("/ip4/0.0.0.0/udp/20201/quic-v1".parse()?)?;
-    swarm.listen_on("/ip4/0.0.0.0/tcp/20201".parse()?)?;
+    swarm.listen_on(
+        "/ip4/0.0.0.0/udp/20201/quic-v1".parse()?
+    )?;
+    swarm.listen_on(
+        "/ip4/0.0.0.0/tcp/20201".parse()?
+    )?;
 
     // to update kademlia tables
     let mut timer_peer_discovery = IntervalStream::new(
@@ -230,7 +228,7 @@ async fn main() -> anyhow::Result<()> {
         select! {
             // try to discover new peers
             _i = timer_peer_discovery.select_next_some() => {
-                if true == cli.dev {
+                if cli.dev {
                     continue;
                 }
                 let random_peer_id = PeerId::random();
@@ -238,7 +236,7 @@ async fn main() -> anyhow::Result<()> {
                 swarm
                     .behaviour_mut()
                     .kademlia
-                    .get_closest_peers(random_peer_id);
+                    .get_closest_peers(random_peer_id);                
             },
 
             // update prover list
@@ -302,9 +300,35 @@ async fn main() -> anyhow::Result<()> {
 
             // libp2p events
             event = swarm.select_next_some() => match event {
-                
+                // general events
                 SwarmEvent::NewListenAddr { address, .. } => {
                     info!("Local node is listening on {address}");
+                },
+
+                SwarmEvent::ConnectionEstablished {
+                    peer_id,
+                    endpoint,
+                    ..
+                } => {
+                    println!(
+                        "A connection has been established to {}@{:?}",
+                        peer_id,
+                        endpoint
+                    );
+                    if !cli.dev {
+                        let addr = match endpoint {
+                            ConnectedPoint::Dialer { address, .. } => {
+                                address
+                            },
+
+                            ConnectedPoint::Listener { send_back_addr, .. } => {
+                                send_back_addr
+                            }
+                        };
+                        swarm.behaviour_mut()
+                            .kademlia
+                            .add_address(&peer_id, addr);
+                    }
                 },
 
                 // mdns events
@@ -342,15 +366,14 @@ async fn main() -> anyhow::Result<()> {
                     info,
                     ..
                 })) => {
-                    info!(
-                        "Inbound identify event from {:?}: {:?}`",
-                        peer_id,
-                        info
-                    );
                     if !cli.dev {
+                        info!(
+                            "Inbound identify event from {}: {:#?}`",
+                            peer_id,
+                            info
+                        );
                         for addr in info.listen_addrs {
-                            swarm
-                                .behaviour_mut()
+                            swarm.behaviour_mut()
                                 .kademlia
                                 .add_address(&peer_id, addr);
                         }
@@ -359,6 +382,24 @@ async fn main() -> anyhow::Result<()> {
 
                 // gossipsub events
                 SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message{..})) => {},
+
+                // kademlia events
+                SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+                    result: kad::QueryResult::GetClosestPeers(Ok(ok)),
+                    ..
+                })) => {
+                    info!("Query finished with closest peers: {:#?}", ok.peers);
+                },
+
+                SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+                    result:
+                        kad::QueryResult::GetClosestPeers(Err(kad::GetClosestPeersError::Timeout {
+                            ..
+                        })),
+                    ..
+                })) => {
+                    warn!("Query for closest peers timed out");
+                },
 
                 // requests
                 SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
@@ -625,7 +666,7 @@ async fn main() -> anyhow::Result<()> {
                 },
 
                 _ => {
-                    // info!("{:#?}", event);
+                    info!("{:#?}", event);
                 },
 
             },
