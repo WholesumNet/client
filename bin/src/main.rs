@@ -14,7 +14,6 @@ use tokio::{
 use tokio_stream::wrappers::IntervalStream;
 use redis::Value::BulkString;
 use libp2p::{
-    core::ConnectedPoint,
     identity,
     identify,  
     gossipsub,
@@ -25,6 +24,7 @@ use libp2p::{
         SwarmEvent
     },
     PeerId,
+    multiaddr::Protocol
 };
 use std::{
     fs,
@@ -167,15 +167,20 @@ async fn main() -> anyhow::Result<()> {
     let _ = swarm
         .behaviour_mut()
         .gossipsub
-        .subscribe(&topic);     
+        .subscribe(&topic);
 
+    // let rendezvous_record = if cli.dev {
+    //     None
+    // } else {
+    //     Some(kad::RecordKey::new(&b"wholesum-rendezvous"))
+    // };
     // init kademlia
     if !cli.dev {
         let bootnode_peer_id = env::var("BOOTNODE_PEER_ID")
             .context("`BOOTNODE_PEER_ID` environment variable does not exist.")?;
         let bootnode_ip_addr = env::var("BOOTNODE_IP_ADDR")
             .context("`BOOTNODE_IP_ADDR` environment variable does not exist.")?;
-        // get to know bootnodes        
+        // get to know bootnode(s)
         swarm.behaviour_mut()
             .kademlia
             .add_address(
@@ -186,6 +191,7 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .parse()?
             );
+        // initiate bootstrapping
         match swarm.behaviour_mut().kademlia.bootstrap() {
             Ok(query_id) => {            
                 info!(
@@ -200,6 +206,26 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         };
+        // put the rendezvous key on the DHT
+        // match swarm.behaviour_mut()
+        //     .kademlia
+        //     .start_providing(
+        //         rendezvous_record.clone().unwrap()
+        //     )
+        // {
+        //     Ok(query_id) => {
+        //         info!(
+        //             "Rendezvous record is put on the DHT, query Id: {}",
+        //             query_id
+        //         );
+        //     },
+        //     Err(e) => {
+        //         warn!(
+        //             "Failed to put the rendezvous record on the DHT: {:?}.",
+        //             e
+        //         );
+        //     }
+        // };
     }
     // listen on all interfaces
     swarm.listen_on(
@@ -208,6 +234,12 @@ async fn main() -> anyhow::Result<()> {
     swarm.listen_on(
         "/ip4/0.0.0.0/tcp/20201".parse()?
     )?;
+    // swarm.listen_on(
+    //     "/ip6/::/udp/20201/quic-v1".parse()?
+    // )?;
+    // swarm.listen_on(
+    //     "/ip6/::/tcp/20201".parse()?
+    // )?;
 
     // to update kademlia tables
     let mut timer_peer_discovery = IntervalStream::new(
@@ -218,7 +250,12 @@ async fn main() -> anyhow::Result<()> {
     let mut timer_update_prover_list = IntervalStream::new(
         interval(Duration::from_secs(5))
     )
-    .fuse();    
+    .fuse();
+    // to pull for new peers 
+    let mut timer_pull_rendezvous_providers = IntervalStream::new(
+        interval(Duration::from_secs(10))
+    )
+    .fuse();
 
     let mut rng = rand::rng();
 
@@ -257,6 +294,15 @@ async fn main() -> anyhow::Result<()> {
                         recent_insufficient_peers_cry_time = now;
                     }
                 }
+            },
+
+            // pull for new peers
+            _i = timer_pull_rendezvous_providers.select_next_some() => {
+                // if !cli.dev {
+                //     swarm.behaviour_mut()
+                //         .kademlia
+                //         .get_providers(rendezvous_record.clone().unwrap());
+                // }
             },
 
             // p = pipeline_init_future.select_next_some() => {
@@ -311,24 +357,10 @@ async fn main() -> anyhow::Result<()> {
                     ..
                 } => {
                     println!(
-                        "A connection has been established to {}@{:?}",
+                        "A connection has been established to {} via {:?}",
                         peer_id,
                         endpoint
-                    );
-                    if !cli.dev {
-                        let addr = match endpoint {
-                            ConnectedPoint::Dialer { address, .. } => {
-                                address
-                            },
-
-                            ConnectedPoint::Listener { send_back_addr, .. } => {
-                                send_back_addr
-                            }
-                        };
-                        swarm.behaviour_mut()
-                            .kademlia
-                            .add_address(&peer_id, addr);
-                    }
+                    );                    
                 },
 
                 // mdns events
@@ -339,8 +371,7 @@ async fn main() -> anyhow::Result<()> {
                 ) => {
                     for (peer_id, _multiaddr) in list {
                         info!("mDNS discovered a new peer: {peer_id}");
-                        swarm
-                            .behaviour_mut()
+                        swarm.behaviour_mut()
                             .gossipsub
                             .add_explicit_peer(&peer_id);
                     }                     
@@ -353,8 +384,7 @@ async fn main() -> anyhow::Result<()> {
                 ) => {
                     for (peer_id, _multiaddr) in list {
                         info!("mDNS discovered peer has expired: {peer_id}");
-                        swarm
-                            .behaviour_mut()
+                        swarm.behaviour_mut()
                             .gossipsub
                             .remove_explicit_peer(&peer_id);
                     }
@@ -366,19 +396,38 @@ async fn main() -> anyhow::Result<()> {
                     info,
                     ..
                 })) => {
-                    if !cli.dev {
-                        info!(
-                            "Inbound identify event from {}: {:#?}`",
-                            peer_id,
-                            info
-                        );
-                        for addr in info.listen_addrs {
-                            swarm.behaviour_mut()
-                                .kademlia
-                                .add_address(&peer_id, addr);
-                        }
-                    }
+                    info!(
+                        "Received identify from {}: {:#?}`",
+                        peer_id,
+                        info
+                    );                        
                 },
+
+                SwarmEvent::NewExternalAddrOfPeer {
+                    peer_id,
+                    address
+                } => {
+                    let is_public = address.iter()
+                        .filter_map(|c| 
+                            if let Protocol::Ip4(ip4_addr) = c {
+                                Some(ip4_addr)
+                            } else {
+                                None
+                            }
+                        )
+                        .all(|a| !a.is_private() && !a.is_loopback());
+                    if is_public {                        
+                        info!(
+                            "Added public address of the peer to the DHT: {}",
+                            address
+                        );
+                        swarm.behaviour_mut()
+                            .kademlia
+                            .add_address(&peer_id, address);
+                    }                      
+                },
+
+
 
                 // gossipsub events
                 SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message{..})) => {},
@@ -401,6 +450,22 @@ async fn main() -> anyhow::Result<()> {
                     warn!("Query for closest peers timed out");
                 },
 
+                // SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+                //     result: kad::QueryResult::GetProviders(
+                //         Ok(
+                //             kad::GetProvidersOk::FoundProviders{ mut providers, .. }
+                //         )
+                //     ),
+                //     ..
+                // })) => {
+                //     providers.remove(&my_peer_id);
+                //     info!("providers: {:?}", providers);
+                //     for peer_id in providers {
+                //         let res = swarm.dial(peer_id);
+                //         info!("dial result: {:?}", res);
+                //     }
+                // },
+
                 // requests
                 SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
                     peer: prover,
@@ -409,11 +474,13 @@ async fn main() -> anyhow::Result<()> {
                         channel,
                         //request_id,
                         ..
-                    }
+                    },
+                    ..
                 })) => {                
                     match request {
                         // prover indicates her interest to prove                        
                         protocol::Request::Would => {
+                            info!("would: {}", prover);
                             active_provers.insert(prover.clone());
                             if current_block.is_none() {
                                 continue;
@@ -522,7 +589,8 @@ async fn main() -> anyhow::Result<()> {
                         response,
                         //response_id,
                         ..
-                    }
+                    },
+                    ..
                 })) => {                
                     match response {
                         _ => {},
@@ -537,7 +605,8 @@ async fn main() -> anyhow::Result<()> {
                         channel,
                         //request_id,
                         ..
-                    }
+                    },
+                    ..
                 })) => {                
                     match request {
                         blob_transfer::Request::GetInfo(hash) => {
@@ -593,7 +662,8 @@ async fn main() -> anyhow::Result<()> {
                         response,
                         //response_id,
                         ..
-                    }
+                    },
+                    ..
                 })) => {                
                     match response {
                         blob_transfer::Response::Info(blob_info) => {
