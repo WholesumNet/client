@@ -15,15 +15,13 @@ debug = true
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [workspace.dependencies]
 
 serde = {version = "1.0", features = ["derive"]}
 toml = "0.7"
 async-trait = "0.1"
 futures = "0.3.28"
-libp2p = { version = "0.53.2", features = ["tokio", "request-response", "cbor", "gossipsub", "mdns", "noise", "macros", "tcp", "yamux"] }
+libp2p = { version = "0.56", features = ["tokio", "request-response", "cbor", "gossipsub", "mdns", "noise", "macros", "tcp", "yamux"] }
 clap = { version = "4.3.21", features = ["derive"] }
 log = "0.4.25"
 env_logger = "0.10.0"
@@ -38,11 +36,9 @@ serde_json = "1.0.134"
 rand = "0.9.1"
 mongodb = "3.1.0"
 redis = { version = "0.32", features = ["tokio-comp"] }
-tokio = "1.45.1"
+tokio = { version = "1.45.1", default-features = false, features = ["macros", "rt", "rt-multi-thread"] }
 tokio-stream = "0.1.17"
 #rs_merkle = "1.5.0"
-# sp1
-sp1-zkvm = { version = "=4.1.7", features = ["verify"] }
 
 anbar = { path = "../anbar" }
 peyk = { path = "../peyk" }
