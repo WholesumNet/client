@@ -27,7 +27,6 @@ use libp2p::{
     multiaddr::Protocol
 };
 use std::{
-    fs,
     env,
     time::{
         Instant, 
@@ -128,23 +127,6 @@ async fn main() -> anyhow::Result<()> {
     // blob store
     let mut blob_store = anbar::BlobStore::new();
 
-    // local libp2p key 
-    let local_key = {
-        if let Some(key_file) = cli.key_file {
-            let bytes = fs::read(key_file).unwrap();
-            identity::Keypair::from_protobuf_encoding(&bytes)?
-        } else {
-            // Create a random key for ourselves
-            let new_key = identity::Keypair::generate_ed25519();
-            let bytes = new_key.to_protobuf_encoding().unwrap();
-            let _bw = fs::write("./key.secret", bytes);
-            warn!("No keys were supplied, so one is generated for you and saved to `./key.secret` file.");
-            new_key
-        }
-    };    
-    let my_peer_id = PeerId::from_public_key(&local_key.public());
-    info!("My PeerId: `{my_peer_id}`");     
-
     // let col_jobs = db_client
     //     .database("wholesum_client")
     //     .collection::<db::Job>("jobs");
@@ -161,26 +143,57 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;    
 
-    // swarm 
+    // Libp2p swarm 
+    // peer id
+    let local_key = {
+        if let Some(key_file) = cli.key_file {
+            let bytes = std::fs::read(key_file).unwrap();
+            identity::Keypair::from_protobuf_encoding(&bytes)?
+        } else {
+            // Create a random key for ourselves
+            let new_key = identity::Keypair::generate_ed25519();
+            let bytes = new_key.to_protobuf_encoding().unwrap();
+            let _bw = std::fs::write("./key.secret", bytes);
+            warn!("No keys were supplied, so one is generated for you and saved to `./key.secret` file.");
+            new_key
+        }
+    };    
+    let my_peer_id = PeerId::from_public_key(&local_key.public());    
+    info!(
+        "My peer id: `{}`",
+        my_peer_id
+    );  
     let mut swarm = peyk::p2p::setup_swarm(&local_key)?;
+    // listen on all interfaces
+    // ipv4
+    swarm.listen_on(
+        "/ip4/0.0.0.0/udp/20201/quic-v1".parse()?
+    )?;
+    swarm.listen_on(
+        "/ip4/0.0.0.0/tcp/20201".parse()?
+    )?;
+    // ipv6
+    // ipv6
+    // swarm.listen_on(
+    //     "/ip6/::/udp/20201/quic-v1".parse()?
+    // )?;
+    // swarm.listen_on(
+    //     "/ip6/::/tcp/20201".parse()?
+    // )?;
+    // init gossip
     let topic = gossipsub::IdentTopic::new("<-- Wholesum p2p prover bazaar -->");
     let _ = swarm
         .behaviour_mut()
         .gossipsub
         .subscribe(&topic);
-
-    // let rendezvous_record = if cli.dev {
-    //     None
-    // } else {
-    //     Some(kad::RecordKey::new(&b"wholesum-rendezvous"))
-    // };
+    
     // init kademlia
     if !cli.dev {
+        // get to know bootnode(s)
         let bootnode_peer_id = env::var("BOOTNODE_PEER_ID")
             .context("`BOOTNODE_PEER_ID` environment variable does not exist.")?;
         let bootnode_ip_addr = env::var("BOOTNODE_IP_ADDR")
             .context("`BOOTNODE_IP_ADDR` environment variable does not exist.")?;
-        // get to know bootnode(s)
         swarm.behaviour_mut()
             .kademlia
             .add_address(
@@ -206,40 +219,28 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         };
-        // put the rendezvous key on the DHT
-        // match swarm.behaviour_mut()
-        //     .kademlia
-        //     .start_providing(
-        //         rendezvous_record.clone().unwrap()
-        //     )
-        // {
-        //     Ok(query_id) => {
-        //         info!(
-        //             "Rendezvous record is put on the DHT, query Id: {}",
-        //             query_id
-        //         );
-        //     },
-        //     Err(e) => {
-        //         warn!(
-        //             "Failed to put the rendezvous record on the DHT: {:?}.",
-        //             e
-        //         );
-        //     }
-        // };
+        // specify the external address
+        let external_ip_addr = env::var("EXTERNAL_IP_ADDR")
+            .context("`EXTERNAL_IP_ADDR` environment variable does not exist.")?;
+        let external_port = env::var("EXTERNAL_PORT")
+            .context("`EXTERNAL_PORT` environment variable does not exist.")?;
+        swarm.add_external_address(
+            format!(
+                "/ip4/{}/tcp/{}",
+                external_ip_addr,
+                external_port
+            )
+            .parse()?
+        );
+        swarm.add_external_address(
+            format!(
+                "/ip4/{}/udp/{}/quic-v1",
+                external_ip_addr,
+                external_port
+            )
+            .parse()?
+        );
     }
-    // listen on all interfaces
-    swarm.listen_on(
-        "/ip4/0.0.0.0/udp/20201/quic-v1".parse()?
-    )?;
-    swarm.listen_on(
-        "/ip4/0.0.0.0/tcp/20201".parse()?
-    )?;
-    // swarm.listen_on(
-    //     "/ip6/::/udp/20201/quic-v1".parse()?
-    // )?;
-    // swarm.listen_on(
-    //     "/ip6/::/tcp/20201".parse()?
-    // )?;
 
     // to update kademlia tables
     let mut timer_peer_discovery = IntervalStream::new(
@@ -480,7 +481,6 @@ async fn main() -> anyhow::Result<()> {
                     match request {
                         // prover indicates her interest to prove                        
                         protocol::Request::Would => {
-                            info!("would: {}", prover);
                             active_provers.insert(prover.clone());
                             if current_block.is_none() {
                                 continue;
@@ -563,10 +563,8 @@ async fn main() -> anyhow::Result<()> {
                                         token.hash,
                                         prover.clone()
                                     );
-
-                                    blob_store.add_incomplete_blob(token.hash);
-                                    let _req_id = swarm
-                                        .behaviour_mut()
+                                    
+                                    let _req_id = swarm.behaviour_mut()
                                         .blob_transfer
                                         .send_request(
                                             &prover,
@@ -610,7 +608,7 @@ async fn main() -> anyhow::Result<()> {
                 })) => {                
                     match request {
                         blob_transfer::Request::GetInfo(hash) => {
-                            if let Some(num_chunks) = blob_store.get_blob_info(hash) {
+                            if let Some(num_chunks) = blob_store.get_num_chunks(hash) {
                                 if let Err(e) = swarm
                                     .behaviour_mut()
                                     .blob_transfer
@@ -667,7 +665,14 @@ async fn main() -> anyhow::Result<()> {
                 })) => {                
                     match response {
                         blob_transfer::Response::Info(blob_info) => {
-                            blob_store.add_blob_info(blob_info.hash, blob_info.num_chunks);
+                            //@ verify hash of proof blob vs assigngment
+                            if !blob_store.add_incomplete_blob(
+                                    blob_info.hash,
+                                    blob_info.num_chunks
+                                )
+                            {
+                                continue;
+                            }
                             // request first chunk
                             let _req_id = swarm
                                 .behaviour_mut()
@@ -692,7 +697,7 @@ async fn main() -> anyhow::Result<()> {
                                 blob_chunk.chunk_hash
                             );
                             if blob_store.is_blob_complete(blob_chunk.blob_hash) {
-                                if pipeline.stage == Stage::Agg {
+                                if pipeline.stage == Stage::Verify {
                                     let proof = blob_store.get_blob(blob_chunk.blob_hash).unwrap();
                                     if let Ok(()) = pipeline.verify_agg_proof(&proof) {
                                         info!(
@@ -736,7 +741,7 @@ async fn main() -> anyhow::Result<()> {
                 },
 
                 _ => {
-                    info!("{:#?}", event);
+                    // info!("{:#?}", event);
                 },
 
             },
