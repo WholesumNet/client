@@ -35,6 +35,7 @@ use std::{
     // future::IntoFuture,
     collections::{
         HashSet,
+        HashMap,
         BTreeMap,
         VecDeque
     },
@@ -45,7 +46,7 @@ use anyhow::{
     Context
 };
 // use reqwest;
-
+use xxhash_rust::xxh3::xxh3_128;
 use clap::{
     Parser
 };
@@ -69,7 +70,7 @@ use peyk::{
     blob_transfer
 };
 
-use anbar;
+// use anbar;
 
 use pipeline::{
     pipeline::{
@@ -125,7 +126,7 @@ async fn main() -> anyhow::Result<()> {
     let mut block_stream = subscribe_to_block_stream(redis_con.clone()).await;    
 
     // blob store
-    let mut blob_store = anbar::BlobStore::new();
+    let mut blob_store = HashMap::<u128, Vec<u8>>::new();
 
     // let col_jobs = db_client
     //     .database("wholesum_client")
@@ -326,7 +327,9 @@ async fn main() -> anyhow::Result<()> {
                     let mut blob_hashes = 
                         Vec::<u128>::with_capacity(stdin_map.len());
                     for (_i, blob) in stdin_map.into_iter() {
-                        blob_hashes.push(blob_store.store(blob));
+                        let hash = xxh3_128(&blob);
+                        blob_store.insert(hash, blob);
+                        blob_hashes.push(hash);
                     }                    
                     blocks.insert(block_number, blob_hashes);
                 }
@@ -397,11 +400,11 @@ async fn main() -> anyhow::Result<()> {
                     info,
                     ..
                 })) => {
-                    info!(
-                        "Received identify from {}: {:#?}`",
-                        peer_id,
-                        info
-                    );                        
+                    // info!(
+                    //     "Received identify from {}: {:#?}`",
+                    //     peer_id,
+                    //     info
+                    // );                        
                 },
 
                 SwarmEvent::NewExternalAddrOfPeer {
@@ -568,10 +571,10 @@ async fn main() -> anyhow::Result<()> {
                                         .blob_transfer
                                         .send_request(
                                             &prover,
-                                            blob_transfer::Request::GetInfo(token.hash)
+                                            blob_transfer::Request(token.hash.to_string())
                                         );
                                     info!(
-                                        "Requested info of agg proof blob(`{:?}`) from `{:?}`",
+                                        "Requested agg proof blob(`{:?}`) from `{}`",
                                         token.hash,
                                         prover
                                     );                                    
@@ -597,59 +600,43 @@ async fn main() -> anyhow::Result<()> {
 
                 // blob transfer requests
                 SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::Message {
-                    peer: _peer_id,
+                    peer: peer_id,
                     message: request_response::Message::Request {
-                        request,
+                        request: blob_transfer::Request(blob_hash),
                         channel,
                         //request_id,
                         ..
                     },
                     ..
                 })) => {                
-                    match request {
-                        blob_transfer::Request::GetInfo(hash) => {
-                            if let Some(num_chunks) = blob_store.get_num_chunks(hash) {
-                                if let Err(e) = swarm
-                                    .behaviour_mut()
-                                    .blob_transfer
-                                        .send_response(
-                                            channel,
-                                            blob_transfer::Response::Info(blob_transfer::BlobInfo {
-                                                hash: hash,                                            
-                                                num_chunks: num_chunks,
-                                            })
-                                        )
-                                {
-                                    warn!("Failed to send back blob info: `{e:?}`");
-                                }
-                            }
-                        },
-
-                        blob_transfer::Request::GetChunk(blob_hash, req_chunk_index) => {
-                            if let Some((data, chunk_hash)) = blob_store.get_chunk(
-                                blob_hash, 
-                                req_chunk_index
-                            ) {
-                                if let Err(e) = swarm
-                                    .behaviour_mut()
-                                    .blob_transfer
-                                        .send_response(
-                                            channel,
-                                            blob_transfer::Response::Chunk(
-                                                blob_transfer::BlobChunk {
-                                                    blob_hash: blob_hash,
-                                                    index: req_chunk_index,
-                                                    data: data,
-                                                    chunk_hash: chunk_hash,
-                                                }
-                                            )
-                                        )
-                                {
-                                    warn!("Failed to send back the blob chunk: `{e:?}`");
-                                    //@ wtdh
-                                }
-                            }
-                        },
+                    let blob_hash = blob_hash.parse::<u128>().unwrap();
+                    if let Some(blob) = blob_store.get(&blob_hash) {
+                        if let Err(e) = swarm
+                            .behaviour_mut()
+                            .blob_transfer
+                                .send_response(
+                                    channel,
+                                    blob_transfer::Response(blob.clone())
+                                )
+                        {
+                            warn!(
+                                "Failed to initiate the requested blob(`{}`)'s transmission: `{:?}`.",
+                                blob_hash,
+                                e
+                            );
+                        } else {
+                            info!(
+                                "The requested blob(`{}`)'s transmission to `{}` is initiated: {:.2} KB",
+                                blob_hash,
+                                peer_id,
+                                blob.len() as f64 / 1024.0f64
+                            );
+                        }                            
+                    } else {
+                        warn!(
+                            "The requested blob(`{}`) does not exist.",
+                            blob_hash,
+                        );
                     }
                 },
 
@@ -657,86 +644,45 @@ async fn main() -> anyhow::Result<()> {
                 SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::Message {
                     peer: peer_id,
                     message: request_response::Message::Response {
-                        response,
+                        response: blob_transfer::Response(blob),
                         //response_id,
                         ..
                     },
                     ..
                 })) => {                
-                    match response {
-                        blob_transfer::Response::Info(blob_info) => {
-                            //@ verify hash of proof blob vs assigngment
-                            if !blob_store.add_incomplete_blob(
-                                    blob_info.hash,
-                                    blob_info.num_chunks
-                                )
-                            {
-                                continue;
-                            }
-                            // request first chunk
-                            let _req_id = swarm
-                                .behaviour_mut()
-                                .blob_transfer
-                                .send_request(
-                                    &peer_id,
-                                    blob_transfer::Request::GetChunk(blob_info.hash, 0)
-                                );
-                            info!(
-                                "Requested the first chunk of the blob(`{}`) from `{}`",
-                                blob_info.hash,
-                                peer_id
+                    if pipeline.stage != Stage::Verify {
+                        let hash = xxh3_128(&blob);
+                        warn!(
+                            "Received unsolicited blob(`{}`) from `{}`.",
+                            hash,
+                            peer_id
+                        );
+                        continue;
+                    }
+                    if let Ok(()) = pipeline.verify_agg_proof(&blob) {
+                        info!(
+                            "Block(`{}`)'s proof is verified.",
+                            pipeline.block_number
+                        );
+                        //@ archive the proof in db
+                        // being the next one
+                        current_block = outstanding_blocks.pop_front();
+                        if let Some(block_number) = current_block {
+                            let blob_hashes = blocks.get(&block_number).unwrap();                    
+                            pipeline.begin_next_block(
+                                block_number,
+                                &blob_hashes,
+                                &my_peer_id,
                             );
-                        },
-
-                        blob_transfer::Response::Chunk(blob_chunk) => {                        
-                            //@ assumed owner === chunk sender
-                            blob_store.add_blob_chunk(
-                                blob_chunk.blob_hash,
-                                blob_chunk.index,
-                                blob_chunk.data,
-                                blob_chunk.chunk_hash
-                            );
-                            if blob_store.is_blob_complete(blob_chunk.blob_hash) {
-                                if pipeline.stage == Stage::Verify {
-                                    let proof = blob_store.get_blob(blob_chunk.blob_hash).unwrap();
-                                    if let Ok(()) = pipeline.verify_agg_proof(&proof) {
-                                        info!(
-                                            "Block proof(`{:?}`) is verified.",
-                                            pipeline.block_number
-                                        );
-                                        // being the next one
-                                        current_block = outstanding_blocks.pop_front();
-                                        if let Some(block_number) = current_block {
-                                            let blob_hashes = blocks.get(&block_number).unwrap();                    
-                                            pipeline.begin_next_block(
-                                                block_number,
-                                                &blob_hashes,
-                                                &my_peer_id,
-                                            );
-                                        } else {
-                                            info!("All blocks are processed, waiting for the next batch.");
-                                        }
-                                    } else {
-                                        warn!(
-                                            "Proof verification failed for block(`{:?}`).",
-                                            pipeline.block_number
-                                        );
-                                        //@ wtd?
-                                    }
-                                }                                
-                            } else {
-                                // request next chunk
-                                if let Some(next_chunk_index) = blob_store.get_next_blob_chunk_index(blob_chunk.blob_hash) {
-                                    let _req_id = swarm
-                                        .behaviour_mut()
-                                        .blob_transfer
-                                        .send_request(
-                                            &peer_id,
-                                            blob_transfer::Request::GetChunk(blob_chunk.blob_hash, next_chunk_index)
-                                        );
-                                }                             
-                            }                            
+                        } else {
+                            info!("All blocks are processed, waiting for the next batch.");
                         }
+                    } else {
+                        warn!(
+                            "Proof verification failed for block(`{:?}`).",
+                            pipeline.block_number
+                        );
+                        //@ wtd?
                     }
                 },
 
