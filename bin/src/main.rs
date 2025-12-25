@@ -663,26 +663,26 @@ async fn main() -> anyhow::Result<()> {
                         info!(
                             "Block(`{}`)'s proof is verified.",
                             pipeline.block_number
-                        );
-                        //@ archive the proof in db
-                        // being the next one
-                        current_block = outstanding_blocks.pop_front();
-                        if let Some(block_number) = current_block {
-                            let blob_hashes = blocks.get(&block_number).unwrap();                    
-                            pipeline.begin_next_block(
-                                block_number,
-                                &blob_hashes,
-                                &my_peer_id,
-                            );
-                        } else {
-                            info!("All blocks are processed, waiting for the next batch.");
-                        }
+                        );                        
                     } else {
                         warn!(
-                            "Proof verification failed for block(`{:?}`).",
+                            "Proof verification failed for block(`{}`).",
                             pipeline.block_number
                         );
                         //@ wtd?
+                    }
+                    //@ archive the proof in db
+                    // being the next one
+                    current_block = outstanding_blocks.pop_front();
+                    if let Some(block_number) = current_block {
+                        let blob_hashes = blocks.get(&block_number).unwrap();                    
+                        pipeline.begin_next_block(
+                            block_number,
+                            &blob_hashes,
+                            &my_peer_id,
+                        );
+                    } else {
+                        info!("All blocks are processed, waiting for the next batch.");
                     }
                 },
 

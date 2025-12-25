@@ -28,5 +28,4 @@ tokio-stream.workspace = true
 
 pipeline = { path = "../pipeline" }
 peyk.workspace = true
-anbar.workspace = true
 

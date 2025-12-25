@@ -166,17 +166,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anbar"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "env_logger",
- "log",
- "serde",
- "xxhash-rust",
-]
-
-[[package]]
 name = "android-tzdata"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6419,7 +6408,6 @@ dependencies = [
 name = "subblock"
 version = "0.1.0"
 dependencies = [
- "anbar",
  "anyhow",
  "async-trait",
  "bincode",
