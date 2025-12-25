@@ -396,8 +396,8 @@ async fn main() -> anyhow::Result<()> {
 
                 // identify events
                 SwarmEvent::Behaviour(MyBehaviourEvent::Identify(identify::Event::Received {
-                    peer_id,
-                    info,
+                    // peer_id,
+                    // info,
                     ..
                 })) => {
                     // info!(
