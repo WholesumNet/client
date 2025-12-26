@@ -271,7 +271,7 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
                 let random_peer_id = PeerId::random();
-                info!("Searching for the closest peers to `{random_peer_id}`");
+                // info!("Searching for the closest peers to `{random_peer_id}`");
                 swarm
                     .behaviour_mut()
                     .kademlia
@@ -360,7 +360,7 @@ async fn main() -> anyhow::Result<()> {
                     endpoint,
                     ..
                 } => {
-                    println!(
+                    info!(
                         "A connection has been established to {} via {:?}",
                         peer_id,
                         endpoint
@@ -441,7 +441,7 @@ async fn main() -> anyhow::Result<()> {
                     result: kad::QueryResult::GetClosestPeers(Ok(ok)),
                     ..
                 })) => {
-                    info!("Query finished with closest peers: {:#?}", ok.peers);
+                    // info!("Query finished with closest peers: {:#?}", ok.peers);
                 },
 
                 SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
@@ -451,7 +451,7 @@ async fn main() -> anyhow::Result<()> {
                         })),
                     ..
                 })) => {
-                    warn!("Query for closest peers timed out");
+                    // warn!("Query for closest peers timed out");
                 },
 
                 // SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
