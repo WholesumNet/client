@@ -63,10 +63,10 @@ impl Pipeline {
         self.archive();
         
         info!(
-            "Started to prove block `({})`: {} subblock{} to prove + the aggregation.",
+            "Started to prove block `({})`: {} subblock{} + the aggregation to prove.",
             block_number,
             inputs.len() - 1,
-            if inputs.len() == 2 { "" } else { "'s" }
+            if inputs.len() == 2 { "" } else { "s" }
         );
         self.id = Uuid::new_v4().as_u128();
         self.block_number = block_number;
