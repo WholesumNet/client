@@ -1,10 +1,14 @@
-
+use std::{
+    time::{
+        Instant,
+        Duration
+    }
+};
 use log::{
     info, warn
 };
 use uuid::Uuid;
 use libp2p::PeerId;
-
 use crate::round;
 use round::{
     Round,
@@ -25,6 +29,10 @@ pub struct Pipeline {
     // job id
     pub id: u128,
     pub block_number: u32,
+
+    // measure proving time
+    start_time: Instant,
+    duration: Duration,
     
     pub stage: Stage,
     subblock_round: Round,    
@@ -39,6 +47,9 @@ impl Pipeline {
             id: 0u128,
             block_number: 0u32,
             stage: Stage::Verify,
+            //@ calling now() is useless
+            start_time: Instant::now(),
+            duration: Duration::from_secs(0),
             subblock_round: Round::new(0usize, 1usize),
             agg_round: Round::new(127usize, 1usize),
             sp1_handle: SP1Handle::new()?,
@@ -59,9 +70,7 @@ impl Pipeline {
             );
             return;
         }
-
-        self.archive();
-        
+        self.start_time = Instant::now();
         info!(
             "Started to prove block `({})`: {} subblock{} + the aggregation to prove.",
             block_number,
@@ -150,13 +159,27 @@ impl Pipeline {
     }
 
     pub fn verify_agg_proof(
-        &self,
+        &mut self,
         proof_blob: &[u8]
     ) -> anyhow::Result<()> {
-        self.sp1_handle.verify_agg(proof_blob)
+        match self.sp1_handle.verify_agg(proof_blob) {
+            Ok(_) => {
+                self.archive();
+                Ok(())
+            },
+
+            Err(e) => {
+                Err(e)
+            }
+        }
     }
 
-    pub fn archive(&self) {
-
+    pub fn archive(&mut self) {
+        self.duration = self.start_time.elapsed();
+        info!(
+            "Block proving time: `{}` minutes and `{}` seconds",
+            self.duration.as_secs() / 60,
+            self.duration.as_secs() % 60,
+        );
     }
 }
