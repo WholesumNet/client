@@ -34,20 +34,20 @@ pub struct Batch {
 
 #[derive(Debug)]
 pub struct Round {
-    pub number: usize,        
-    pub batch_size: usize,
-    pub batches: HashMap<u128, Batch>,
+    batch_size: usize,
+    inputs: Vec<u128>,
+    batches: HashMap<u128, Batch>,
     // it's handy to have two views.
-    pub prover_assignments: HashMap<PeerId, Assignment>,
-    pub batch_prover_assignments: HashMap<u128, PeerId>,
+    prover_assignments: HashMap<PeerId, Assignment>,
+    batch_prover_assignments: HashMap<u128, PeerId>,
 }
 
 impl Round {
-    pub fn new(number: usize, batch_size: usize) -> Self {
+    pub fn new(batch_size: usize) -> Self {
         assert_ne!(batch_size, 0usize);
         Self {
-            number: number,
             batch_size: batch_size,
+            inputs: Vec::new(),
             batches: HashMap::new(),
             prover_assignments: HashMap::new(),
             batch_prover_assignments: HashMap::new()
@@ -55,6 +55,7 @@ impl Round {
     }
 
     pub fn reset(&mut self) {
+        self.inputs.clear();
         self.batches.clear();
         self.prover_assignments.clear();
         self.batch_prover_assignments.clear();
@@ -75,6 +76,7 @@ impl Round {
                 inputs: inputs[start..end].to_vec(),
                 proof: None
             };
+            self.inputs.push(batch.id);
             self.batches.insert(batch.id, batch);
         }        
     }
@@ -139,12 +141,19 @@ impl Round {
         if self.batches.values().any(|b| b.proof.is_none()) {
             warn!("There are unproved batches for this `proofs` request.");
         }
-        self.batches.values()
-            .filter_map(|b| b.proof.clone())
-            .collect::<Vec<Token>>()
+        self.inputs
+            .iter()
+            .filter_map(|batch_id| 
+                self.batches
+                    .get(batch_id)
+                    .unwrap()
+                    .proof
+                    .clone()
+            )
+            .collect::<Vec<_>>()
     }
 
     pub fn remove_stale_assignments(&mut self) {
-        // 30 minutes        
+        // 10 minutes        
     }
 }

@@ -50,8 +50,8 @@ impl Pipeline {
             //@ calling now() is useless
             start_time: Instant::now(),
             duration: Duration::from_secs(0),
-            subblock_round: Round::new(0usize, 1usize),
-            agg_round: Round::new(127usize, 1usize),
+            subblock_round: Round::new(1usize),
+            agg_round: Round::new(1usize),
             sp1_handle: SP1Handle::new()?,
         })        
     }
@@ -72,7 +72,7 @@ impl Pipeline {
         }
         self.start_time = Instant::now();
         info!(
-            "Started to prove block `({})`: {} subblock{} + the aggregation to prove.",
+            "Started block`({})`: {} subblock{} + the aggregation to prove.",
             block_number,
             inputs.len() - 1,
             if inputs.len() == 2 { "" } else { "s" }
@@ -95,8 +95,6 @@ impl Pipeline {
         let agg_token = tokens.split_off(tokens.len() - 1);
         self.subblock_round.feed(&tokens);
         self.agg_round.feed(&agg_token);
-        // println!("subblock: {:#?}", self.subblock_round);
-        // println!("agg: {:#?}", self.agg_round);
     }
 
     pub fn assign(
@@ -176,10 +174,11 @@ impl Pipeline {
 
     pub fn archive(&mut self) {
         self.duration = self.start_time.elapsed();
+        let rem = self.duration.as_secs() % 60;
         info!(
-            "Block proving time: `{}` minutes and `{}` seconds",
+            "Block proving time: {} minutes{}",
             self.duration.as_secs() / 60,
-            self.duration.as_secs() % 60,
+            if rem > 0 { format!(" and {} seconds", rem)} else {format!("")}
         );
     }
 }
