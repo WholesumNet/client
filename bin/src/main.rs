@@ -221,26 +221,26 @@ async fn main() -> anyhow::Result<()> {
             }
         };
         // specify the external address
-        // let external_ip_addr = env::var("EXTERNAL_IP_ADDR")
-        //     .context("`EXTERNAL_IP_ADDR` environment variable does not exist.")?;
-        // let external_port = env::var("EXTERNAL_PORT")
-        //     .context("`EXTERNAL_PORT` environment variable does not exist.")?;
-        // swarm.add_external_address(
-        //     format!(
-        //         "/ip4/{}/tcp/{}",
-        //         external_ip_addr,
-        //         external_port
-        //     )
-        //     .parse()?
-        // );
-        // swarm.add_external_address(
-        //     format!(
-        //         "/ip4/{}/udp/{}/quic-v1",
-        //         external_ip_addr,
-        //         external_port
-        //     )
-        //     .parse()?
-        // );
+        let external_ip_addr = env::var("EXTERNAL_IP_ADDR")
+            .context("`EXTERNAL_IP_ADDR` environment variable does not exist.")?;
+        let external_port = env::var("EXTERNAL_PORT")
+            .context("`EXTERNAL_PORT` environment variable does not exist.")?;
+        swarm.add_external_address(
+            format!(
+                "/ip4/{}/tcp/{}",
+                external_ip_addr,
+                external_port
+            )
+            .parse()?
+        );
+        swarm.add_external_address(
+            format!(
+                "/ip4/{}/udp/{}/quic-v1",
+                external_ip_addr,
+                external_port
+            )
+            .parse()?
+        );
     }
 
     // to update kademlia tables
