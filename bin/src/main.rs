@@ -598,7 +598,7 @@ async fn main() -> anyhow::Result<()> {
                     };
                 },
 
-                // blob transfer requests
+                // <blob transfer>
                 SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::Message {
                     peer: peer_id,
                     message: request_response::Message::Request {
@@ -640,7 +640,6 @@ async fn main() -> anyhow::Result<()> {
                     }
                 },
 
-                // blob transfer responses
                 SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::Message {
                     peer: peer_id,
                     message: request_response::Message::Response {
@@ -684,6 +683,36 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         info!("All blocks are processed, waiting for the next batch.");
                     }
+                },
+
+                SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::InboundFailure {
+                    peer: peer_id,
+                    connection_id,
+                    request_id,
+                    error,
+                })) => {
+                    warn!(
+                        "Blob transfer `inbound failure`: peer `{}`, con_id: {:?}, req_id: {:?}, e: {:?} ",
+                        peer_id,
+                        connection_id,
+                        request_id,
+                        error
+                    );
+                },
+
+                SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::OutboundFailure {
+                    peer: peer_id,
+                    connection_id,
+                    request_id,
+                    error,
+                })) => {
+                    warn!(
+                        "Blob transfer `outbound failure`: peer `{}`, con_id: {:?}, req_id: {:?}, e: {:?} ",
+                        peer_id,
+                        connection_id,
+                        request_id,
+                        error
+                    );
                 },
 
                 _ => {
