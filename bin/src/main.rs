@@ -17,7 +17,6 @@ use libp2p::{
     identity,
     identify,  
     gossipsub,
-    mdns,
     kad,
     request_response,
     swarm::{
@@ -65,7 +64,9 @@ use log::{info, warn};
 //     },
 // };
 use peyk::{
-    p2p::{MyBehaviourEvent},
+    p2p::{
+        GlobalBehaviourEvent
+    },
     protocol,
     blob_transfer
 };
@@ -164,7 +165,7 @@ async fn main() -> anyhow::Result<()> {
         "My peer id: `{}`",
         my_peer_id
     );  
-    let mut swarm = peyk::p2p::setup_swarm(&local_key)?;
+    let mut swarm = peyk::p2p::setup_global_swarm(&local_key)?;
     // listen on all interfaces
     // ipv4
     swarm.listen_on(
@@ -367,35 +368,8 @@ async fn main() -> anyhow::Result<()> {
                     );                    
                 },
 
-                // mdns events
-                SwarmEvent::Behaviour(
-                    MyBehaviourEvent::Mdns(
-                        mdns::Event::Discovered(list)
-                    )
-                ) => {
-                    for (peer_id, _multiaddr) in list {
-                        info!("mDNS discovered a new peer: {peer_id}");
-                        swarm.behaviour_mut()
-                            .gossipsub
-                            .add_explicit_peer(&peer_id);
-                    }                     
-                },
-
-                SwarmEvent::Behaviour(
-                    MyBehaviourEvent::Mdns(
-                        mdns::Event::Expired(list)
-                    )
-                ) => {
-                    for (peer_id, _multiaddr) in list {
-                        info!("mDNS discovered peer has expired: {peer_id}");
-                        swarm.behaviour_mut()
-                            .gossipsub
-                            .remove_explicit_peer(&peer_id);
-                    }
-                },
-
                 // identify events
-                SwarmEvent::Behaviour(MyBehaviourEvent::Identify(identify::Event::Received {
+                SwarmEvent::Behaviour(GlobalBehaviourEvent::Identify(identify::Event::Received {
                     // peer_id,
                     // info,
                     ..
@@ -434,17 +408,17 @@ async fn main() -> anyhow::Result<()> {
 
 
                 // gossipsub events
-                SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message{..})) => {},
+                SwarmEvent::Behaviour(GlobalBehaviourEvent::Gossipsub(gossipsub::Event::Message{..})) => {},
 
                 // kademlia events
-                SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+                SwarmEvent::Behaviour(GlobalBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
                     result: kad::QueryResult::GetClosestPeers(Ok(_ok)),
                     ..
                 })) => {
                     // info!("Query finished with closest peers: {:#?}", ok.peers);
                 },
 
-                SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+                SwarmEvent::Behaviour(GlobalBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
                     result:
                         kad::QueryResult::GetClosestPeers(Err(kad::GetClosestPeersError::Timeout {
                             ..
@@ -454,7 +428,7 @@ async fn main() -> anyhow::Result<()> {
                     // warn!("Query for closest peers timed out");
                 },
 
-                // SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+                // SwarmEvent::Behaviour(GlobalBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
                 //     result: kad::QueryResult::GetProviders(
                 //         Ok(
                 //             kad::GetProvidersOk::FoundProviders{ mut providers, .. }
@@ -471,7 +445,7 @@ async fn main() -> anyhow::Result<()> {
                 // },
 
                 // requests
-                SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
+                SwarmEvent::Behaviour(GlobalBehaviourEvent::ReqResp(request_response::Event::Message {
                     peer: prover,
                     message: request_response::Message::Request {
                         request,
@@ -584,7 +558,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 },
 
-                SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
+                SwarmEvent::Behaviour(GlobalBehaviourEvent::ReqResp(request_response::Event::Message {
                     peer: _peer_id,
                     message: request_response::Message::Response {
                         response,
@@ -599,7 +573,7 @@ async fn main() -> anyhow::Result<()> {
                 },
 
                 // <blob transfer>
-                SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::Message {
+                SwarmEvent::Behaviour(GlobalBehaviourEvent::BlobTransfer(request_response::Event::Message {
                     peer: peer_id,
                     message: request_response::Message::Request {
                         request: blob_transfer::Request(blob_hash),
@@ -640,7 +614,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 },
 
-                SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::Message {
+                SwarmEvent::Behaviour(GlobalBehaviourEvent::BlobTransfer(request_response::Event::Message {
                     peer: peer_id,
                     message: request_response::Message::Response {
                         response: blob_transfer::Response(blob),
@@ -685,7 +659,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 },
 
-                SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::InboundFailure {
+                SwarmEvent::Behaviour(GlobalBehaviourEvent::BlobTransfer(request_response::Event::InboundFailure {
                     peer: peer_id,
                     connection_id,
                     request_id,
@@ -700,7 +674,7 @@ async fn main() -> anyhow::Result<()> {
                     );
                 },
 
-                SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::OutboundFailure {
+                SwarmEvent::Behaviour(GlobalBehaviourEvent::BlobTransfer(request_response::Event::OutboundFailure {
                     peer: peer_id,
                     connection_id,
                     request_id,
