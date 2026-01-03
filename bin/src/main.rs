@@ -92,9 +92,6 @@ use pipeline::{
           long_about = None
 )]
 struct Cli {
-    #[arg(long, action)]
-    dev: bool,
-
     #[arg(short, long)]
     key_file: Option<String>,
 }
@@ -105,10 +102,7 @@ async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(Env::default().default_filter_or("info"))
         .init();
     let cli = Cli::parse();
-    info!("<-> Client agent for Wholesum network <->");
-    info!("Operating mode: `{}` network",
-        if false == cli.dev {"global"} else {"local(development)"}
-    );
+    info!("<-> Client agent for Wholesum network <->");    
     info!("Proving blocks using block division logic.");
 
     // setup mongodb
@@ -189,60 +183,57 @@ async fn main() -> anyhow::Result<()> {
         .gossipsub
         .subscribe(&topic);
     
-    // init kademlia
-    if !cli.dev {
-        // get to know bootnode(s)
-        let bootnode_peer_id = env::var("BOOTNODE_PEER_ID")
-            .context("`BOOTNODE_PEER_ID` environment variable does not exist.")?;
-        let bootnode_ip_addr = env::var("BOOTNODE_IP_ADDR")
-            .context("`BOOTNODE_IP_ADDR` environment variable does not exist.")?;
-        swarm.behaviour_mut()
-            .kademlia
-            .add_address(
-                &bootnode_peer_id.parse()?,
-                format!(
-                    "/ip4/{}/tcp/20201",
-                    bootnode_ip_addr
-                )
-                .parse()?
+    // init kademlia: get to know bootnode(s)
+    let bootnode_peer_id = env::var("BOOTNODE_PEER_ID")
+        .context("`BOOTNODE_PEER_ID` environment variable does not exist.")?;
+    let bootnode_ip_addr = env::var("BOOTNODE_IP_ADDR")
+        .context("`BOOTNODE_IP_ADDR` environment variable does not exist.")?;
+    swarm.behaviour_mut()
+        .kademlia
+        .add_address(
+            &bootnode_peer_id.parse()?,
+            format!(
+                "/ip4/{}/tcp/20201",
+                bootnode_ip_addr
+            )
+            .parse()?
+        );
+    // initiate bootstrapping
+    match swarm.behaviour_mut().kademlia.bootstrap() {
+        Ok(query_id) => {            
+            info!(
+                "Bootstrap is initiated, query id: {:?}",
+                query_id
             );
-        // initiate bootstrapping
-        match swarm.behaviour_mut().kademlia.bootstrap() {
-            Ok(query_id) => {            
-                info!(
-                    "Bootstrap is initiated, query id: {:?}",
-                    query_id
-                );
-            },
-            Err(e) => {
-                info!(
-                    "Bootstrap failed: {:?}",
-                    e
-                );
-            }
-        };
-        // specify the external address
-        let external_ip_addr = env::var("EXTERNAL_IP_ADDR")
-            .context("`EXTERNAL_IP_ADDR` environment variable does not exist.")?;
-        let external_port = env::var("EXTERNAL_PORT")
-            .context("`EXTERNAL_PORT` environment variable does not exist.")?;
-        swarm.add_external_address(
-            format!(
-                "/ip4/{}/tcp/{}",
-                external_ip_addr,
-                external_port
-            )
-            .parse()?
-        );
-        swarm.add_external_address(
-            format!(
-                "/ip4/{}/udp/{}/quic-v1",
-                external_ip_addr,
-                external_port
-            )
-            .parse()?
-        );
-    }
+        },
+        Err(e) => {
+            info!(
+                "Bootstrap failed: {:?}",
+                e
+            );
+        }
+    };
+    // specify the external address
+    let external_ip_addr = env::var("EXTERNAL_IP_ADDR")
+        .context("`EXTERNAL_IP_ADDR` environment variable does not exist.")?;
+    let external_port = env::var("EXTERNAL_PORT")
+        .context("`EXTERNAL_PORT` environment variable does not exist.")?;
+    swarm.add_external_address(
+        format!(
+            "/ip4/{}/tcp/{}",
+            external_ip_addr,
+            external_port
+        )
+        .parse()?
+    );
+    swarm.add_external_address(
+        format!(
+            "/ip4/{}/udp/{}/quic-v1",
+            external_ip_addr,
+            external_port
+        )
+        .parse()?
+    );
 
     // to update kademlia tables
     let mut timer_peer_discovery = IntervalStream::new(
@@ -254,11 +245,6 @@ async fn main() -> anyhow::Result<()> {
         interval(Duration::from_secs(5))
     )
     .fuse();
-    // to pull for new peers 
-    let mut timer_pull_rendezvous_providers = IntervalStream::new(
-        interval(Duration::from_secs(10))
-    )
-    .fuse();
 
     let mut rng = rand::rng();
 
@@ -267,10 +253,7 @@ async fn main() -> anyhow::Result<()> {
     loop {
         select! {
             // try to discover new peers
-            _i = timer_peer_discovery.select_next_some() => {
-                if cli.dev {
-                    continue;
-                }
+            _i = timer_peer_discovery.select_next_some() => {                
                 let random_peer_id = PeerId::random();
                 // info!("Searching for the closest peers to `{random_peer_id}`");
                 swarm
@@ -297,15 +280,6 @@ async fn main() -> anyhow::Result<()> {
                         recent_insufficient_peers_cry_time = now;
                     }
                 }
-            },
-
-            // pull for new peers
-            _i = timer_pull_rendezvous_providers.select_next_some() => {
-                // if !cli.dev {
-                //     swarm.behaviour_mut()
-                //         .kademlia
-                //         .get_providers(rendezvous_record.clone().unwrap());
-                // }
             },
 
             // p = pipeline_init_future.select_next_some() => {
