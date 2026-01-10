@@ -65,7 +65,7 @@ impl Pipeline {
     ) {        
         if self.stage != Stage::Verify {
             warn!(
-                "Stage must be `Verify` to begin next block: {:?}",
+                "Stage must be `Verify` to begin the next block: {:?}",
                 self.stage
             );
             return;
@@ -122,6 +122,18 @@ impl Pipeline {
             },
 
             _ => None,
+        }
+    }
+
+    pub fn revoke_stale_assignments(&mut self) {
+        match self.stage {
+            Stage::Subblock => 
+                self.subblock_round.revoke_stale_assignments(),
+
+            Stage::Agg => 
+                self.agg_round.revoke_stale_assignments(),
+
+            _ => ()
         }
     }
 

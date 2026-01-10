@@ -245,6 +245,11 @@ async fn main() -> anyhow::Result<()> {
         interval(Duration::from_secs(5))
     )
     .fuse();
+    // to revoke stale assignments
+    let mut timer_revoke_stale_assignments = IntervalStream::new(
+        interval(Duration::from_secs(2))
+    )
+    .fuse();
 
     let mut rng = rand::rng();
 
@@ -280,6 +285,11 @@ async fn main() -> anyhow::Result<()> {
                         recent_insufficient_peers_cry_time = now;
                     }
                 }
+            },
+
+            // to revoke stale assignments
+            _i = timer_revoke_stale_assignments.select_next_some() => {
+                pipeline.revoke_stale_assignments();
             },
 
             // p = pipeline_init_future.select_next_some() => {

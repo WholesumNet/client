@@ -21,7 +21,7 @@ pub struct Token {
 pub struct Assignment {
     pub batch_id: u128,
     pub prover: PeerId,
-    // assignment time. helps to handle timeouts.
+    // assignment time
     pub when: Instant,
 }
 
@@ -43,6 +43,9 @@ pub struct Round {
 }
 
 impl Round {
+    // 60 seconds
+    const ASSIGNMENT_TIMEOUT: u64 = 60;
+
     pub fn new(batch_size: usize) -> Self {
         assert_ne!(batch_size, 0usize);
         Self {
@@ -68,7 +71,7 @@ impl Round {
             let start = bi * self.batch_size;
             let mut end = start + self.batch_size;
             if bi == num_batches - 1 {
-                //@ or last batch as a standalone batch
+                //@ or last batch as a whole
                 end += num_rem_items;
             }
             let batch = Batch {
@@ -153,7 +156,18 @@ impl Round {
             .collect::<Vec<_>>()
     }
 
-    pub fn remove_stale_assignments(&mut self) {
-        // 10 minutes        
+    pub fn revoke_stale_assignments(&mut self) {
+        let stale_assignments = self.prover_assignments
+            .extract_if(|_p, ass| 
+                ass.when.elapsed().as_secs() > Self::ASSIGNMENT_TIMEOUT
+            );
+        for (prover, ass) in stale_assignments.into_iter() {
+            self.batch_prover_assignments.remove(&ass.batch_id);
+            warn!(
+                "Batch(`{}`) assignment is revoked from prover(`{}`) due to time out.",
+                ass.batch_id,
+                prover
+            );
+        }    
     }
 }
