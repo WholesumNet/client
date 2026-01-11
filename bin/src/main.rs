@@ -134,10 +134,7 @@ async fn main() -> anyhow::Result<()> {
     // let mut db_insert_futures = FuturesUnordered::new();
     // let mut db_update_futures = FuturesUnordered::new();
 
-    let mut pipeline = tokio::task::spawn_blocking(||
-        Pipeline::new().unwrap()
-    )
-    .await?;    
+    let mut pipeline = Pipeline::new()?;    
 
     // Libp2p swarm 
     // peer id
