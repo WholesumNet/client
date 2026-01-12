@@ -1,12 +1,15 @@
 use std::{
-    time::{
-        Instant,
-        Duration
-    }
+    time::Instant,
+    collections::{
+        HashMap,
+        BTreeMap,
+        VecDeque
+    },
 };
 use log::{
     info, warn
 };
+use xxhash_rust::xxh3::xxh3_128;
 use uuid::Uuid;
 use libp2p::PeerId;
 use crate::round;
@@ -26,43 +29,88 @@ pub enum Stage {
 }
 
 pub struct Pipeline {
-    // job id
-    pub id: u128,
-    pub block_number: u32,
+    // <block number, [stdins]>
+    blocks: BTreeMap::<u64, Vec<u128>>,
+    current_block: Option<u64>,
+    outstanding_blocks: VecDeque::<u64>,
 
-    // measure proving time
-    start_time: Instant,
-    duration: Duration,
+    blob_store: HashMap::<u128, Vec<u8>>,
+
+    // job id, unique per block
+    pub id: u128,
     
+    // measure proving time
+    start_time: Instant,    
     pub stage: Stage,
     subblock_round: Round,    
     agg_round: Round,    
+
     // used to verify proofs
     sp1_handle: SP1Handle,
 }
 
 impl Pipeline {
+    // 120 seconds
+    const BLOCK_TIMEOUT: u64 = 120;
+
     pub fn new() -> anyhow::Result<Self> {
         Ok(Self {
+            blocks: BTreeMap::new(),
+            current_block: None,
+            outstanding_blocks: VecDeque::new(),
+
+            blob_store: HashMap::new(),
+
             id: 0u128,
-            block_number: 0u32,
             stage: Stage::Verify,
-            //@ calling now() is useless
+            //@ calling now() here is useless
             start_time: Instant::now(),
-            duration: Duration::from_secs(0),
             subblock_round: Round::new(1usize),
             agg_round: Round::new(1usize),
+
             sp1_handle: SP1Handle::new()?,
         })        
     }
 
+    pub fn get_blob(&self, hash: &u128) -> Option<&Vec<u8>> {
+        self.blob_store.get(hash)
+    }
 
-    pub fn begin_next_block(
+    pub fn add_block(
         &mut self,
-        block_number: u32,
-        inputs: &[u128],
-        owner: &PeerId,
-    ) {        
+        block_number: u64,
+        stdins: Vec<Vec<u8>>
+    ) {
+        if stdins.is_empty() {
+            warn!(
+                "Detected an empty block: {}",
+                block_number
+            );
+            return
+        }
+        info!(
+            "Received a new block: `{}` with `{}` stdins.",
+            block_number,
+            stdins.len()
+        );
+        if stdins.len() < 2 {
+            warn!("At least 2 stdin blobs are required.");
+            return
+        }
+        self.outstanding_blocks.push_back(block_number);        
+        let mut blob_hashes = Vec::<u128>::with_capacity(stdins.len());
+        for blob in stdins.into_iter() {
+            let hash = xxh3_128(&blob);
+            self.blob_store.insert(hash, blob);
+            blob_hashes.push(hash);
+        }
+        self.blocks.insert(block_number, blob_hashes);
+        if self.current_block.is_none() {
+            self.begin_next_block();
+        }
+    }
+
+    pub fn begin_next_block(&mut self) {        
         if self.stage != Stage::Verify {
             warn!(
                 "Stage must be `Verify` to begin the next block: {:?}",
@@ -70,31 +118,43 @@ impl Pipeline {
             );
             return;
         }
+        
+        self.current_block = self.outstanding_blocks.pop_front();        
+        let block_number = self.current_block.clone().unwrap();
+        if self.current_block.is_none() {
+            warn!("No new blocks to start proving.");
+            return;            
+        }
+
         self.start_time = Instant::now();
-        info!(
-            "Started block`({})`: {} subblock{} + the aggregation to prove.",
-            block_number,
-            inputs.len() - 1,
-            if inputs.len() == 2 { "" } else { "s" }
-        );
         self.id = Uuid::new_v4().as_u128();
-        self.block_number = block_number;
         self.stage = Stage::Subblock;
         self.subblock_round.reset();
         self.agg_round.reset();
-        self.feed_stdins(inputs, owner);
+        let num_subblocks = self.feed_stdins(&block_number);
+        info!(
+            "Started block `{}`: `{}` subblock{} + the aggregation to prove.",
+            block_number,
+            num_subblocks - 1,
+            if num_subblocks == 1 { "" } else { "s" }
+        );
     }
 
-    fn feed_stdins(&mut self, inputs: &[u128], owner: &PeerId) {
-        let mut tokens: Vec<_> = inputs.into_iter()
+    fn feed_stdins(
+        &mut self,
+        block_number: &u64
+    ) -> usize {
+        let blob_hashes = self.blocks.get(block_number).unwrap();
+        let mut tokens: Vec<_> = blob_hashes.into_iter()
             .map(|h| Token {
-                owner: owner.clone(),
+                owner: None,
                 hash: *h
             })
             .collect();
         let agg_token = tokens.split_off(tokens.len() - 1);
         self.subblock_round.feed(&tokens);
         self.agg_round.feed(&agg_token);
+        tokens.len()
     }
 
     pub fn assign(
@@ -126,14 +186,29 @@ impl Pipeline {
     }
 
     pub fn revoke_stale_assignments(&mut self) {
-        match self.stage {
-            Stage::Subblock => 
-                self.subblock_round.revoke_stale_assignments(),
+        if self.start_time.elapsed().as_secs() > Self::BLOCK_TIMEOUT {
+            warn!(
+                "Block(`{}`) proving has timed out, moving on.",
+                self.current_block.as_ref().unwrap()
+            );
+            self.stage = Stage::Verify;
+            if self.current_block.is_none() {            
+                self.begin_next_block();
+            }
+        } else {
+            match self.stage {
+                Stage::Subblock => {
+                    self.subblock_round.revoke_stale_assignments();
+                },
 
-            Stage::Agg => 
-                self.agg_round.revoke_stale_assignments(),
+                Stage::Agg => {
+                    self.agg_round.revoke_stale_assignments();
+                },
 
-            _ => ()
+                _ => {
+                    return
+                }
+            };
         }
     }
 
@@ -170,26 +245,34 @@ impl Pipeline {
 
     pub fn verify_agg_proof(
         &mut self,
-        proof_blob: &[u8]
-    ) -> anyhow::Result<()> {
-        match self.sp1_handle.verify_agg(proof_blob) {
+        proof_blob: Vec<u8>
+    ) {
+        match self.sp1_handle.verify_agg(&proof_blob) {
             Ok(_) => {
                 self.archive();
-                Ok(())
+                info!(
+                    "Nice! block(`{}`) is verified.",
+                    self.current_block.as_ref().unwrap()
+                );                        
             },
 
             Err(e) => {
-                Err(e)
+                warn!(
+                    "Failed to verify block(`{}`)'s proof: {:?}",
+                    self.current_block.as_ref().unwrap(),
+                    e
+                );                
             }
         }
+        self.begin_next_block();
     }
 
     pub fn archive(&mut self) {
-        self.duration = self.start_time.elapsed();
-        let rem = self.duration.as_secs() % 60;
+        let duration = self.start_time.elapsed().as_secs();
+        let rem = duration % 60;
         info!(
             "Block proving time: {} minutes{}",
-            self.duration.as_secs() / 60,
+            duration / 60,
             if rem > 0 { format!(" and {} seconds", rem)} else {format!("")}
         );
     }

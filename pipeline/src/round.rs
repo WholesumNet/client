@@ -13,7 +13,7 @@ use libp2p::PeerId;
 // round input/output
 #[derive(Debug, Clone)]
 pub struct Token {
-    pub owner: PeerId,
+    pub owner: Option<PeerId>,
     pub hash: u128
 }
 
@@ -125,13 +125,13 @@ impl Round {
             warn!("Unsolicited proof for batch(`{batch_id}`) from `{prover:?}`.");
             return false;
         };
-        let batch = self.batches.get_mut(&batch_id).unwrap();
-        batch.proof = Some(Token {
-            owner: prover.clone(),
-            hash: hash
-        });
         self.prover_assignments.remove(&prover);
         self.batch_prover_assignments.remove(&batch_id);
+        let batch = self.batches.get_mut(&batch_id).unwrap();
+        batch.proof = Some(Token {
+            owner: Some(prover),
+            hash: hash
+        });
         true
     }
 

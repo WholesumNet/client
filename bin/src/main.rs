@@ -34,9 +34,6 @@ use std::{
     // future::IntoFuture,
     collections::{
         HashSet,
-        HashMap,
-        BTreeMap,
-        VecDeque
     },
 };
 use bincode;
@@ -44,8 +41,6 @@ use rand::prelude::*;
 use anyhow::{
     Context
 };
-// use reqwest;
-use xxhash_rust::xxh3::xxh3_128;
 use clap::{
     Parser
 };
@@ -113,15 +108,8 @@ async fn main() -> anyhow::Result<()> {
     let redis_con = redis_client.get_multiplexed_async_connection().await?;    
 
     let mut active_provers = HashSet::<PeerId>::new();
-
-    // <block number, [stdins]>
-    let mut blocks = BTreeMap::<u32, Vec<u128>>::new();
-    let mut current_block: Option<u32> = None;
-    let mut outstanding_blocks = VecDeque::<u32>::new();
+    
     let mut block_stream = subscribe_to_block_stream(redis_con.clone()).await;    
-
-    // blob store
-    let mut blob_store = HashMap::<u128, Vec<u8>>::new();
 
     // let col_jobs = db_client
     //     .database("wholesum_client")
@@ -286,48 +274,16 @@ async fn main() -> anyhow::Result<()> {
 
             // to revoke stale assignments
             _i = timer_revoke_stale_assignments.select_next_some() => {
-                pipeline.revoke_stale_assignments();
+                pipeline.revoke_stale_assignments();                                
             },
 
             // p = pipeline_init_future.select_next_some() => {
             //     self.pipeline = Some(p?);
             // }
 
-            // new blocks inbound
-            new_blocks = block_stream.select_next_some() => {                
-                info!(
-                    "Received a new batch of blocks to prove: `{:?}`",
-                    new_blocks.keys()
-                );
-                // prove blocks fifo
-                outstanding_blocks.extend(new_blocks.keys().cloned());
-                if outstanding_blocks.is_empty() {
-                    warn!("Detected empty block stream.");
-                    continue;
-                }
-                for (block_number, stdin_map) in new_blocks.into_iter() {
-                    let mut blob_hashes = 
-                        Vec::<u128>::with_capacity(stdin_map.len());
-                    for (_i, blob) in stdin_map.into_iter() {
-                        let hash = xxh3_128(&blob);
-                        blob_store.insert(hash, blob);
-                        blob_hashes.push(hash);
-                    }                    
-                    blocks.insert(block_number, blob_hashes);
-                }
-                if current_block.is_some() {
-                    // wait until the current block is proved
-                    continue;
-                }
-                current_block = outstanding_blocks.pop_front();
-                if let Some(block_number) = current_block {
-                    let blob_hashes = blocks.get(&block_number).unwrap();                    
-                    pipeline.begin_next_block(
-                        block_number,
-                        &blob_hashes,
-                        &my_peer_id,
-                    );
-                }
+            // new blocks inbound from Redis
+            (block_number, stdins) = block_stream.select_next_some() => {                
+                pipeline.add_block(block_number, stdins);                
             },
 
             // libp2p events
@@ -439,10 +395,7 @@ async fn main() -> anyhow::Result<()> {
                     match request {
                         // prover indicates her interest to prove                        
                         protocol::Request::Would => {
-                            active_provers.insert(prover.clone());
-                            if current_block.is_none() {
-                                continue;
-                            }
+                            active_provers.insert(prover.clone());                            
                             if pipeline.stage == Stage::Verify {
                                 continue;
                             }                            
@@ -469,7 +422,7 @@ async fn main() -> anyhow::Result<()> {
                                         tokens: tokens.into_iter()
                                             .map(|t| protocol::InputToken {
                                                 hash: t.hash,
-                                                owner: t.owner.to_bytes(),
+                                                owner: t.owner.unwrap_or_else(|| my_peer_id.clone()).to_bytes(),
                                             })
                                             .collect::<Vec<protocol::InputToken>>(),
                                     }
@@ -565,7 +518,7 @@ async fn main() -> anyhow::Result<()> {
                     ..
                 })) => {                
                     let blob_hash = blob_hash.parse::<u128>().unwrap();
-                    if let Some(blob) = blob_store.get(&blob_hash) {
+                    if let Some(blob) = pipeline.get_blob(&blob_hash) {
                         if let Err(e) = swarm
                             .behaviour_mut()
                             .blob_transfer
@@ -596,48 +549,15 @@ async fn main() -> anyhow::Result<()> {
                 },
 
                 SwarmEvent::Behaviour(GlobalBehaviourEvent::BlobTransfer(request_response::Event::Message {
-                    peer: peer_id,
+                    peer: _peer_id,
                     message: request_response::Message::Response {
                         response: blob_transfer::Response(blob),
                         //response_id,
                         ..
                     },
                     ..
-                })) => {                
-                    if pipeline.stage != Stage::Verify {
-                        let hash = xxh3_128(&blob);
-                        warn!(
-                            "Received unsolicited blob(`{}`) from `{}`.",
-                            hash,
-                            peer_id
-                        );
-                        continue;
-                    }
-                    if let Ok(()) = pipeline.verify_agg_proof(&blob) {
-                        info!(
-                            "Block(`{}`)'s proof is verified.",
-                            pipeline.block_number
-                        );                        
-                    } else {
-                        warn!(
-                            "Proof verification failed for block(`{}`).",
-                            pipeline.block_number
-                        );
-                        //@ wtd?
-                    }
-                    //@ archive the proof in db
-                    // being the next one
-                    current_block = outstanding_blocks.pop_front();
-                    if let Some(block_number) = current_block {
-                        let blob_hashes = blocks.get(&block_number).unwrap();                    
-                        pipeline.begin_next_block(
-                            block_number,
-                            &blob_hashes,
-                            &my_peer_id,
-                        );
-                    } else {
-                        info!("All blocks are processed, waiting for the next batch.");
-                    }
+                })) => {                                    
+                    pipeline.verify_agg_proof(blob);                    
                 },
 
                 SwarmEvent::Behaviour(GlobalBehaviourEvent::BlobTransfer(request_response::Event::InboundFailure {
@@ -681,9 +601,12 @@ async fn main() -> anyhow::Result<()> {
 
 async fn subscribe_to_block_stream(
     mut redis_con: redis::aio::MultiplexedConnection
-) -> mpsc::Receiver<BTreeMap<u32, BTreeMap<u32, Vec<u8>>>> {
+) -> mpsc::Receiver<(u64, Vec<Vec<u8>>)> {
     let (mut tx, rx) = mpsc::channel(32);
     let mut last_id = "0".to_string();
+    let mut current_block = 0u64;
+    // 8 subblocks + 1 agg stdin at max
+    let mut stdins = Vec::<Vec<u8>>::with_capacity(9);
     task::spawn(async move {
         loop {
             let result: redis::Value = redis::cmd("XREAD")
@@ -695,52 +618,47 @@ async fn subscribe_to_block_stream(
             let streams = result.as_sequence().unwrap();
             let contents = streams[0].as_sequence().unwrap();
             let _stream_name = &contents[0];
-            let entries = contents[1].as_sequence().unwrap();
-            let mut blocks: BTreeMap<u32, BTreeMap<u32, Vec<u8>>> = BTreeMap::new();            
-            for entry in entries {
+            for entry in contents[1].as_sequence().unwrap() {
                 let items = &entry.as_sequence().unwrap();
                 if let BulkString(bs) = &items[0] {
                     last_id = String::from_utf8_lossy(&bs).into_owned();
                 }
-                let (block_number, stdin_id) = 
-                    if let BulkString(bs) = &items[1].as_sequence().unwrap()[0] {
-                        let blob_id = String::from_utf8_lossy(&bs).into_owned();
-                        let tokens: Vec<_> = blob_id.split("-")
-                            .filter_map(|e| e.parse::<u32>().ok())
-                            .collect();
-                        (tokens[0], tokens[1])
+                let block_data = items[1].as_sequence().unwrap();
+                // 0: block number
+                if let BulkString(bs) = &block_data[0] {
+                    let maybe_block_number = String::from_utf8_lossy(&bs);
+                    if maybe_block_number.eq_ignore_ascii_case("<EOB>") {
+                        let _ = tx.send((current_block, stdins.clone())).await;
+                        stdins.clear();
+                        current_block = 0u64;
+                    } else {
+                        if current_block == 0u64 {
+                            match maybe_block_number.parse::<u64>() {
+                                Ok(block_number) => {
+                                    current_block = block_number;
+                                },
+
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to parse block number: {:?}",
+                                        e
+                                    );
+                                }
+                            };
+                        }
+                    }
                 } else {
-                    warn!("Failed to parse block number and subblock id.");
-                    continue;
-                };
-                if let BulkString(blob) = &items[1].as_sequence().unwrap()[1] {
-                    blocks.entry(block_number)
-                        .and_modify(|stdins| {
-                            if stdins.contains_key(&stdin_id) {
-                                warn!(
-                                    "Ignnored duplicate subblock for blob({}-{}).",
-                                    block_number,
-                                    stdin_id
-                                );
-                            } else {
-                                stdins.insert(stdin_id, blob.to_owned());
-                            }
-                        })
-                        .or_insert_with(||
-                            BTreeMap::from([
-                                (stdin_id, blob.to_owned())
-                            ])
-                        );
+                    warn!("Expected block number but got something else.");
+                    continue
+                }
+                // 1: stdin
+                if let BulkString(blob) = &block_data[1] {
+                    stdins.push(blob.to_owned());
                 } else {
-                    warn!(
-                        "Failed to retrieve subblock blob(`{}-{}`) from Redis.",
-                        block_number,
-                        stdin_id
-                    );
-                    continue;
+                    warn!("Expected stdin blob but got something else.");
+                    continue
                 }
             }   
-            let _ = tx.send(blocks).await;
         }
     });
     rx
