@@ -164,7 +164,7 @@ impl Round {
         for (prover, ass) in stale_assignments.into_iter() {
             self.batch_prover_assignments.remove(&ass.batch_id);
             warn!(
-                "Batch(`{}`) assignment is revoked from prover(`{}`) due to time out.",
+                "Batch(`{}`) assignment to `{}` has timed out.",
                 ass.batch_id,
                 prover
             );

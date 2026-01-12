@@ -89,7 +89,7 @@ impl Pipeline {
             return
         }
         info!(
-            "Received a new block: `{}` with `{}` stdins.",
+            "Received a new block: `{}` with `{}` stdin blobs.",
             block_number,
             stdins.len()
         );
@@ -120,11 +120,11 @@ impl Pipeline {
         }
         
         self.current_block = self.outstanding_blocks.pop_front();        
-        let block_number = self.current_block.clone().unwrap();
         if self.current_block.is_none() {
-            warn!("No new blocks to start proving.");
-            return;            
+            warn!("All blocks are caught up, no more to prove.");
+            return;
         }
+        let block_number = self.current_block.clone().unwrap();
 
         self.start_time = Instant::now();
         self.id = Uuid::new_v4().as_u128();
@@ -135,7 +135,7 @@ impl Pipeline {
         info!(
             "Started block `{}`: `{}` subblock{} + the aggregation to prove.",
             block_number,
-            num_subblocks - 1,
+            num_subblocks,
             if num_subblocks == 1 { "" } else { "s" }
         );
     }
@@ -186,15 +186,17 @@ impl Pipeline {
     }
 
     pub fn revoke_stale_assignments(&mut self) {
+        if self.current_block.is_none() {
+            return;
+        }
         if self.start_time.elapsed().as_secs() > Self::BLOCK_TIMEOUT {
             warn!(
                 "Block(`{}`) proving has timed out, moving on.",
                 self.current_block.as_ref().unwrap()
             );
             self.stage = Stage::Verify;
-            if self.current_block.is_none() {            
-                self.begin_next_block();
-            }
+            self.current_block = None;
+            self.begin_next_block();
         } else {
             match self.stage {
                 Stage::Subblock => {

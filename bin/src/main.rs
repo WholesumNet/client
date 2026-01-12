@@ -628,9 +628,13 @@ async fn subscribe_to_block_stream(
                 if let BulkString(bs) = &block_data[0] {
                     let maybe_block_number = String::from_utf8_lossy(&bs);
                     if maybe_block_number.eq_ignore_ascii_case("<EOB>") {
-                        let _ = tx.send((current_block, stdins.clone())).await;
+                        let _ = tx.send(
+                            (current_block, stdins.drain(..).collect())
+                        )
+                        .await;
                         stdins.clear();
                         current_block = 0u64;
+                        continue;
                     } else {
                         if current_block == 0u64 {
                             match maybe_block_number.parse::<u64>() {
