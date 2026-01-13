@@ -249,7 +249,10 @@ impl Pipeline {
         &mut self,
         proof_blob: Vec<u8>
     ) {
-        match self.sp1_handle.verify_agg(&proof_blob) {
+        match self.sp1_handle.verify_agg(
+            &proof_blob,
+            self.current_block.clone().unwrap()
+        ) {
             Ok(_) => {
                 self.archive();
                 info!(

@@ -3,8 +3,11 @@ use std::{
     // time::Instant,
 };
 use log::info;
-use anyhow;
-use bincode;
+use anyhow::{
+    Result,
+    Context
+};
+// use bincode;
 use sp1_sdk::{
     Prover,
     ProverClient, CpuProver,
@@ -14,39 +17,49 @@ use sp1_sdk::{
 
 pub struct SP1Handle {
     client: CpuProver,    
-    subblock_vk: SP1VerifyingKey,    
     agg_vk: SP1VerifyingKey,
 }
 
 impl SP1Handle {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new() -> Result<Self> {
         info!("Initializing SP1.");
-        let cpu_client = ProverClient::builder().cpu().build();
-        // subblock
-        let subblock_elf = fs::read("../elfs/subblock_elf.bin")?;
-        let (_subblock_pk, subblock_vk) = cpu_client.setup(&subblock_elf);
-        // agg
-        let agg_elf = fs::read("../elfs/agg_elf.bin")?;
+        let cpu_client = ProverClient::builder()
+            .cpu()
+            .build();        
+        let agg_elf_path = "../elfs/agg_elf.bin";
+        let agg_elf = fs::read(agg_elf_path)
+            .with_context(||
+                format!(
+                    "The Agg ELF file was not found in `{}`.",
+                    agg_elf_path
+                )
+            )?;
         let (_agg_pk, agg_vk) = cpu_client.setup(&agg_elf);
-
         Ok(Self {
             client: cpu_client,
-            subblock_vk: subblock_vk,
             agg_vk: agg_vk
         })
     }
 
-    pub fn verify_agg(&self, proof_blob: &[u8]) -> anyhow::Result<()> {
+    pub fn verify_agg(
+        &self,
+        proof_blob: &[u8],
+        block_number: u64
+    ) -> Result<()> {
         //@ temporary
-        fs::write("./temp-agg-proof.bin", proof_blob)?;
-        let proof = SP1ProofWithPublicValues::load("./temp-agg-proof.bin")?;
+        let agg_proof_path = format!(
+            "./agg-proof-{}.bin",
+            block_number
+        );
+        fs::write(&agg_proof_path, proof_blob)
+            .with_context(||
+                format!(
+                    "Failed to save the Agg proof to `{}`.",
+                    agg_proof_path
+                )
+            )?;
+        let proof = SP1ProofWithPublicValues::load(&agg_proof_path)?;
         self.client.verify(&proof, &self.agg_vk)?;
-        Ok(())
-    }
-
-    pub fn verify_subblock(&self, proof_blob: &[u8]) -> anyhow::Result<()> {
-        let proof: SP1ProofWithPublicValues = bincode::deserialize(&proof_blob)?;
-        self.client.verify(&proof, &self.subblock_vk)?;
         Ok(())
     }
 }
