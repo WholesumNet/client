@@ -220,7 +220,7 @@ impl Pipeline {
         hash: u128,
         prover: PeerId
     ) {        
-        let _is_valid = self.subblock_round.add_proof(batch_id, hash, prover);
+        self.subblock_round.add_proof(batch_id, hash, prover);
         let is_finished = self.subblock_round.is_finished();
         if is_finished {
             info!("Subblock round is finished. Agg round begins now.");
@@ -234,7 +234,7 @@ impl Pipeline {
         hash: u128,
         prover: PeerId
     ) {        
-        let _is_valid = self.agg_round.add_proof(
+        self.agg_round.add_proof(
             batch_id,
             hash,
             prover,

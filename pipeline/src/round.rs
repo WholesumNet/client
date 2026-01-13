@@ -120,11 +120,13 @@ impl Round {
         batch_id: u128,
         hash: u128,
         prover: PeerId,
-    ) -> bool {
-        if !self.batches.contains_key(&batch_id) {
+    ) {
+        if !self.batches.contains_key(&batch_id) ||
+           self.batch_prover_assignments.get(&batch_id) != Some(&prover)
+        {
             warn!("Unsolicited proof for batch(`{batch_id}`) from `{prover:?}`.");
-            return false;
-        };
+            return;
+        }
         self.prover_assignments.remove(&prover);
         self.batch_prover_assignments.remove(&batch_id);
         let batch = self.batches.get_mut(&batch_id).unwrap();
@@ -132,7 +134,6 @@ impl Round {
             owner: Some(prover),
             hash: hash
         });
-        true
     }
 
     pub fn is_finished(&self) -> bool {
