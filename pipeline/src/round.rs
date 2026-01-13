@@ -57,13 +57,6 @@ impl Round {
         }
     }
 
-    pub fn reset(&mut self) {
-        self.inputs.clear();
-        self.batches.clear();
-        self.prover_assignments.clear();
-        self.batch_prover_assignments.clear();
-    }
-
     pub fn feed(&mut self, inputs: &[Token]) {
         let num_batches = inputs.len() / self.batch_size;
         let num_rem_items = inputs.len() % self.batch_size;
@@ -170,5 +163,12 @@ impl Round {
                 prover
             );
         }    
+    }
+
+    pub fn reset(&mut self) {                
+        self.inputs.clear();
+        self.batches.clear();
+        self.prover_assignments.clear();
+        self.batch_prover_assignments.clear();
     }
 }

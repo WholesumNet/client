@@ -2,7 +2,6 @@ use std::{
     time::Instant,
     collections::{
         HashMap,
-        BTreeMap,
         VecDeque
     },
 };
@@ -30,11 +29,14 @@ pub enum Stage {
 
 pub struct Pipeline {
     // <block number, [stdins]>
-    blocks: BTreeMap::<u64, Vec<u128>>,
+    block_blob_hashes: HashMap::<u64, Vec<u128>>,
     current_block: Option<u64>,
     outstanding_blocks: VecDeque::<u64>,
 
     blob_store: HashMap::<u128, Vec<u8>>,
+
+    // <block number, agg proof blob hash>
+    archived_blocks: HashMap<u64, u128>,
 
     // job id, unique per block
     pub id: u128,
@@ -55,11 +57,13 @@ impl Pipeline {
 
     pub fn new() -> anyhow::Result<Self> {
         Ok(Self {
-            blocks: BTreeMap::new(),
+            block_blob_hashes: HashMap::new(),
             current_block: None,
             outstanding_blocks: VecDeque::new(),
 
             blob_store: HashMap::new(),
+
+            archived_blocks: HashMap::new(),
 
             id: 0u128,
             stage: Stage::Verify,
@@ -81,9 +85,16 @@ impl Pipeline {
         block_number: u64,
         stdins: Vec<Vec<u8>>
     ) {
+        if self.archived_blocks.contains_key(&block_number) {
+            warn!(
+                "Block(`{}`) is already prved.",
+                block_number
+            );
+            return
+        }
         if stdins.is_empty() {
             warn!(
-                "Detected an empty block: {}",
+                "Detected an empty block(`{}`).",
                 block_number
             );
             return
@@ -104,7 +115,7 @@ impl Pipeline {
             self.blob_store.insert(hash, blob);
             blob_hashes.push(hash);
         }
-        self.blocks.insert(block_number, blob_hashes);
+        self.block_blob_hashes.insert(block_number, blob_hashes);
         if self.current_block.is_none() {
             self.begin_next_block();
         }
@@ -128,9 +139,7 @@ impl Pipeline {
 
         self.start_time = Instant::now();
         self.id = Uuid::new_v4().as_u128();
-        self.stage = Stage::Subblock;
-        self.subblock_round.reset();
-        self.agg_round.reset();
+        self.stage = Stage::Subblock;        
         let num_subblocks = self.feed_stdins(&block_number);
         info!(
             "Started block `{}`: `{}` subblock{} + the aggregation to prove.",
@@ -144,7 +153,7 @@ impl Pipeline {
         &mut self,
         block_number: &u64
     ) -> usize {
-        let blob_hashes = self.blocks.get(block_number).unwrap();
+        let blob_hashes = self.block_blob_hashes.get(block_number).unwrap();
         let mut tokens: Vec<_> = blob_hashes.into_iter()
             .map(|h| Token {
                 owner: None,
@@ -240,7 +249,7 @@ impl Pipeline {
             prover,
         );
         if self.agg_round.is_finished() {
-            info!("The Agg round is finished, let's verify it.");
+            info!("The Agg round is finished, let's verify the proof.");
             self.stage = Stage::Verify;
         }
     }
@@ -254,11 +263,11 @@ impl Pipeline {
             self.current_block.clone().unwrap()
         ) {
             Ok(_) => {
-                self.archive();
                 info!(
                     "Nice! block(`{}`) is verified.",
                     self.current_block.as_ref().unwrap()
                 );                        
+                self.archive_block(proof_blob);
             },
 
             Err(e) => {
@@ -272,13 +281,30 @@ impl Pipeline {
         self.begin_next_block();
     }
 
-    pub fn archive(&mut self) {
+    fn archive_block(
+        &mut self,
+        proof_blob: Vec<u8>
+    ) {
         let duration = self.start_time.elapsed().as_secs();
         let rem = duration % 60;
         info!(
-            "Block proving time: {} minutes{}",
+            "Total block proving time: `{} minutes{}`",
             duration / 60,
-            if rem > 0 { format!(" and {} seconds", rem)} else {format!("")}
+            if rem > 0 { format!(" and {} seconds", rem) } else { format!("") }
         );
+        let block_number = self.current_block.as_ref().unwrap();
+        // drop subblock and agg stdins of the block
+        let blob_hashes = self.block_blob_hashes.remove(block_number).unwrap();
+        for hash in blob_hashes.into_iter() {
+            self.blob_store.remove(&hash);
+        }        
+        
+        self.subblock_round.reset();
+        self.agg_round.reset();
+
+        //@ save the agg proof blob to the db
+        let hash = xxh3_128(&proof_blob);
+        self.blob_store.insert(hash, proof_blob);
+        self.archived_blocks.insert(block_number.clone(), hash);
     }
 }
