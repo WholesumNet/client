@@ -20,7 +20,6 @@ pub struct Token {
 #[derive(Debug, Clone)]
 pub struct Assignment {
     pub batch_id: u128,
-    pub prover: PeerId,
     // assignment time
     pub when: Instant,
 }
@@ -99,7 +98,6 @@ impl Round {
             prover.clone(),
             Assignment {
                 batch_id: batch.id,
-                prover: prover.clone(),
                 when: Instant::now()
             }
         );

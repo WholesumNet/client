@@ -121,7 +121,7 @@ impl Pipeline {
         }
     }
 
-    pub fn begin_next_block(&mut self) {        
+    fn begin_next_block(&mut self) {        
         if self.stage != Stage::Verify {
             warn!(
                 "Stage must be `Verify` to begin the next block: {:?}",
