@@ -106,6 +106,13 @@ impl Round {
         Some((batch.id, batch.inputs.clone()))
     }
 
+    pub fn is_assigned(
+        &self,
+        prover: &PeerId
+    ) -> bool {
+        self.prover_assignments.contains_key(prover)
+    }
+
     pub fn add_proof(
         &mut self,
         batch_id: u128,

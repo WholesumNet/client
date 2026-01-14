@@ -549,15 +549,15 @@ async fn main() -> anyhow::Result<()> {
                 },
 
                 SwarmEvent::Behaviour(GlobalBehaviourEvent::BlobTransfer(request_response::Event::Message {
-                    peer: _peer_id,
+                    peer: peer_id,
                     message: request_response::Message::Response {
                         response: blob_transfer::Response(blob),
                         //response_id,
                         ..
                     },
                     ..
-                })) => {                                    
-                    pipeline.verify_agg_proof(blob);                    
+                })) => {
+                    pipeline.verify_agg_proof(blob, peer_id);
                 },
 
                 SwarmEvent::Behaviour(GlobalBehaviourEvent::BlobTransfer(request_response::Event::InboundFailure {

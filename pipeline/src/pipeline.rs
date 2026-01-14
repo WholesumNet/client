@@ -14,7 +14,7 @@ use libp2p::PeerId;
 use crate::round;
 use round::{
     Round,
-    Token
+    Token,
 };
 
 use crate::verify;
@@ -256,8 +256,40 @@ impl Pipeline {
 
     pub fn verify_agg_proof(
         &mut self,
-        proof_blob: Vec<u8>
-    ) {
+        proof_blob: Vec<u8>,
+        prover: PeerId
+    ) {        
+        if self.stage != Stage::Verify {
+            warn!(
+                "Stage must be `verify` to accept agg proofs from `{}`.",
+                prover
+            );
+            return;
+        }
+        if !self.agg_round.is_assigned(&prover) {
+            warn!(
+                "Unsolicited agg proof from `{}`.",
+                prover
+            );
+            return;
+        }
+        let expected_proof_hash = self.agg_round
+            .proofs()
+            .into_iter()
+            .next()
+            .unwrap()
+            .hash;
+        let received_hash = xxh3_128(&proof_blob);
+        if expected_proof_hash != received_hash {
+            warn!(
+                "Invalid agg proof from `{}`: hash must be `{}` but is `{}`.",
+                prover,
+                expected_proof_hash,
+                received_hash
+            );
+            return;
+        }
+        // perform verification
         match self.sp1_handle.verify_agg(
             &proof_blob,
             self.current_block.clone().unwrap()
@@ -275,7 +307,8 @@ impl Pipeline {
                     "Failed to verify block(`{}`)'s proof: {:?}",
                     self.current_block.as_ref().unwrap(),
                     e
-                );                
+                );
+                //@ backtrack and detect offending prover(s)
             }
         }
         self.begin_next_block();
