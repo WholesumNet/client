@@ -24,7 +24,7 @@ use verify::SP1Handle;
 pub enum Stage {
     Subblock,
     Agg,
-    Verify,
+    Verify
 }
 
 pub struct Pipeline {

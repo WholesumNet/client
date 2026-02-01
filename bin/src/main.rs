@@ -33,11 +33,10 @@ use std::{
     },
     // future::IntoFuture,
     collections::{
-        HashSet,
+        HashMap,
     },
 };
 use bincode;
-use rand::prelude::*;
 use anyhow::{
     Context
 };
@@ -107,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
     let redis_client = redis::Client::open("redis://:redispassword@localhost:6379/0")?;
     let redis_con = redis_client.get_multiplexed_async_connection().await?;    
 
-    let mut active_provers = HashSet::<PeerId>::new();
+    let mut active_provers = HashMap::<PeerId, Instant>::new();
     
     let mut block_stream = subscribe_to_block_stream(redis_con.clone()).await;    
 
@@ -225,20 +224,18 @@ async fn main() -> anyhow::Result<()> {
         interval(Duration::from_secs(60))
     )
     .fuse();
-    // to update prover list
-    let mut timer_update_prover_list = IntervalStream::new(
-        interval(Duration::from_secs(5))
+    
+    let mut timer_refresh_lists = IntervalStream::new(
+        interval(Duration::from_secs(10))
     )
     .fuse();
-    // to revoke stale assignments
-    let mut timer_revoke_stale_assignments = IntervalStream::new(
+    const ACTIVE_PROVER_EXPIRY: u64 = 60; // in secs
+
+    let mut timer_assign = IntervalStream::new(
         interval(Duration::from_secs(2))
     )
     .fuse();
 
-    let mut rng = rand::rng();
-
-    let mut recent_insufficient_peers_cry_time = Instant::now();
 
     loop {
         select! {
@@ -252,29 +249,57 @@ async fn main() -> anyhow::Result<()> {
                     .get_closest_peers(random_peer_id);                
             },
 
-            // update prover list
-            _i = timer_update_prover_list.select_next_some() => {
-                let nonce = rng.random::<u32>();
-                let need = bincode::serialize(
-                    &protocol::NeedKind::Prove(nonce)
-                )
-                .unwrap();
-                if let Err(e) = swarm
-                    .behaviour_mut()
-                    .gossipsub
-                    .publish(topic.clone(), need)
-                {
-                    let now = Instant::now();
-                    if now.duration_since(recent_insufficient_peers_cry_time).as_secs() > 120u64 {
-                        warn!("Need compute gossip failed, error: `{e:?}`");
-                        recent_insufficient_peers_cry_time = now;
-                    }
-                }
+            _i = timer_refresh_lists.select_next_some() => {
+                pipeline.revoke_stale_assignments();
+                
+                active_provers.retain(|_, t| 
+                    t.elapsed().as_secs() < ACTIVE_PROVER_EXPIRY
+                );
             },
 
-            // to revoke stale assignments
-            _i = timer_revoke_stale_assignments.select_next_some() => {
-                pipeline.revoke_stale_assignments();                                
+            _i = timer_assign.select_next_some() => {
+                if pipeline.stage == Stage::Verify {
+                    continue;
+                }                            
+                for prover in active_provers.keys() {
+                    let ass = pipeline.assign(prover);
+                    if ass.is_none() {
+                        // warn!(
+                        //     "No assignments for `{:?}` at this time.",
+                        //     prover
+                        // );
+                        continue;
+                    }                 
+                    let (batch_id, tokens) = ass.unwrap();
+                    let elf_kind = if pipeline.stage == Stage::Subblock {
+                        protocol::ELFKind::Subblock
+                    } else {
+                        protocol::ELFKind::Agg
+                    };                                
+                    let compute_job = protocol::ComputeJob {
+                        id: pipeline.id,
+                        kind: protocol::JobKind::SP1(protocol::SP1Op::Prove(
+                            protocol::ProveDetails {
+                                id: batch_id,
+                                elf_kind: elf_kind,
+                                tokens: tokens.into_iter()
+                                    .map(|t| protocol::InputToken {
+                                        hash: t.hash,
+                                        owner: t.owner.unwrap_or_else(|| my_peer_id.clone()).to_bytes(),
+                                    })
+                                    .collect::<Vec<protocol::InputToken>>(),
+                            }
+                        ))
+                    };
+                    let _req_id = swarm
+                        .behaviour_mut()
+                        .req_resp
+                        .send_request(
+                            prover,
+                            protocol::Request::Job(compute_job)
+                        );
+                    
+                }
             },
 
             // p = pipeline_init_future.select_next_some() => {
@@ -342,10 +367,27 @@ async fn main() -> anyhow::Result<()> {
                     }                      
                 },
 
-
-
                 // gossipsub events
-                SwarmEvent::Behaviour(GlobalBehaviourEvent::Gossipsub(gossipsub::Event::Message{..})) => {},
+                SwarmEvent::Behaviour(GlobalBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                    propagation_source: peer_id,
+                    message,
+                    ..
+                })) => {
+                    
+                    match bincode::deserialize::<protocol::WouldProve>(&message.data) {
+                        Ok(_) => {
+                            active_provers.insert(peer_id, Instant::now());
+                        },
+
+                        Err(e) => {
+                            warn!(
+                                "Gossip message decode error: `{:?}`",
+                                e
+                            );
+                        },
+
+                    };
+                },
 
                 // kademlia events
                 SwarmEvent::Behaviour(GlobalBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
@@ -385,111 +427,70 @@ async fn main() -> anyhow::Result<()> {
                 SwarmEvent::Behaviour(GlobalBehaviourEvent::ReqResp(request_response::Event::Message {
                     peer: prover,
                     message: request_response::Message::Request {
-                        request,
+                        request: protocol::Request::ProofIsReady(token),
                         channel,
                         //request_id,
                         ..
                     },
                     ..
                 })) => {                
-                    match request {
-                        // prover indicates her interest to prove                        
-                        protocol::Request::Would => {
-                            active_provers.insert(prover.clone());                            
-                            if pipeline.stage == Stage::Verify {
-                                continue;
-                            }                            
-                            let ass = pipeline.assign(&prover);
-                            if ass.is_none() {
-                                // warn!(
-                                //     "No assignments for `{:?}` at this time.",
-                                //     prover
-                                // );
-                                continue;
-                            }                 
-                            let (batch_id, tokens) = ass.unwrap();
-                            let elf_kind = if pipeline.stage == Stage::Subblock {
-                                protocol::ELFKind::Subblock
-                            } else {
-                                protocol::ELFKind::Agg
-                            };                                
-                            let compute_job = protocol::ComputeJob {
-                                id: pipeline.id,
-                                kind: protocol::JobKind::SP1(protocol::SP1Op::Prove(
-                                    protocol::ProveDetails {
-                                        id: batch_id,
-                                        elf_kind: elf_kind,
-                                        tokens: tokens.into_iter()
-                                            .map(|t| protocol::InputToken {
-                                                hash: t.hash,
-                                                owner: t.owner.unwrap_or_else(|| my_peer_id.clone()).to_bytes(),
-                                            })
-                                            .collect::<Vec<protocol::InputToken>>(),
-                                    }
-                                ))
-                            };
-                            if let Err(e) = swarm
-                                .behaviour_mut()
-                                .req_resp
-                                    .send_response(
-                                        channel,
-                                        protocol::Response::Job(compute_job)
-                                    )
-                            {
-                                warn!(
-                                    "Failed to send job(`{:?}`) to prover (`{:?}`): `{:?}`",
-                                    batch_id,
-                                    prover,
-                                    e
-                                );
-                            }                            
-                        },
-
-                        // prover has finished its job
-                        protocol::Request::ProofIsReady(token) => {
-                            if pipeline.id != token.job_id {
-                                warn!("Ignored unknown proof token: `{token:?}`");
-                                continue;
-                            }
-                            match token.kind {                          
-                                protocol::ProofKind::Subblock(batch_id) => {
-                                    info!(
-                                        "Subblock: a new proof for batch(`{:?}`).",
-                                        batch_id
-                                    );
-                                    pipeline.add_subblock_proof(
-                                        batch_id,
-                                        token.hash,
-                                        prover.clone()
-                                    );                                    
-                                },
-
-                                protocol::ProofKind::Agg(batch_id) => {
-                                    info!(
-                                        "Agg: a new proof for batch(`{:?}`).",
-                                        batch_id
-                                    );
-                                    pipeline.add_agg_proof(
-                                        batch_id,
-                                        token.hash,
-                                        prover.clone()
-                                    );
-                                    
-                                    let _req_id = swarm.behaviour_mut()
-                                        .blob_transfer
-                                        .send_request(
-                                            &prover,
-                                            blob_transfer::Request(token.hash.to_string())
-                                        );
-                                    info!(
-                                        "Requested agg proof blob(`{:?}`) from `{}`",
-                                        token.hash,
-                                        prover
-                                    );                                    
-                                },                          
-                            };
-                        },
+                    // prover has finished
+                    
+                    if pipeline.id != token.job_id {
+                        warn!("Ignored unknown proof token: `{token:?}`");
+                        let _ = swarm
+                            .behaviour_mut()
+                            .req_resp
+                            .send_response(
+                                channel,
+                                protocol::Response::Reject
+                            );
+                        continue;
                     }
+                    match token.kind {                          
+                        protocol::ProofKind::Subblock(batch_id) => {
+                            info!(
+                                "Subblock: a new proof for batch(`{:?}`).",
+                                batch_id
+                            );
+                            pipeline.add_subblock_proof(
+                                batch_id,
+                                token.hash,
+                                prover.clone()
+                            );                                    
+                        },
+
+                        protocol::ProofKind::Agg(batch_id) => {
+                            info!(
+                                "Agg: a new proof for batch(`{:?}`).",
+                                batch_id
+                            );
+                            pipeline.add_agg_proof(
+                                batch_id,
+                                token.hash,
+                                prover.clone()
+                            );
+                            
+                            let _req_id = swarm.behaviour_mut()
+                                .blob_transfer
+                                .send_request(
+                                    &prover,
+                                    blob_transfer::Request(token.hash.to_string())
+                                );
+                            info!(
+                                "Requested agg proof blob(`{:?}`) from `{}`",
+                                token.hash,
+                                prover
+                            );                                    
+                        },                          
+                    };
+                    let _ = swarm
+                        .behaviour_mut()
+                        .req_resp
+                        .send_response(
+                            channel,
+                            protocol::Response::Accept
+                        );
                 },
 
                 SwarmEvent::Behaviour(GlobalBehaviourEvent::ReqResp(request_response::Event::Message {
@@ -539,7 +540,7 @@ async fn main() -> anyhow::Result<()> {
                                 peer_id,
                                 blob.len() as f64 / 1024.0f64
                             );
-                        }                            
+                        }
                     } else {
                         warn!(
                             "The requested blob(`{}`) does not exist.",
